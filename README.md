@@ -144,16 +144,19 @@ Since FFmpeg binaries are too large for Git/GitHub, you must obtain them manuall
 
 ## Screenshots
 
-<table>
-  <tr>
-    <td align="center"><b>Main Interface</b><br/><img src="assets/home.png" width="280" alt="Main Interface"/></td>
-    <td align="center"><b>Download Panel</b><br/><img src="assets/download-panel.png" width="280" alt="Download Panel"/></td>
-  </tr>
-  <tr>
-    <td align="center"><b>History Tab</b><br/><img src="assets/history.png" width="280" alt="History Tab"/></td>
-    <td align="center"><b>Settings</b><br/><img src="assets/settings.png" width="280" alt="Settings"/></td>
-  </tr>
-</table>
+<div align="center">
+  <h3>Extension Popup Interface</h3>
+  <img src="assets/home.png" width="240" alt="Main Interface" style="margin: 10px;">
+  <img src="assets/download-panel.png" width="240" alt="Download Panel" style="margin: 10px;">
+  <img src="assets/history.png" width="240" alt="History Tab" style="margin: 10px;">
+</div>
+
+<br>
+
+<div align="center">
+  <h3>Widescreen Options & Settings</h3>
+  <img src="assets/settings.png" width="760" alt="Settings">
+</div>
 
 ---
 
