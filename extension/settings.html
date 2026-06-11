@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediaForge Settings</title>
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <main class="settings-shell">
+    <header class="settings-header">
+      <div>
+        <p class="eyebrow">MediaForge</p>
+        <h1>Settings</h1>
+      </div>
+      <span class="version" data-version>v3.0.0</span>
+    </header>
+
+    <section class="settings-section">
+      <h2>Download Folder</h2>
+      <div class="field-row">
+        <input id="downloadFolder" type="text" spellcheck="false" placeholder="C:\Users\YourUsername\Downloads">
+        <button id="chooseFolder" type="button">Choose</button>
+      </div>
+      <div class="actions">
+        <button id="saveFolder" type="button">Save Folder</button>
+        <button id="resetFolder" type="button" class="secondary">Reset Default</button>
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <h2>System Paths</h2>
+      <label>FFmpeg Path</label>
+      <input id="ffmpegPath" type="text" readonly>
+      <label>Backend URL</label>
+      <input id="backendUrl" type="text" readonly>
+    </section>
+
+    <section class="settings-section">
+      <h2>Theme</h2>
+      <select id="theme">
+        <option value="dark">Dark</option>
+        <option value="midnight">Midnight</option>
+        <option value="contrast">High Contrast</option>
+      </select>
+    </section>
+
+    <section class="settings-section">
+      <h2>About</h2>
+      <p class="about">MediaForge v1.0 uses a local Flask backend, yt-dlp, and FFmpeg to download YouTube videos, audio, and playlists with queue tracking. Crafted by KERZOX.</p>
+    </section>
+
+    <p class="status" id="status">Loading settings...</p>
+  </main>
+
+  <script src="settings.js"></script>
+</body>
+</html>

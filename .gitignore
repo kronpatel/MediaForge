@@ -1,0 +1,17 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+logs/
+*.log
+download_history.jsonl
+backend/download_history.jsonl
+backend/settings.json
+.vscode/
+Thumbs.db
+.DS_Store
+unused_files/
+*.lnk
+ffmpeg/
