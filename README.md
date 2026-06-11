@@ -121,9 +121,17 @@ Since FFmpeg binaries are too large for Git/GitHub, you must obtain them manuall
 
 ## Screenshots
 
-*(Screenshots will be added here in a future release)*
+### Main Interface
+![Main Interface](assets/home.png)
 
-![MediaForge Extension Interface Placeholder](https://via.placeholder.com/600x400?text=MediaForge+UI+Screenshot)
+### Download Panel
+![Download Panel](assets/download-panel.png)
+
+### History Tab
+![History Tab](assets/history.png)
+
+### Settings
+![Settings](assets/settings.png)
 
 ---
 
