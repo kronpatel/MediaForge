@@ -107,7 +107,7 @@ def default_settings() -> dict[str, Any]:
         "ffmpeg_path": FFMPEG_PATH,
         "backend_url": "http://127.0.0.1:5000",
         "theme": "dark",
-        "version": "1.0",
+        "version": "1.0.0",
     }
 
 
@@ -709,30 +709,3 @@ def get_queue_status() -> dict[str, Any]:
         "history": read_history(),
     }
 
-
-def download_mp3(url: str) -> str:
-    return run_download(url=url, ydl_opts=mp3_options(), label="MP3")
-
-
-def download_1080p(url: str) -> str:
-    return run_download(url=url, ydl_opts=video_options(max_height=1080), label="MP4 1080p")
-
-
-def download_4k(url: str) -> str:
-    return run_download(url=url, ydl_opts=video_options(max_height=2160), label="MP4 4K")
-
-
-def download_8k(url: str) -> str:
-    return run_download(
-        url=url,
-        ydl_opts=video_options(max_height=None, format_selector="bestvideo[height<=4320]+bestaudio/best[height<=4320]"),
-        label="MP4 8K",
-    )
-
-
-def download_playlist_mp3(url: str) -> str:
-    return run_download(url=url, ydl_opts=mp3_options(playlist=True), label="Playlist MP3")
-
-
-def download_playlist_video(url: str) -> str:
-    return run_download(url=url, ydl_opts=video_options(max_height=None, playlist=True), label="Playlist Video")
