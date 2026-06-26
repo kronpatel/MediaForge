@@ -93,6 +93,8 @@ _history_lock = threading.RLock()
 _worker_lock = threading.Lock()
 _worker_started = False
 _active_job_id: str | None = None
+_history_cache: list[dict[str, Any]] | None = None
+_history_last_mtime: float | None = None
 
 
 def now_iso() -> str:
@@ -124,9 +126,6 @@ def read_settings() -> dict[str, Any]:
     if not is_valid_download_folder(settings.get("download_folder", "")):
         settings["download_folder"] = DOWNLOAD_DIR
 
-    settings["ffmpeg_path"] = FFMPEG_PATH
-    settings["backend_url"] = "http://127.0.0.1:5000"
-    settings["version"] = "1.0"
     return settings
 
 
@@ -167,10 +166,18 @@ def get_download_dir() -> str:
 
 
 def select_download_folder() -> dict[str, Any]:
+    import sys
+    if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        raise KerzoxDownloadError("Graphical environment is not available on this Linux system. Please enter the folder path manually in settings.")
+
     try:
         import tkinter as tk
         from tkinter import filedialog
+    except ImportError:
+        logger.warning("Tkinter is not installed on this system")
+        raise KerzoxDownloadError("Graphical folder picker is not available (Tkinter missing). Please enter the folder path manually in settings.")
 
+    try:
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
@@ -179,9 +186,9 @@ def select_download_folder() -> dict[str, Any]:
             initialdir=get_download_dir(),
         )
         root.destroy()
-    except Exception as error:
+    except Exception:
         logger.exception("Folder picker failed")
-        raise KerzoxDownloadError(f"Folder picker failed: {error}") from error
+        raise KerzoxDownloadError("Folder picker failed to open.")
 
     if not selected_folder:
         raise KerzoxDownloadError("No folder selected")
@@ -219,34 +226,60 @@ def update_job(job_id: str, **changes: Any) -> None:
 
 
 def append_history(job: DownloadJob) -> None:
+    global _history_cache, _history_last_mtime
     os.makedirs(BASE_DIR, exist_ok=True)
     record = job_snapshot(job)
 
     with _history_lock:
         with open(HISTORY_FILE, "a", encoding="utf-8") as history_file:
             history_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if _history_cache is not None:
+            _history_cache.append(record)
+        if os.path.exists(HISTORY_FILE):
+            try:
+                _history_last_mtime = os.path.getmtime(HISTORY_FILE)
+            except OSError:
+                logger.warning("Could not update mtime after write")
 
 
 def read_history(limit: int = MAX_HISTORY_ITEMS) -> list[dict[str, Any]]:
-    if not os.path.exists(HISTORY_FILE):
-        return []
-
+    global _history_cache, _history_last_mtime
     with _history_lock:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as history_file:
-            lines = history_file.readlines()[-limit:]
+        file_exists = os.path.exists(HISTORY_FILE)
+        current_mtime = None
+        if file_exists:
+            try:
+                current_mtime = os.path.getmtime(HISTORY_FILE)
+            except OSError:
+                logger.warning("Could not check history file mtime")
 
-    history: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            history.append(json.loads(line))
-        except json.JSONDecodeError:
-            logger.warning("Skipping invalid history line")
+        if current_mtime != _history_last_mtime:
+            _history_cache = None
+            _history_last_mtime = current_mtime
 
-    history.reverse()
-    return history
+        if _history_cache is None:
+            _history_cache = []
+            if file_exists:
+                try:
+                    with open(HISTORY_FILE, "r", encoding="utf-8") as history_file:
+                        for line in history_file:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                _history_cache.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                logger.warning("Skipping invalid history line")
+                except OSError:
+                    logger.exception("Could not read history file")
+
+        result = _history_cache[-limit:]
+        result.reverse()
+        return result
 
 
 def clear_history() -> None:
+    global _history_cache, _history_last_mtime
     with _history_lock:
         if os.path.exists(HISTORY_FILE):
             try:
@@ -254,6 +287,8 @@ def clear_history() -> None:
             except OSError as error:
                 logger.exception("Could not delete history file")
                 raise KerzoxDownloadError(f"Could not delete history file: {error}") from error
+        _history_cache = []
+        _history_last_mtime = None
 
 
 def progress_hook_for(job_id: str) -> Callable[[dict[str, Any]], None]:
@@ -510,7 +545,8 @@ def run_download(url: str, ydl_opts: dict[str, Any], label: str) -> str:
 def execute_job(job: DownloadJob) -> None:
     global _active_job_id
 
-    _active_job_id = job.id
+    with _jobs_lock:
+        _active_job_id = job.id
     
     initial_message = f"Starting {job.label} download"
     if job.mode == "8k":
@@ -579,8 +615,7 @@ def execute_job(job: DownloadJob) -> None:
     with _jobs_lock:
         finished_job = _jobs[job.id]
         append_history(finished_job)
-
-    _active_job_id = None
+        _active_job_id = None
 
 
 def download_worker() -> None:
