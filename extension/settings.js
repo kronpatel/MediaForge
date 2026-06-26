@@ -44,7 +44,7 @@ function applySettings(settings) {
     downloadFolder.value = settings.download_folder || "";
     ffmpegPath.value = settings.ffmpeg_path || "";
     backendUrl.value = settings.backend_url || API_BASE_URL;
-    versionNode.textContent = `v${settings.version || "1.0.0"}`;
+    versionNode.textContent = `v${settings.version || "1.1.0"}`;
 }
 
 async function saveFolder() {

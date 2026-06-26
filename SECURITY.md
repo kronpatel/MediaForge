@@ -10,6 +10,7 @@ Only the latest release version of MediaForge is currently supported with securi
 
 | Version | Supported          |
 | ------- | ------------------ |
+| 1.1.x   | :white_check_mark: |
 | 1.0.x   | :white_check_mark: |
 | < 1.0   | :x:                |
 

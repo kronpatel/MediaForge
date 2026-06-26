@@ -40,6 +40,19 @@ Get up and running in 3 minutes:
 
 ---
 
+## Recent Improvements (v1.1.0)
+
+- **Backend Stability**: Enhanced active download job lifecycle and error handling, including graceful fallback when graphical environments (like Tkinter) are missing.
+- **Thread Safety**: Added thread-safe synchronization to track and manage active download job transitions securely.
+- **Extension Reliability**: Injected namespace guards and event listener cleanup to prevent duplicate execution paths and duplicate button injection on YouTube SPA navigation.
+- **Robust Polling**: Engineered resilient polling recovery with automatic retry logic to handle transient backend connection drops without UI crashes.
+- **Lifecycle Optimization**: Improved memory/CPU usage by automatically disconnecting `MutationObserver` instances and cleaning up timers on page transitions.
+- **Performance Enhancement**: Consolidated panel data fetch requests and eliminated redundant layout calculations.
+- **Settings & History Integrity**: Refined the settings loader to protect user configurations from being overwritten, and implemented an in-memory cache for download history with automatic file modification timestamp validation.
+- **Notification Compatibility**: Migrated extension notifications to use the standard PNG format to ensure cross-platform compatibility.
+
+---
+
 ## Requirements
 
 Before running MediaForge, ensure you have the following installed:

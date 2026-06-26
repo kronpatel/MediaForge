@@ -107,7 +107,7 @@ def default_settings() -> dict[str, Any]:
         "ffmpeg_path": FFMPEG_PATH,
         "backend_url": "http://127.0.0.1:5000",
         "theme": "dark",
-        "version": "1.0.0",
+        "version": "1.1.0",
     }
 
 

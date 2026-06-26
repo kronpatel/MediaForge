@@ -5,7 +5,7 @@
     window.__kerzox_mediaforge_initialized = true;
 
     const API_BASE_URL = "http://127.0.0.1:5000";
-    const VERSION = "1.0.0";
+    const VERSION = "1.1.0";
     const BUTTON_ID = "kerzox-download-button";
     const MENU_ID = "kerzox-download-menu";
     const STYLE_ID = "kerzox-download-style";
@@ -783,7 +783,7 @@
                 </div>
                 <div class="kerzox-footer">
                     <div style="display: flex; flex-direction: column; gap: 2px;">
-                        <span class="kerzox-subtitle" style="font-weight: 800; color: #fff;">MediaForge v1.0</span>
+                        <span class="kerzox-subtitle" style="font-weight: 800; color: #fff;">MediaForge v${VERSION}</span>
                         <span class="kerzox-subtitle">Crafted by KERZOX</span>
                     </div>
                     <button class="kerzox-icon-action" type="button" data-settings>${icon("settings")}Settings</button>
