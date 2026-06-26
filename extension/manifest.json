@@ -27,10 +27,10 @@
   ],
   "options_page": "settings.html",
   "icons": {
-    "128": "icon.svg"
+    "128": "icon.png"
   },
   "action": {
     "default_title": "MediaForge",
-    "default_icon": "icon.svg"
+    "default_icon": "icon.png"
   }
 }

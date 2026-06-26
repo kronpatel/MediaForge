@@ -1,6 +1,9 @@
 (function () {
     "use strict";
 
+    if (window.__kerzox_mediaforge_initialized) return;
+    window.__kerzox_mediaforge_initialized = true;
+
     const API_BASE_URL = "http://127.0.0.1:5000";
     const VERSION = "1.0";
     const BUTTON_ID = "kerzox-download-button";
@@ -22,7 +25,34 @@
     let statusTimer = null;
     let panelTimer = null;
     let activeJobId = "";
-    let notifiedJobIds = new Set();
+    const activeJobs = new Set();
+    const notifiedJobIds = new Set();
+    let activeTimeouts = [];
+    let observer = null;
+    let pollFailureCount = 0;
+    const MAX_POLL_FAILURES = 5;
+
+    function clearAllTimeouts() {
+        activeTimeouts.forEach((id) => window.clearTimeout(id));
+        activeTimeouts = [];
+        window.clearTimeout(retryTimer);
+    }
+
+    function connectObserver() {
+        disconnectObserver();
+        observer = new MutationObserver(scheduleInject);
+        observer.observe(document.documentElement, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+    function disconnectObserver() {
+        if (observer) {
+            observer.disconnect();
+            observer = null;
+        }
+    }
 
     function getPageInfo() {
         const url = new URL(window.location.href);
@@ -677,9 +707,11 @@
         document.getElementById(BUTTON_ID)?.remove();
         document.getElementById(MENU_ID)?.remove();
         document.getElementById(TITLE_SLOT_ID)?.remove();
+        clearAllTimeouts();
         window.clearTimeout(statusTimer);
         window.clearTimeout(panelTimer);
         activeJobId = "";
+        activeJobs.clear();
     }
 
     function createButton() {
@@ -843,7 +875,7 @@
         if (!isSupportedPage()) {
             currentPageKey = "";
             removeInjectedUi();
-            return false;
+            return true; // Unsupported page; do not retry.
         }
 
         const pageKey = getPageInfo().href;
@@ -1005,12 +1037,35 @@
         const eta = menu.querySelector("[data-progress-eta]");
         const size = menu.querySelector("[data-progress-size]");
 
-        if (statusText) statusText.textContent = job?.message || "Ready";
-        if (percentText) percentText.textContent = `${Math.round(progress)}%`;
-        if (fill) fill.style.width = `${progress}%`;
-        if (speed) speed.textContent = job?.speed ? job.speed : "Speed --";
-        if (eta) eta.textContent = job?.eta ? `ETA ${job.eta}` : "ETA --";
-        if (size) size.textContent = job?.downloaded ? `${job.downloaded}${job.total ? ` / ${job.total}` : ""}` : "Size --";
+        const targetMessage = job?.message || "Ready";
+        if (statusText && statusText.textContent !== targetMessage) {
+            statusText.textContent = targetMessage;
+        }
+        
+        const targetPercent = `${Math.round(progress)}%`;
+        if (percentText && percentText.textContent !== targetPercent) {
+            percentText.textContent = targetPercent;
+        }
+        
+        const targetFill = `${progress}%`;
+        if (fill && fill.style.width !== targetFill) {
+            fill.style.width = targetFill;
+        }
+
+        const targetSpeed = job?.speed ? job.speed : "Speed --";
+        if (speed && speed.textContent !== targetSpeed) {
+            speed.textContent = targetSpeed;
+        }
+
+        const targetEta = job?.eta ? `ETA ${job.eta}` : "ETA --";
+        if (eta && eta.textContent !== targetEta) {
+            eta.textContent = targetEta;
+        }
+
+        const targetSize = job?.downloaded ? `${job.downloaded}${job.total ? ` / ${job.total}` : ""}` : "Size --";
+        if (size && size.textContent !== targetSize) {
+            size.textContent = targetSize;
+        }
     }
 
     function setStatus(message, isLoading = false) {
@@ -1045,6 +1100,7 @@
             }
 
             activeJobId = data.job_id;
+            activeJobs.add(data.job_id);
             updateProgress(data.job);
             setLoading(true);
             refreshPanels();
@@ -1058,20 +1114,23 @@
     async function pollStatus() {
         if (!activeJobId) return;
 
+        window.clearTimeout(statusTimer);
+
         try {
             const response = await fetch(`${API_BASE_URL}/status/${activeJobId}`);
             const data = await response.json().catch(() => ({}));
 
             if (!response.ok || !data.success || !data.job) {
-                setStatus(data.message || "Could not read download status.");
-                return;
+                throw new Error(data.message || "Invalid status response");
             }
 
+            pollFailureCount = 0;
             const job = data.job;
             updateProgress(job);
             setLoading(["queued", "running", "downloading", "retrying"].includes(job.status));
 
             if (job.status === "completed") {
+                activeJobs.delete(activeJobId);
                 activeJobId = "";
                 notifyDownload("MediaForge download complete", job.filename || `${job.label} completed`, job.id);
                 refreshPanels();
@@ -1079,8 +1138,10 @@
             }
 
             if (job.status === "failed") {
+                activeJobs.delete(activeJobId);
                 activeJobId = "";
                 updateProgress({ ...job, message: job.error || "Download failed" });
+                notifyDownload("MediaForge download failed", job.error || "Download failed", job.id);
                 refreshPanels();
                 return;
             }
@@ -1088,7 +1149,18 @@
             statusTimer = window.setTimeout(pollStatus, 1200);
         } catch (error) {
             console.error("Kerzox status error:", error);
-            setStatus("Status endpoint unavailable.");
+            pollFailureCount++;
+
+            if (pollFailureCount >= MAX_POLL_FAILURES) {
+                activeJobs.delete(activeJobId);
+                activeJobId = "";
+                setStatus("Connection lost. Download status untracked.");
+                setLoading(false);
+                refreshPanels();
+            } else {
+                setStatus(`Backend offline. Retrying... (${pollFailureCount}/${MAX_POLL_FAILURES})`);
+                statusTimer = window.setTimeout(pollStatus, 2000);
+            }
         }
     }
 
@@ -1097,15 +1169,36 @@
         if (!menu || menu.hidden) return;
 
         try {
-            const [queueResponse, historyResponse] = await Promise.all([
-                fetch(`${API_BASE_URL}/queue`),
-                fetch(`${API_BASE_URL}/history`)
-            ]);
-            const queueData = await queueResponse.json().catch(() => ({}));
-            const historyData = await historyResponse.json().catch(() => ({}));
+            const response = await fetch(`${API_BASE_URL}/queue`);
+            const data = await response.json().catch(() => ({}));
+            const queueData = data.queue || {};
 
-            renderQueue(queueData.queue || {});
-            renderHistory(historyData.history || []);
+            renderQueue(queueData);
+            renderHistory(queueData.history || []);
+
+            if (activeJobs.size > 0) {
+                const historyList = queueData.history || [];
+                const failedList = queueData.failed || [];
+
+                historyList.forEach((job) => {
+                    if (activeJobs.has(job.id)) {
+                        if (job.status === "completed") {
+                            activeJobs.delete(job.id);
+                            notifyDownload("MediaForge download complete", job.filename || `${job.label} completed`, job.id);
+                        } else if (job.status === "failed") {
+                            activeJobs.delete(job.id);
+                            notifyDownload("MediaForge download failed", job.error || "Download failed", job.id);
+                        }
+                    }
+                });
+
+                failedList.forEach((job) => {
+                    if (activeJobs.has(job.id)) {
+                        activeJobs.delete(job.id);
+                        notifyDownload("MediaForge download failed", job.error || "Download failed", job.id);
+                    }
+                });
+            }
         } catch (error) {
             console.error("Kerzox panel refresh error:", error);
         }
@@ -1246,20 +1339,30 @@
     }
 
     function scheduleInject() {
-        window.clearTimeout(retryTimer);
-        retryTimer = window.setTimeout(() => {
+        clearAllTimeouts();
+        const id = window.setTimeout(() => {
             if (injectButton()) return;
 
-            window.setTimeout(injectButton, 500);
-            window.setTimeout(injectButton, 1500);
-            window.setTimeout(injectButton, 3000);
+            const t1 = window.setTimeout(() => { if (injectButton()) clearAllTimeouts(); }, 500);
+            const t2 = window.setTimeout(() => { if (injectButton()) clearAllTimeouts(); }, 1500);
+            const t3 = window.setTimeout(() => { if (injectButton()) clearAllTimeouts(); }, 3000);
+            activeTimeouts.push(t1, t2, t3);
         }, 120);
+        activeTimeouts.push(id);
     }
 
     function watchYouTubeNavigation() {
         const onNavigate = () => {
             currentPageKey = "";
-            scheduleInject();
+            clearAllTimeouts();
+            
+            if (isSupportedPage()) {
+                connectObserver();
+                scheduleInject();
+            } else {
+                disconnectObserver();
+                removeInjectedUi();
+            }
         };
 
         window.addEventListener("yt-navigate-finish", onNavigate);
@@ -1284,15 +1387,14 @@
         };
     }
 
-    const observer = new MutationObserver(scheduleInject);
-
     function start() {
         watchYouTubeNavigation();
-        observer.observe(document.documentElement, {
-            childList: true,
-            subtree: true
-        });
-        scheduleInject();
+        if (isSupportedPage()) {
+            connectObserver();
+            scheduleInject();
+        } else {
+            removeInjectedUi();
+        }
     }
 
     if (document.readyState === "loading") {
