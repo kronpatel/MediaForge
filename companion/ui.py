@@ -206,7 +206,7 @@ class CompanionWindow(ctk.CTk):
         self._current_page_name: str = ""
 
         # Apply saved theme preference before building UI
-        local_settings = read_local_settings()
+        local_settings = read_local_settings(logger)
         _saved_theme = local_settings.get("theme", "Dark")
         ctk.set_appearance_mode(_saved_theme)
 
@@ -466,8 +466,7 @@ class CompanionWindow(ctk.CTk):
             self._restart_btn.configure(state="disabled")
 
         # Let the tray update itself (tray_manager listens to manager state)
-        if self.tray_active and self._tray_manager:
-            self._tray_manager.refresh_menu()
+        pass
 
     # ------------------------------------------------------------------
     # Backend lifecycle button hooks

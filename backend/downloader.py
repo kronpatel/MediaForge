@@ -114,7 +114,6 @@ def default_settings() -> dict[str, Any]:
         "download_folder": DOWNLOAD_DIR,
         "ffmpeg_path": FFMPEG_PATH,
         "backend_url": "http://127.0.0.1:5000",
-        "theme": "dark",
         "version": "1.1.0",
     }
 
@@ -143,10 +142,6 @@ def write_settings(changes: dict[str, Any]) -> dict[str, Any]:
     if "download_folder" in changes:
         folder = str(changes.get("download_folder") or "").strip()
         settings["download_folder"] = folder if is_valid_download_folder(folder) else DOWNLOAD_DIR
-
-    if "theme" in changes:
-        theme = str(changes.get("theme") or "dark").strip().lower()
-        settings["theme"] = theme if theme in {"dark", "midnight", "contrast"} else "dark"
 
     if "ffmpeg_path" in changes:
         settings["ffmpeg_path"] = str(changes.get("ffmpeg_path") or "").strip()

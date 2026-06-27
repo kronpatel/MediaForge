@@ -46,7 +46,7 @@ def default_local_settings() -> dict[str, Any]:
     }
 
 
-def read_local_settings() -> dict[str, Any]:
+def read_local_settings(logger: AppLogger | None = None) -> dict[str, Any]:
     cfg = default_local_settings()
     if os.path.exists(LOCAL_SETTINGS_FILE):
         try:
@@ -56,6 +56,14 @@ def read_local_settings() -> dict[str, Any]:
                     cfg.update(data)
         except Exception:
             pass
+
+    # Task 4 — Theme Validation & Fallback on loading
+    theme = cfg.get("theme")
+    if theme not in ("Dark", "Light", "System"):
+        cfg["theme"] = "Dark"
+        if logger:
+            logger.log(f"Invalid theme preference '{theme}' detected. Falling back to 'Dark'.", "WARNING")
+
     # Sync auto_start_companion with Windows Registry state
     cfg["auto_start_companion"] = is_registry_autostart_enabled()
     return cfg
@@ -271,7 +279,7 @@ class SettingsPage(BasePage):
     def _load_all_settings(self) -> None:
         """Load backend and local settings and populate all form fields."""
         backend_settings = self.manager.get_settings()
-        local_settings = read_local_settings()
+        local_settings = read_local_settings(self.logger)
 
         # Backend URL: prefer backend response, then manager's current base_url,
         # then the universal default. Never leave it blank.
@@ -341,6 +349,13 @@ class SettingsPage(BasePage):
 
     def _validate_settings(self, vals: dict[str, Any]) -> tuple[bool, str]:
         """Validate settings values. Only validates Backend URL if it was changed."""
+        # 0. Theme Validation & Fallback (Task 4)
+        theme = vals.get("theme")
+        if theme not in ("Dark", "Light", "System"):
+            self.logger.log(f"Invalid theme palette selection '{theme}' detected. Falling back to 'Dark'.", "WARNING")
+            vals["theme"] = "Dark"
+            self._theme_var.set("Dark")
+
         # 1. Download folder must be a valid existing directory
         folder = vals["download_folder"]
         if not folder or not os.path.isdir(folder):

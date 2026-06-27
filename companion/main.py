@@ -45,6 +45,8 @@ from logger import AppLogger
 from backend_manager import BackendManager
 from ui import CompanionWindow
 from tray import TrayManager
+import customtkinter as ctk
+from settings_panel import read_local_settings
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +117,21 @@ def main() -> None:
         )
         root.destroy()
         sys.exit(1)
+
+    # Task 3: Load startup theme from local settings before creating main window
+    try:
+        local_settings = read_local_settings(logger)
+        saved_theme = local_settings.get("theme", "Dark")
+        if saved_theme not in ("Dark", "Light", "System"):
+            logger.warning(f"Invalid theme preference '{saved_theme}' found; falling back to 'Dark'.")
+            saved_theme = "Dark"
+        ctk.set_appearance_mode(saved_theme)
+    except Exception as exc:
+        logger.warning(f"Failed to load or apply startup theme: {exc}. Falling back to 'Dark'.")
+        try:
+            ctk.set_appearance_mode("Dark")
+        except Exception:
+            pass
 
     try:
         window = CompanionWindow(manager=manager, logger=logger)
