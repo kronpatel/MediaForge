@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from updater import UpdateManager, COMPANION_VERSION, CACHE_FILE, TEMP_DOWNLOAD_FILE, FINAL_DOWNLOAD_FILE
+from updater import UpdateManager, COMPANION_VERSION, CACHE_FILE, TEMP_DOWNLOAD_FILE, FINAL_DOWNLOAD_FILE, UPDATES_DIR
 
 class DummyLogger:
     def info(self, msg, *args, **kwargs): pass
@@ -208,6 +208,79 @@ class TestUpdateManager(unittest.TestCase):
         with patch.object(self.updater, "_notify") as mock_notify:
             self.updater.check_for_updates(force=True)
             mock_notify.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # 7. Installer Retention & Lock Handling
+    # ------------------------------------------------------------------
+
+    @patch("requests.Session.get")
+    def test_installer_retention_and_lock_handling(self, mock_get):
+        # Create a mock existing installer
+        with open(FINAL_DOWNLOAD_FILE, "wb") as fh:
+            fh.write(b"original installer data")
+            
+        self.updater._asset_url = "http://dummy-url/setup.exe"
+        self.updater._asset_size = 100
+        
+        mock_response = MagicMock()
+        mock_response.headers = {"content-length": "100"}
+        mock_response.iter_content.return_value = [b"b" * 100]
+        mock_get.return_value = mock_response
+
+        # Mock os.rename for FINAL_DOWNLOAD_FILE to bak_file raising PermissionError (locked)
+        # Let's patch os.rename to raise PermissionError when the source is FINAL_DOWNLOAD_FILE
+        original_rename = os.rename
+        def mock_rename(src, dst):
+            if src == FINAL_DOWNLOAD_FILE:
+                raise PermissionError("Access is denied (mocked file lock)")
+            return original_rename(src, dst)
+
+        with patch("os.rename", side_effect=mock_rename):
+            self.updater.download_update()
+            time.sleep(0.5)
+            
+        # Assert the existing installer is untouched
+        self.assertTrue(os.path.exists(FINAL_DOWNLOAD_FILE))
+        with open(FINAL_DOWNLOAD_FILE, "rb") as fh:
+            data = fh.read()
+        self.assertEqual(data, b"original installer data")
+        
+        # Assert the newly downloaded installer is kept as .new
+        new_file = os.path.join(UPDATES_DIR, "MediaForge-Setup.new")
+        self.assertTrue(os.path.exists(new_file))
+        with open(new_file, "rb") as fh:
+            new_data = fh.read()
+        self.assertEqual(new_data, b"b" * 100)
+
+    # ------------------------------------------------------------------
+    # 8. GitHub Rate Limit Handling
+    # ------------------------------------------------------------------
+
+    @patch("requests.Session.get")
+    def test_github_rate_limit_handling(self, mock_get):
+        # Mock 403 response with X-RateLimit-Reset header
+        reset_timestamp = time.time() + 600.0 # 10 mins in future
+        mock_response = MagicMock(status_code=403)
+        mock_response.headers = {"X-RateLimit-Reset": str(reset_timestamp)}
+        mock_get.return_value = mock_response
+
+        notifications = []
+        def _cb(status, progress, err):
+            notifications.append(status)
+        self.updater.register_callback(_cb)
+
+        # Force check
+        self.updater.check_for_updates(force=True)
+        time.sleep(0.5)
+
+        self.assertIn("Rate Limited", notifications)
+        self.assertAlmostEqual(self.updater._rate_limit_reset_until, reset_timestamp, places=1)
+
+        # Subsequent check (not forced) should be skipped
+        with patch.object(self.updater, "_fetch_with_retries") as mock_fetch:
+            self.updater.check_for_updates(force=False)
+            time.sleep(0.2)
+            mock_fetch.assert_not_called()
 
 
 if __name__ == "__main__":

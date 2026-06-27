@@ -62,6 +62,7 @@ class UpdateManager:
         self._asset_url = ""
         self._asset_size = 0
         self._last_checked = 0.0
+        self._rate_limit_reset_until = 0.0
 
         # Create shared HTTP Session
         self._session = requests.Session()
@@ -138,6 +139,16 @@ class UpdateManager:
         Triggers a check for updates. If force=False, uses valid cached info (<1 hour old).
         Otherwise fetches fresh release metadata from GitHub API on a background thread.
         """
+        is_rate_limited = False
+        with self._lock:
+            if time.time() < self._rate_limit_reset_until:
+                is_rate_limited = True
+
+        if not force and is_rate_limited:
+            self.logger.warning("Update check skipped: GitHub API is currently rate limited.")
+            self._notify("Rate Limited", 0.0)
+            return
+
         with self._lock:
             if self._check_running:
                 self.logger.info("Update check already running. Request ignored.")
@@ -216,26 +227,31 @@ class UpdateManager:
             if self._download_running:
                 self.logger.warning("Download already in progress. Request ignored.")
                 return
-            if not self._asset_url:
-                self.logger.error("No update asset download URL available.")
-                self._notify("Failed", 0.0, "No asset URL found.")
-                return
-            self._download_running = True
-            self._download_stop_event.clear()
             asset_url = self._asset_url
             expected_size = self._asset_size
+
+        if not asset_url:
+            self.logger.error("No update asset download URL available.")
+            self._notify("Failed", 0.0, "No asset URL found.")
+            return
+
+        with self._lock:
+            self._download_running = True
+            self._download_stop_event.clear()
 
         def _downloader():
             try:
                 self._notify("Downloading", 0.0)
                 self.logger.info(f"Downloading update asset from {asset_url}...")
                 
-                # Delete any stale temp downloads
-                if os.path.exists(TEMP_DOWNLOAD_FILE):
-                    try:
-                        os.remove(TEMP_DOWNLOAD_FILE)
-                    except OSError:
-                        pass
+                # Delete any stale temp downloads and .new files (Task 5)
+                new_file = os.path.join(UPDATES_DIR, "MediaForge-Setup.new")
+                for f in (TEMP_DOWNLOAD_FILE, new_file):
+                    if os.path.exists(f):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
 
                 # Stream request
                 session = self._get_session()
@@ -279,13 +295,51 @@ class UpdateManager:
                 sha256_hash = hasher.hexdigest()
                 self.logger.info(f"Verification success. SHA-256: {sha256_hash}")
 
-                # Safely rename
+                # Safely replace existing file with backup/restore logic and lock detection (Task 1 & Task 5)
+                bak_file = os.path.join(UPDATES_DIR, "MediaForge-Setup.bak")
+                has_backup = False
+                is_locked = False
+
                 if os.path.exists(FINAL_DOWNLOAD_FILE):
                     try:
-                        os.remove(FINAL_DOWNLOAD_FILE)
-                    except OSError:
-                        pass
-                os.rename(TEMP_DOWNLOAD_FILE, FINAL_DOWNLOAD_FILE)
+                        if os.path.exists(bak_file):
+                            try:
+                                os.remove(bak_file)
+                            except OSError:
+                                pass
+                        os.rename(FINAL_DOWNLOAD_FILE, bak_file)
+                        has_backup = True
+                    except (OSError, PermissionError) as exc:
+                        self.logger.warning(f"Existing installer is locked/in-use: {exc}")
+                        is_locked = True
+
+                if is_locked:
+                    # Keep the newly downloaded installer as MediaForge-Setup.new (Task 5)
+                    if os.path.exists(new_file):
+                        try:
+                            os.remove(new_file)
+                        except OSError:
+                            pass
+                    os.rename(TEMP_DOWNLOAD_FILE, new_file)
+                    raise PermissionError("Installer is currently in use and must be closed before replacement.")
+
+                # Proceed to rename TEMP_DOWNLOAD_FILE to FINAL_DOWNLOAD_FILE
+                try:
+                    os.rename(TEMP_DOWNLOAD_FILE, FINAL_DOWNLOAD_FILE)
+                    # Clean up backup
+                    if has_backup and os.path.exists(bak_file):
+                        try:
+                            os.remove(bak_file)
+                        except OSError:
+                            pass
+                except Exception as exc:
+                    # Rename failed, restore backup if available
+                    if has_backup:
+                        try:
+                            os.rename(bak_file, FINAL_DOWNLOAD_FILE)
+                        except OSError:
+                            pass
+                    raise exc
 
                 self._notify("Completed", 100.0)
                 self.logger.info(f"Update download completed successfully: {FINAL_DOWNLOAD_FILE}")
@@ -385,6 +439,26 @@ class UpdateManager:
                 return None
             try:
                 resp = session.get(url, timeout=5.0)
+
+                # Check for rate limit status (HTTP 403)
+                if resp.status_code == 403:
+                    reset_header = resp.headers.get("X-RateLimit-Reset")
+                    if reset_header:
+                        try:
+                            reset_time = float(reset_header)
+                        except ValueError:
+                            reset_time = time.time() + 3600.0
+                    else:
+                        reset_time = time.time() + 3600.0
+
+                    with self._lock:
+                        self._rate_limit_reset_until = reset_time
+
+                    self.logger.warning(f"GitHub API rate limit exceeded. Suspending checks until timestamp {reset_time}.")
+                    self._notify("Rate Limited", 0.0)
+                    self._save_cache()
+                    return None
+
                 resp.raise_for_status()
                 return resp.json()
             except requests.RequestException as exc:
@@ -422,7 +496,7 @@ class UpdateManager:
                 break
 
             if auto_check and not self._stop_event.is_set():
-                self.check_for_updates(force=True)
+                self.check_for_updates(force=False)
 
     # ------------------------------------------------------------------
     # Cache Persistence
@@ -445,17 +519,23 @@ class UpdateManager:
             self._last_checked = float(data.get("last_checked") or 0.0)
             self._html_url = data.get("html_url", "")
             self._last_notified_version = data.get("last_notified_version", "")
+            self._rate_limit_reset_until = float(data.get("rate_limit_reset_until") or 0.0)
         except Exception:
-            # Corrupted cache recovery -> reset parameters to default
+            # Corrupted cache recovery -> reset parameters to default and recreate cache (Task 2)
             self._latest_version = "v—"
             self._release_notes = ""
             self._published = "Never"
             self._asset_url = ""
             self._asset_size = 0
             self._last_checked = 0.0
+            self._rate_limit_reset_until = 0.0
+            try:
+                self._save_cache()
+            except Exception:
+                pass
 
     def _save_cache(self) -> None:
-        """Write release metadata snapshot into local cache."""
+        """Write release metadata snapshot into local cache atomically (Task 4)."""
         try:
             data = {
                 "latest_version": self._latest_version,
@@ -466,8 +546,19 @@ class UpdateManager:
                 "last_checked": self._last_checked,
                 "html_url": getattr(self, "_html_url", ""),
                 "last_notified_version": getattr(self, "_last_notified_version", ""),
+                "rate_limit_reset_until": getattr(self, "_rate_limit_reset_until", 0.0),
             }
-            with open(CACHE_FILE, "w", encoding="utf-8") as fh:
+            cache_dir = os.path.dirname(CACHE_FILE)
+            tmp_file = os.path.join(cache_dir, "update_cache.tmp")
+            with open(tmp_file, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, indent=2, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_file, CACHE_FILE)
         except Exception:
-            pass
+            tmp_file = os.path.join(os.path.dirname(CACHE_FILE), "update_cache.tmp")
+            if os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except OSError:
+                    pass

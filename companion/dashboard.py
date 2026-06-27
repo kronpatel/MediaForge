@@ -440,6 +440,9 @@ class DashboardPage(BasePage):
         elif status == "Offline":
             status_text = "⚠ Offline"
             color = "#f59e0b"
+        elif status == "Rate Limited":
+            status_text = "Rate Limited"
+            color = "#f59e0b"
         else:
             if has_up:
                 status_text = "⬇ Update Available"
