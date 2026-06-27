@@ -88,6 +88,11 @@ class DownloadJob:
 
 import time
 
+# ── Lock Acquisition Ordering ──────────────────────────────────────────────
+# To prevent deadlocks, code requiring both locks must always nest them:
+#   with _jobs_lock:
+#       with _history_lock:
+# ───────────────────────────────────────────────────────────────────────────
 _download_queue: queue.Queue[str] = queue.Queue()
 _jobs: dict[str, DownloadJob] = {}
 _jobs_lock = threading.RLock()
@@ -720,46 +725,47 @@ def get_queue_status() -> dict[str, Any]:
 
 
 def get_statistics() -> dict[str, Any]:
-    history = read_history(limit=1000)
-
-    completed_count = sum(1 for item in history if item.get("status") == "completed")
-    failed_count = sum(1 for item in history if item.get("status") == "failed")
-    total_downloads = completed_count + failed_count
-
-    today_prefix = datetime.now(timezone.utc).date().isoformat()
-    downloads_today = sum(
-        1 for item in history
-        if (item.get("completed_at") and item.get("completed_at").startswith(today_prefix))
-        or (item.get("queued_at") and item.get("queued_at").startswith(today_prefix))
-    )
-
-    if total_downloads > 0:
-        success_rate = round((completed_count / total_downloads) * 100.0, 1)
-        failure_rate = round((failed_count / total_downloads) * 100.0, 1)
-    else:
-        success_rate = 100.0
-        failure_rate = 0.0
-
     with _jobs_lock:
-        queue_length = sum(1 for job in _jobs.values() if job.status in ("queued", "downloading"))
-        active_count = sum(1 for job in _jobs.values() if job.status == "downloading")
-        active_speed = ""
-        active_speeds = [job.speed for job in _jobs.values() if job.status == "downloading" and job.speed]
-        if active_speeds:
-            active_speed = active_speeds[0]
+        with _history_lock:
+            history = read_history(limit=1000)
 
-    uptime = time.monotonic() - _START_TIME
+            completed_count = sum(1 for item in history if item.get("status") == "completed")
+            failed_count = sum(1 for item in history if item.get("status") == "failed")
+            total_downloads = completed_count + failed_count
 
-    return {
-        "downloads_today": downloads_today,
-        "total_downloads": total_downloads,
-        "completed_count": completed_count,
-        "failed_count": failed_count,
-        "success_rate": success_rate,
-        "failure_rate": failure_rate,
-        "queue_length": queue_length,
-        "active_jobs": active_count,
-        "backend_uptime": int(uptime),
-        "average_speed": active_speed or "0 KB/s"
-    }
+            today_prefix = datetime.now(timezone.utc).date().isoformat()
+            downloads_today = sum(
+                1 for item in history
+                if (item.get("completed_at") and item.get("completed_at").startswith(today_prefix))
+                or (item.get("queued_at") and item.get("queued_at").startswith(today_prefix))
+            )
+
+            if total_downloads > 0:
+                success_rate = round((completed_count / total_downloads) * 100.0, 1)
+                failure_rate = round((failed_count / total_downloads) * 100.0, 1)
+            else:
+                success_rate = 100.0
+                failure_rate = 0.0
+
+            queue_length = sum(1 for job in _jobs.values() if job.status in ("queued", "downloading"))
+            active_count = sum(1 for job in _jobs.values() if job.status == "downloading")
+            active_speed = ""
+            active_speeds = [job.speed for job in _jobs.values() if job.status == "downloading" and job.speed]
+            if active_speeds:
+                active_speed = active_speeds[0]
+
+            uptime = time.monotonic() - _START_TIME
+
+            return {
+                "downloads_today": downloads_today,
+                "total_downloads": total_downloads,
+                "completed_count": completed_count,
+                "failed_count": failed_count,
+                "success_rate": success_rate,
+                "failure_rate": failure_rate,
+                "queue_length": queue_length,
+                "active_jobs": active_count,
+                "backend_uptime": int(uptime),
+                "average_speed": active_speed or "0 KB/s"
+            }
 

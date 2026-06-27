@@ -41,6 +41,7 @@ class DashboardController:
         self._subscribers: list[BasePage] = []
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._poll_event = threading.Event()
         self._lock = threading.Lock()
         self._last_data: dict[str, Any] = {"offline": True}
         self._notification_sent: bool = False
@@ -53,11 +54,16 @@ class DashboardController:
         with self._lock:
             self._poll_interval = max(1.0, min(seconds, 60.0))
 
+    def trigger_poll(self) -> None:
+        """Force an immediate poll tick, waking up the sleep block if waiting."""
+        self._poll_event.set()
+
     def start(self) -> None:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
             self._stop_event.clear()
+            self._poll_event.clear()
             self._thread = threading.Thread(
                 target=self._poll_loop,
                 name="UnifiedPollerThread",
@@ -66,8 +72,9 @@ class DashboardController:
             self._thread.start()
             self._logger.info("Unified background polling thread started.")
 
-    def stop(self) -> None:
+    def shutdown(self) -> None:
         self._stop_event.set()
+        self._poll_event.set()  # wake up poller if waiting
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
             self._logger.info("Unified background polling thread stopped.")
@@ -78,6 +85,7 @@ class DashboardController:
 
     def _poll_loop(self) -> None:
         while not self._stop_event.is_set():
+            self._poll_event.clear()
             status = self._manager.status
             
             if status == BackendStatus.RUNNING:
@@ -103,10 +111,8 @@ class DashboardController:
             else:
                 self._handle_offline()
 
-            # Sleep in small increments to respond quickly to shutdown events
-            sleep_deadline = time.monotonic() + self._poll_interval
-            while time.monotonic() < sleep_deadline and not self._stop_event.is_set():
-                time.sleep(0.2)
+            # Wait for next interval or immediate trigger
+            self._poll_event.wait(self._poll_interval)
 
     def _handle_offline(self) -> None:
         data = {

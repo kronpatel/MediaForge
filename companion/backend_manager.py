@@ -92,6 +92,11 @@ class BackendManager:
         self._is_managed: bool = False
         self._lock = threading.Lock()
 
+        # Shared HTTP Session & connection states
+        self._session: requests.Session | None = requests.Session()
+        self._has_transport_error: bool = False
+        self._logged_after_shutdown: bool = False
+
         # Config (populated in _load_config)
         self._host: str = DEFAULT_HOST
         self._port: int = DEFAULT_PORT
@@ -304,6 +309,16 @@ class BackendManager:
         with self._lock:
             return self._is_managed
 
+    def close_session(self) -> None:
+        """Close the shared HTTP session. Idempotent and thread-safe."""
+        with self._lock:
+            if self._session is not None:
+                try:
+                    self._session.close()
+                except Exception:
+                    pass
+                self._session = None
+
     def shutdown(self) -> None:
         """
         Called when the Companion is closing.
@@ -311,6 +326,7 @@ class BackendManager:
         """
         self._stop_event.set()
         self._monitor_active.set()  # unblock the wait so thread can exit
+        self.close_session()
 
     # ------------------------------------------------------------------
     # Config
@@ -353,6 +369,44 @@ class BackendManager:
             result = sock.connect_ex((self._host, self._port))
             return result == 0
 
+    def _send_request(self, method: str, path_or_url: str, **kwargs) -> requests.Response | None:
+        """
+        Send an HTTP request using the shared requests.Session.
+        Recreates the session on connection failure to recover stale keep-alive sockets.
+        Idempotent post-shutdown check blocks new requests.
+        """
+        with self._lock:
+            if self._session is None:
+                if not getattr(self, "_logged_after_shutdown", False):
+                    self._logger.warning("Attempted to make HTTP request after backend manager shutdown.")
+                    self._logged_after_shutdown = True
+                return None
+            session = self._session
+
+        try:
+            url = path_or_url if path_or_url.startswith("http") else f"{self.base_url}{path_or_url}"
+            resp = session.request(method, url, **kwargs)
+            self._has_transport_error = False
+            return resp
+        except requests.RequestException as exc:
+            # Recreate session on transport failure
+            with self._lock:
+                if self._session is not None:
+                    try:
+                        self._session.close()
+                    except Exception:
+                        pass
+                    self._session = requests.Session()
+
+            if not getattr(self, "_has_transport_error", False):
+                self._logger.warning(
+                    f"Backend connection transport error ({exc}). "
+                    "Recreated shared requests.Session to recover on the next polling cycle."
+                )
+                self._has_transport_error = True
+
+            return None
+
     def _ping(self) -> bool:
         """
         Verify that the service on the configured URL is the MediaForge backend.
@@ -363,26 +417,22 @@ class BackendManager:
           * name == "MediaForge Backend"
           * status == "running"
 
-        Returns True on success, False silently on any failure so callers
-        (startup detection, health monitor) decide whether to log a warning.
+        Returns True on success, False silently on any failure.
         """
-        try:
-            resp = requests.get(self.base_url, timeout=HTTP_TIMEOUT)
-            if resp.status_code != 200:
-                return False
-            try:
-                data = resp.json()
-            except ValueError:
-                return False
-            if not isinstance(data, dict):
-                return False
-            return (
-                data.get("name") == "MediaForge Backend"
-                and data.get("status") == "running"
-                and data.get("version") is not None
-            )
-        except requests.RequestException:
+        resp = self._send_request("GET", self.base_url, timeout=HTTP_TIMEOUT)
+        if resp is None or resp.status_code != 200:
             return False
+        try:
+            data = resp.json()
+        except ValueError:
+            return False
+        if not isinstance(data, dict):
+            return False
+        return (
+            data.get("name") == "MediaForge Backend"
+            and data.get("status") == "running"
+            and data.get("version") is not None
+        )
 
     def fetch_version(self) -> str | None:
         """
@@ -390,82 +440,82 @@ class BackendManager:
 
         Returns the version string (e.g. '1.1.0') or None on failure.
         """
-        try:
-            resp = requests.get(self.base_url, timeout=HTTP_TIMEOUT)
-            if resp.status_code == 200:
+        resp = self._send_request("GET", self.base_url, timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
                 return resp.json().get("version")
-        except Exception:
-            pass
+            except Exception:
+                pass
         return None
 
     def get_queue(self) -> list[dict[str, Any]]:
         """Fetch the list of queued and downloading jobs from the backend."""
-        try:
-            resp = requests.get(f"{self.base_url}/queue", timeout=HTTP_TIMEOUT)
-            if resp.status_code == 200:
+        resp = self._send_request("GET", "/queue", timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
                 data = resp.json()
                 if data.get("success"):
                     return data.get("queue", [])
-        except Exception as exc:
-            self._logger.debug_log(f"Failed to fetch queue from backend: {exc}")
+            except Exception:
+                pass
         return []
 
     def get_history(self) -> list[dict[str, Any]]:
         """Fetch the history list from the backend."""
-        try:
-            resp = requests.get(f"{self.base_url}/history", timeout=HTTP_TIMEOUT)
-            if resp.status_code == 200:
+        resp = self._send_request("GET", "/history", timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
                 data = resp.json()
                 if data.get("success"):
                     return data.get("history", [])
-        except Exception as exc:
-            self._logger.debug_log(f"Failed to fetch history from backend: {exc}")
+            except Exception:
+                pass
         return []
 
     def get_stats(self) -> dict[str, Any]:
         """Fetch backend statistics from the /stats endpoint."""
-        try:
-            resp = requests.get(f"{self.base_url}/stats", timeout=HTTP_TIMEOUT)
-            if resp.status_code == 200:
+        resp = self._send_request("GET", "/stats", timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
                 data = resp.json()
                 if data.get("success"):
                     return data.get("stats", {})
-        except Exception as exc:
-            self._logger.debug_log(f"Failed to fetch stats from backend: {exc}")
+            except Exception:
+                pass
         return {}
 
     def get_settings(self) -> dict[str, Any]:
         """Fetch settings from the backend."""
-        try:
-            resp = requests.get(f"{self.base_url}/settings", timeout=HTTP_TIMEOUT)
-            if resp.status_code == 200:
+        resp = self._send_request("GET", "/settings", timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
                 data = resp.json()
                 if data.get("success"):
                     return data.get("settings", {})
-        except Exception as exc:
-            self._logger.debug_log(f"Failed to fetch settings from backend: {exc}")
+            except Exception:
+                pass
         return {}
 
     def save_settings(self, changes: dict[str, Any]) -> dict[str, Any] | None:
         """Save settings updates to the backend."""
-        try:
-            resp = requests.post(f"{self.base_url}/settings", json=changes, timeout=HTTP_TIMEOUT)
-            if resp.status_code == 200:
+        resp = self._send_request("POST", "/settings", json=changes, timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
                 data = resp.json()
                 if data.get("success"):
                     return data.get("settings")
-        except Exception as exc:
-            self._logger.debug_log(f"Failed to save settings to backend: {exc}")
+            except Exception:
+                pass
         return None
 
     def clear_history_api(self) -> bool:
         """Clear download history in the backend."""
-        try:
-            resp = requests.post(f"{self.base_url}/history/clear", timeout=HTTP_TIMEOUT)
-            if resp.status_code == 200:
+        resp = self._send_request("POST", "/history/clear", timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
                 return resp.json().get("success", False)
-        except Exception as exc:
-            self._logger.debug_log(f"Failed to clear history: {exc}")
+            except Exception:
+                pass
         return False
 
     # ------------------------------------------------------------------

@@ -146,7 +146,7 @@ def main() -> None:
         # Stop unified poller thread
         if hasattr(window, "_dashboard_controller") and window._dashboard_controller:
             try:
-                window._dashboard_controller.stop()
+                window._dashboard_controller.shutdown()
             except Exception:
                 pass
 

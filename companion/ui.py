@@ -433,6 +433,10 @@ class CompanionWindow(ctk.CTk):
             ver = self._manager.fetch_version()
             self._version_lbl.configure(text=f"Version: v{ver}" if ver else "Version: v—")
 
+            # Trigger immediate poller tick for instant online recovery sync
+            if hasattr(self, "_dashboard_controller") and self._dashboard_controller:
+                self._dashboard_controller.trigger_poll()
+
         elif status in (BackendStatus.STOPPED, BackendStatus.CRASHED):
             self._status_lbl.configure(text_color=_CLR_RED)
             self._start_btn.configure(state="normal")
@@ -564,7 +568,7 @@ class CompanionWindow(ctk.CTk):
         
         # Stop polling thread first
         if hasattr(self, "_dashboard_controller") and self._dashboard_controller:
-            self._dashboard_controller.stop()
+            self._dashboard_controller.shutdown()
 
         # Stop pystray icon
         if self.tray_active and self._tray_manager:
