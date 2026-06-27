@@ -282,6 +282,226 @@ class TestUpdateManager(unittest.TestCase):
             time.sleep(0.2)
             mock_fetch.assert_not_called()
 
+    # ------------------------------------------------------------------
+    # 9. Release Asset Validation & Deterministic Selection (Task 3)
+    # ------------------------------------------------------------------
+
+    @patch("requests.Session.get")
+    def test_release_only_source_archives(self, mock_get):
+        # Mock release containing only source archives
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {
+            "tag_name": "v2.0.0",
+            "published_at": "2026-06-27T00:00:00Z",
+            "body": "Release notes...",
+            "html_url": "http://github.com/release",
+            "assets": [
+                {
+                    "name": "source.zip",
+                    "state": "uploaded",
+                    "size": 1000,
+                    "browser_download_url": "http://github.com/source.zip"
+                },
+                {
+                    "name": "source.tar.gz",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/source.tar.gz"
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        notifications = []
+        def _cb(status, progress, err):
+            notifications.append(status)
+        self.updater.register_callback(_cb)
+
+        self.updater.check_for_updates(force=True)
+        time.sleep(0.5)
+
+        self.assertIn("Installer Not Found", notifications)
+        self.assertFalse(self.updater.has_update())
+        self.assertEqual(self.updater.get_latest_version(), "v2.0.0")
+
+    @patch("requests.Session.get")
+    def test_release_valid_installer_present(self, mock_get):
+        # Mock release with setup and source archives
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {
+            "tag_name": "v2.0.0",
+            "published_at": "2026-06-27T00:00:00Z",
+            "body": "Notes",
+            "html_url": "http://github.com/release",
+            "assets": [
+                {
+                    "name": "source.zip",
+                    "state": "uploaded",
+                    "size": 1000,
+                    "browser_download_url": "http://github.com/source.zip"
+                },
+                {
+                    "name": "MediaForge-Setup.exe",
+                    "state": "uploaded",
+                    "size": 9999,
+                    "browser_download_url": "http://github.com/MediaForge-Setup.exe"
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        self.updater.check_for_updates(force=True)
+        time.sleep(0.5)
+
+        self.assertTrue(self.updater.has_update())
+        self.assertEqual(self.updater._asset_url, "http://github.com/MediaForge-Setup.exe")
+
+    @patch("requests.Session.get")
+    def test_deterministic_sorting_timestamps(self, mock_get):
+        # Mock release with multiple installer assets with created_at timestamps
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {
+            "tag_name": "v2.0.0",
+            "published_at": "2026-06-27T00:00:00Z",
+            "body": "Notes",
+            "assets": [
+                {
+                    "name": "MediaForge-Setup-old.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/old.exe",
+                    "created_at": "2026-06-27T01:00:00Z"
+                },
+                {
+                    "name": "MediaForge-Setup-newest.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/newest.exe",
+                    "created_at": "2026-06-27T03:00:00Z"
+                },
+                {
+                    "name": "MediaForge-Setup-mid.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/mid.exe",
+                    "created_at": "2026-06-27T02:00:00Z"
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        self.updater.check_for_updates(force=True)
+        time.sleep(0.5)
+
+        self.assertEqual(self.updater._asset_url, "http://github.com/newest.exe")
+
+    @patch("requests.Session.get")
+    def test_asset_integrity_checks(self, mock_get):
+        # Mock release with invalid installer state, size, or URL
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {
+            "tag_name": "v2.0.0",
+            "assets": [
+                {
+                    "name": "MediaForge-Setup-not-uploaded.exe",
+                    "state": "uploading",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/nu.exe"
+                },
+                {
+                    "name": "MediaForge-Setup-zero-size.exe",
+                    "state": "uploaded",
+                    "size": 0,
+                    "browser_download_url": "http://github.com/zero.exe"
+                },
+                {
+                    "name": "MediaForge-Setup-no-url.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": ""
+                },
+                {
+                    "name": "MediaForge-Setup-valid.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/valid.exe"
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        self.updater.check_for_updates(force=True)
+        time.sleep(0.5)
+
+        self.assertEqual(self.updater._asset_url, "http://github.com/valid.exe")
+
+    @patch("requests.Session.get")
+    def test_sorting_fallback_updated_at_and_missing_timestamps(self, mock_get):
+        # Mock release where created_at is missing but updated_at is present, and some have no timestamps
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {
+            "tag_name": "v2.0.0",
+            "assets": [
+                {
+                    "name": "MediaForge-Setup-no-timestamps-first.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/no-time-first.exe"
+                },
+                {
+                    "name": "MediaForge-Setup-updated-at-new.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/updated-new.exe",
+                    "updated_at": "2026-06-27T04:00:00Z"
+                },
+                {
+                    "name": "MediaForge-Setup-updated-at-old.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/updated-old.exe",
+                    "updated_at": "2026-06-27T02:00:00Z"
+                },
+                {
+                    "name": "MediaForge-Setup-no-timestamps-second.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/no-time-second.exe"
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        # Since mock_response has updated_at present, the sorting should prefer updated_at over no timestamps.
+        # So "http://github.com/updated-new.exe" should be selected first.
+        self.updater.check_for_updates(force=True)
+        time.sleep(0.5)
+
+        self.assertEqual(self.updater._asset_url, "http://github.com/updated-new.exe")
+
+        # Now test where all assets have NO timestamps. It should preserve original order (select no-time-first).
+        mock_response.json.return_value = {
+            "tag_name": "v2.0.0",
+            "assets": [
+                {
+                    "name": "MediaForge-Setup-no-timestamps-first.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/no-time-first.exe"
+                },
+                {
+                    "name": "MediaForge-Setup-no-timestamps-second.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/no-time-second.exe"
+                }
+            ]
+        }
+        self.updater.check_for_updates(force=True)
+        time.sleep(0.5)
+
+        self.assertEqual(self.updater._asset_url, "http://github.com/no-time-first.exe")
+
 
 if __name__ == "__main__":
     unittest.main()

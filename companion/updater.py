@@ -100,6 +100,9 @@ class UpdateManager:
         """Return True if self._latest_version is semantically newer than current version."""
         with self._lock:
             latest = self._latest_version
+            asset_url = self._asset_url
+        if not asset_url:
+            return False
         return self.is_newer_version(COMPANION_VERSION, latest)
 
     def start(self) -> None:
@@ -184,21 +187,49 @@ class UpdateManager:
                 body = release.get("body", "")
                 html_url = release.get("html_url", "")
 
-                # Find the setup/installer asset
-                asset_url = ""
-                asset_size = 0
+                # Filter and validate installer assets (Task 1 & Task 4 & Task 5)
                 assets = release.get("assets", [])
-                for asset in assets:
+                compatible_assets = []
+                for idx, asset in enumerate(assets):
                     name = asset.get("name", "")
-                    if name.endswith(".exe") or "Setup" in name or "installer" in name.lower():
-                        asset_url = asset.get("browser_download_url", "")
-                        asset_size = int(asset.get("size") or 0)
-                        break
+                    
+                    # Reject non-matching patterns (archives, source code, etc.)
+                    if not (name.endswith(".exe") and "MediaForge-Setup" in name):
+                        continue
+                        
+                    # Integrity validation
+                    if asset.get("state") != "uploaded":
+                        continue
+                    if int(asset.get("size") or 0) <= 0:
+                        continue
+                    if not asset.get("browser_download_url"):
+                        continue
+                        
+                    compatible_assets.append((asset, idx))
 
-                if not asset_url and assets:
-                    # Fallback to first asset if no pattern matches
-                    asset_url = assets[0].get("browser_download_url", "")
-                    asset_size = int(assets[0].get("size") or 0)
+                # Deterministic sorting with timestamp fallbacks (Task 5)
+                def get_sort_key(item):
+                    asset, original_idx = item
+                    
+                    created = asset.get("created_at")
+                    if isinstance(created, str) and created.strip():
+                        return (created, "", -original_idx)
+                        
+                    updated = asset.get("updated_at")
+                    if isinstance(updated, str) and updated.strip():
+                        return ("", updated, -original_idx)
+                        
+                    return ("", "", -original_idx)
+
+                if compatible_assets:
+                    compatible_assets.sort(key=get_sort_key, reverse=True)
+                    best_asset, _ = compatible_assets[0]
+                    asset_url = best_asset.get("browser_download_url", "")
+                    asset_size = int(best_asset.get("size") or 0)
+                else:
+                    self.logger.warning("No compatible installer asset found in the latest release.")
+                    asset_url = ""
+                    asset_size = 0
 
                 with self._lock:
                     self._latest_version = tag_name
@@ -412,7 +443,14 @@ class UpdateManager:
 
     def _notify_current_state(self) -> None:
         """Dispatch current check details as state notification."""
-        if self.has_update():
+        with self._lock:
+            latest = self._latest_version
+            asset_url = self._asset_url
+        if latest == "v—":
+            self._notify("Idle", 0.0)
+        elif not asset_url:
+            self._notify("Installer Not Found", 0.0)
+        elif self.has_update():
             self._notify("Update Available", 0.0)
         else:
             self._notify("Up To Date", 0.0)

@@ -639,6 +639,8 @@ class SettingsPage(BasePage):
         # Update info text
         if status == "Rate Limited":
             info_text = f"Current: v{current} | Latest: Rate Limited\nLast checked: {last_checked_str}"
+        elif status == "Installer Not Found":
+            info_text = f"Current: v{current} | Latest: Installer Not Found\nLast checked: {last_checked_str}"
         else:
             info_text = f"Current: v{current} | Latest: {latest}\nLast checked: {last_checked_str}"
         self._update_info_lbl.configure(text=info_text)
@@ -672,6 +674,10 @@ class SettingsPage(BasePage):
             self._check_now_btn.configure(state="normal", text="Check Now")
             self._download_update_btn.configure(state="disabled", text="Download Update")
             self._release_notes_btn.configure(state="disabled")
+        elif status == "Installer Not Found":
+            self._check_now_btn.configure(state="normal", text="Check Now")
+            self._download_update_btn.configure(state="disabled", text="Download Update")
+            self._release_notes_btn.configure(state="normal" if latest != "v—" else "disabled")
         else:  # Idle, Up To Date, Update Available, Offline
             self._check_now_btn.configure(state="normal", text="Check Now")
             has_up = self.updater.has_update()

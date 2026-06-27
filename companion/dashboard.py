@@ -443,6 +443,9 @@ class DashboardPage(BasePage):
         elif status == "Rate Limited":
             status_text = "Rate Limited"
             color = "#f59e0b"
+        elif status == "Installer Not Found":
+            status_text = "⚠ Installer Not Found"
+            color = "#ef4444"
         else:
             if has_up:
                 status_text = "⬇ Update Available"
