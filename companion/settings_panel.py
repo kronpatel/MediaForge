@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import customtkinter as ctk
 
+from backend_manager import BackendStatus
 from base_page import BasePage
 
 if sys.platform == "win32":
@@ -216,8 +217,39 @@ class SettingsPage(BasePage):
 
         # ── Category: Appearance ──────────────────────────────────────────
         self._create_section_label(self._form, "Appearance")
+        
+        theme_row = ctk.CTkFrame(self._form, fg_color="transparent")
+        theme_row.pack(fill="x", padx=10, pady=4)
+        
+        ctk.CTkLabel(theme_row, text="Theme Palette", width=150, anchor="w", text_color="#e8eaf0").pack(side="left")
+        
         self._theme_var = ctk.StringVar()
-        self._create_form_row_menu(self._form, "Theme Palette", self._theme_var, ["Dark", "Light", "System"])
+        self._theme_menu = ctk.CTkOptionMenu(
+            theme_row,
+            variable=self._theme_var,
+            values=["Dark", "Light", "System"],
+            height=28,
+            fg_color="#20232f",
+            button_color="#2e3347",
+            button_hover_color="#2e3347",
+            dropdown_fg_color="#1a1d27",
+            dropdown_hover_color="#2e3347",
+            corner_radius=6
+        )
+        self._theme_menu.pack(side="left")
+        
+        self._apply_theme_btn = ctk.CTkButton(
+            theme_row,
+            text="Apply Theme",
+            width=100,
+            height=28,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            corner_radius=6,
+            command=self._apply_theme
+        )
+        self._apply_theme_btn.pack(side="left", padx=(10, 0))
 
         # ── Reset Default Button ──────────────────────────────────────────
         ctk.CTkFrame(self._form, height=1, fg_color="#2e3347").pack(fill="x", pady=20)
@@ -234,6 +266,12 @@ class SettingsPage(BasePage):
             command=self._restore_defaults_click,
         )
         self._defaults_btn.pack(anchor="w", padx=10, pady=(0, 20))
+
+        # Trace general options variables for dynamic Save button enable/disable state
+        for var in (self._dir_var, self._ffmpeg_var, self._url_var, self._poll_var,
+                    self._auto_start_companion_var, self._auto_start_backend_var,
+                    self._notifications_var):
+            var.trace_add("write", lambda *_: self._update_save_btn_state())
 
     def _create_section_label(self, parent: ctk.CTkScrollableFrame, title: str) -> None:
         ctk.CTkLabel(
@@ -312,6 +350,9 @@ class SettingsPage(BasePage):
         self._auto_start_backend_var.set(self._original_settings["auto_start_backend"])
         self._notifications_var.set(self._original_settings["notification_toggle"])
 
+        # Update Save changes button state
+        self._update_save_btn_state()
+
     def _get_widget_values(self) -> dict[str, Any]:
         return {
             "download_folder": self._dir_var.get().strip(),
@@ -337,11 +378,9 @@ class SettingsPage(BasePage):
 
     def refresh(self, data: dict[str, Any]) -> None:
         """Settings Page does not poll-update while focused to avoid wiping unsaved edits."""
-        # If offline, make inputs read-only
+        self._update_save_btn_state()
         offline = data.get("offline", True)
-        state = "disabled" if offline else "normal"
-        self._save_btn.configure(state=state)
-        self._defaults_btn.configure(state=state)
+        self._defaults_btn.configure(state="disabled" if offline else "normal")
 
     # ------------------------------------------------------------------
     # Local Settings Validation
@@ -349,12 +388,7 @@ class SettingsPage(BasePage):
 
     def _validate_settings(self, vals: dict[str, Any]) -> tuple[bool, str]:
         """Validate settings values. Only validates Backend URL if it was changed."""
-        # 0. Theme Validation & Fallback (Task 4)
-        theme = vals.get("theme")
-        if theme not in ("Dark", "Light", "System"):
-            self.logger.log(f"Invalid theme palette selection '{theme}' detected. Falling back to 'Dark'.", "WARNING")
-            vals["theme"] = "Dark"
-            self._theme_var.set("Dark")
+        # Theme validation has been removed from this general workflow (Task 5)
 
         # 1. Download folder must be a valid existing directory
         folder = vals["download_folder"]
@@ -411,21 +445,17 @@ class SettingsPage(BasePage):
         }
         self.manager.save_settings(backend_changes)
 
-        # 2. Save Local Companion Settings (theme lives here)
-        local_changes = {
+        # 2. Save Local Companion Settings (theme preserved/merged)
+        local_settings = read_local_settings(self.logger)
+        local_settings.update({
             "auto_start_companion": vals["auto_start_companion"],
             "auto_start_backend": vals["auto_start_backend"],
             "notification_toggle": vals["notification_toggle"],
             "backend_poll_interval": vals["backend_poll_interval"],
-            "theme": vals["theme"],
-        }
-        write_local_settings(local_changes)
+        })
+        write_local_settings(local_settings)
 
-        # 3. Apply theme change immediately — no restart required
-        import customtkinter as ctk
-        ctk.set_appearance_mode(vals["theme"])
-
-        # 4. Apply updated poll interval to the live controller
+        # 3. Apply updated poll interval to the live controller
         try:
             main_window = self.master.master
             if hasattr(main_window, "_dashboard_controller") and main_window._dashboard_controller:
@@ -434,7 +464,7 @@ class SettingsPage(BasePage):
             pass
 
         self.logger.info("Settings saved successfully.")
-        self._load_all_settings()  # reload to refresh originals
+        self._load_all_settings()  # reload to refresh originals and update button state
 
     def _cancel_click(self) -> None:
         self._load_all_settings()
@@ -449,7 +479,75 @@ class SettingsPage(BasePage):
         self._auto_start_companion_var.set(False)
         self._auto_start_backend_var.set(True)
         self._notifications_var.set(True)
+        self._update_save_btn_state()
         self.logger.info("Restored settings controls to default values (click Save to apply).")
+
+    def _update_save_btn_state(self) -> None:
+        """Dynamically enable or disable the Save Changes button based on general settings dirty state."""
+        try:
+            current = self._get_widget_values()
+            general_dirty = False
+            for key, val in self._original_settings.items():
+                if key == "theme":
+                    continue
+                if current.get(key) != val:
+                    general_dirty = True
+                    break
+        except ValueError:
+            general_dirty = True
+
+        offline = self.manager.status != BackendStatus.RUNNING
+        if offline:
+            self._save_btn.configure(state="disabled")
+        else:
+            self._save_btn.configure(state="normal" if general_dirty else "disabled")
+
+    def _apply_theme(self) -> None:
+        """Apply and persist selected Theme Palette independently from the general Settings save workflow."""
+        selected_theme = self._theme_var.get()
+        previous_theme = self._original_settings.get("theme", "Dark")
+
+        try:
+            if selected_theme not in ("Dark", "Light", "System"):
+                raise ValueError(f"Invalid appearance mode value '{selected_theme}'")
+
+            # 1. Apply theme immediately
+            ctk.set_appearance_mode(selected_theme)
+
+            # 2. Save theme directly into local settings
+            local_settings = read_local_settings(self.logger)
+            local_settings["theme"] = selected_theme
+            write_local_settings(local_settings)
+
+            # 3. Synchronize in-memory settings to clear Theme dirty state (Task 4)
+            self._original_settings["theme"] = selected_theme
+
+            # 4. Success log
+            self.logger.info(f"Theme palette applied and saved: {selected_theme}")
+            
+            # Recalculate Save Changes button state immediately
+            self._update_save_btn_state()
+
+        except Exception as exc:
+            # Task 5 — Failure Recovery
+            self.logger.log(f"Failed to apply theme '{selected_theme}': {exc}", "ERROR", exc=exc)
+
+            # Restore previous theme immediately
+            try:
+                ctk.set_appearance_mode(previous_theme)
+            except Exception:
+                pass
+
+            # Restore previous dropdown selection
+            self._theme_var.set(previous_theme)
+
+            # Display friendly error dialog
+            from tkinter import messagebox
+            messagebox.showerror(
+                "Theme Error",
+                "Unable to apply the selected theme.\n"
+                "Your previous theme has been restored."
+            )
 
     # ------------------------------------------------------------------
     # Dialogs & Browsers
