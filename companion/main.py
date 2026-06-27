@@ -143,6 +143,13 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        # Stop unified poller thread
+        if hasattr(window, "_dashboard_controller") and window._dashboard_controller:
+            try:
+                window._dashboard_controller.stop()
+            except Exception:
+                pass
+
         # Clean Tray Thread Shutdown: Stop tray and wait for it to exit
         if window.tray_active and tray_manager:
             try:

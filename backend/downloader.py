@@ -86,6 +86,8 @@ class DownloadJob:
     completed_at: str = ""
 
 
+import time
+
 _download_queue: queue.Queue[str] = queue.Queue()
 _jobs: dict[str, DownloadJob] = {}
 _jobs_lock = threading.RLock()
@@ -95,6 +97,7 @@ _worker_started = False
 _active_job_id: str | None = None
 _history_cache: list[dict[str, Any]] | None = None
 _history_last_mtime: float | None = None
+_START_TIME = time.monotonic()
 
 
 def now_iso() -> str:
@@ -139,6 +142,12 @@ def write_settings(changes: dict[str, Any]) -> dict[str, Any]:
     if "theme" in changes:
         theme = str(changes.get("theme") or "dark").strip().lower()
         settings["theme"] = theme if theme in {"dark", "midnight", "contrast"} else "dark"
+
+    if "ffmpeg_path" in changes:
+        settings["ffmpeg_path"] = str(changes.get("ffmpeg_path") or "").strip()
+
+    if "backend_url" in changes:
+        settings["backend_url"] = str(changes.get("backend_url") or "").strip()
 
     with open(SETTINGS_FILE, "w", encoding="utf-8") as settings_file:
         json.dump(settings, settings_file, indent=2, ensure_ascii=False)
@@ -707,5 +716,50 @@ def get_queue_status() -> dict[str, Any]:
         "queued_count": len(queued_jobs),
         "failed_count": len(failed_jobs),
         "history": read_history(),
+    }
+
+
+def get_statistics() -> dict[str, Any]:
+    history = read_history(limit=1000)
+
+    completed_count = sum(1 for item in history if item.get("status") == "completed")
+    failed_count = sum(1 for item in history if item.get("status") == "failed")
+    total_downloads = completed_count + failed_count
+
+    today_prefix = datetime.now(timezone.utc).date().isoformat()
+    downloads_today = sum(
+        1 for item in history
+        if (item.get("completed_at") and item.get("completed_at").startswith(today_prefix))
+        or (item.get("queued_at") and item.get("queued_at").startswith(today_prefix))
+    )
+
+    if total_downloads > 0:
+        success_rate = round((completed_count / total_downloads) * 100.0, 1)
+        failure_rate = round((failed_count / total_downloads) * 100.0, 1)
+    else:
+        success_rate = 100.0
+        failure_rate = 0.0
+
+    with _jobs_lock:
+        queue_length = sum(1 for job in _jobs.values() if job.status in ("queued", "downloading"))
+        active_count = sum(1 for job in _jobs.values() if job.status == "downloading")
+        active_speed = ""
+        active_speeds = [job.speed for job in _jobs.values() if job.status == "downloading" and job.speed]
+        if active_speeds:
+            active_speed = active_speeds[0]
+
+    uptime = time.monotonic() - _START_TIME
+
+    return {
+        "downloads_today": downloads_today,
+        "total_downloads": total_downloads,
+        "completed_count": completed_count,
+        "failed_count": failed_count,
+        "success_rate": success_rate,
+        "failure_rate": failure_rate,
+        "queue_length": queue_length,
+        "active_jobs": active_count,
+        "backend_uptime": int(uptime),
+        "average_speed": active_speed or "0 KB/s"
     }
 

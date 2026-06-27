@@ -47,10 +47,25 @@ class AppLogger:
         self._lock = threading.Lock()
         self._callbacks: list[Callable[[LogEntry], None]] = []
         self.debug: bool = debug
+        self.max_entries: int = MAX_LOG_ENTRIES
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def set_max_entries(self, count: int) -> None:
+        """Update the maximum log entries cap and truncate existing entries if necessary."""
+        with self._lock:
+            self.max_entries = max(1, count)
+            if len(self._entries) > self.max_entries:
+                self._entries = self._entries[-self.max_entries:]
+
+    def export_logs(self, filepath: str) -> None:
+        """Write all current log entries to the specified file path."""
+        entries = self.get_entries()
+        with open(filepath, "w", encoding="utf-8") as fh:
+            for entry in entries:
+                fh.write(str(entry) + "\n")
 
     def register_callback(self, fn: Callable[[LogEntry], None]) -> None:
         """Register a callable that is invoked whenever a new entry is logged."""
@@ -93,8 +108,8 @@ class AppLogger:
         with self._lock:
             self._entries.append(entry)
             # Discard oldest entries beyond the cap
-            if len(self._entries) > MAX_LOG_ENTRIES:
-                self._entries = self._entries[-MAX_LOG_ENTRIES:]
+            if len(self._entries) > self.max_entries:
+                self._entries = self._entries[-self.max_entries:]
             callbacks = list(self._callbacks)
 
         # Fire callbacks outside the lock to avoid deadlocks

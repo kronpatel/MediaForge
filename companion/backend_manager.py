@@ -398,6 +398,76 @@ class BackendManager:
             pass
         return None
 
+    def get_queue(self) -> list[dict[str, Any]]:
+        """Fetch the list of queued and downloading jobs from the backend."""
+        try:
+            resp = requests.get(f"{self.base_url}/queue", timeout=HTTP_TIMEOUT)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success"):
+                    return data.get("queue", [])
+        except Exception as exc:
+            self._logger.debug_log(f"Failed to fetch queue from backend: {exc}")
+        return []
+
+    def get_history(self) -> list[dict[str, Any]]:
+        """Fetch the history list from the backend."""
+        try:
+            resp = requests.get(f"{self.base_url}/history", timeout=HTTP_TIMEOUT)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success"):
+                    return data.get("history", [])
+        except Exception as exc:
+            self._logger.debug_log(f"Failed to fetch history from backend: {exc}")
+        return []
+
+    def get_stats(self) -> dict[str, Any]:
+        """Fetch backend statistics from the /stats endpoint."""
+        try:
+            resp = requests.get(f"{self.base_url}/stats", timeout=HTTP_TIMEOUT)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success"):
+                    return data.get("stats", {})
+        except Exception as exc:
+            self._logger.debug_log(f"Failed to fetch stats from backend: {exc}")
+        return {}
+
+    def get_settings(self) -> dict[str, Any]:
+        """Fetch settings from the backend."""
+        try:
+            resp = requests.get(f"{self.base_url}/settings", timeout=HTTP_TIMEOUT)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success"):
+                    return data.get("settings", {})
+        except Exception as exc:
+            self._logger.debug_log(f"Failed to fetch settings from backend: {exc}")
+        return {}
+
+    def save_settings(self, changes: dict[str, Any]) -> dict[str, Any] | None:
+        """Save settings updates to the backend."""
+        try:
+            resp = requests.post(f"{self.base_url}/settings", json=changes, timeout=HTTP_TIMEOUT)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success"):
+                    return data.get("settings")
+        except Exception as exc:
+            self._logger.debug_log(f"Failed to save settings to backend: {exc}")
+        return None
+
+    def clear_history_api(self) -> bool:
+        """Clear download history in the backend."""
+        try:
+            resp = requests.post(f"{self.base_url}/history/clear", timeout=HTTP_TIMEOUT)
+            if resp.status_code == 200:
+                return resp.json().get("success", False)
+        except Exception as exc:
+            self._logger.debug_log(f"Failed to clear history: {exc}")
+        return False
+
     # ------------------------------------------------------------------
     # Process lifecycle helper methods
     # ------------------------------------------------------------------

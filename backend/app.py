@@ -13,6 +13,7 @@ from downloader import read_settings
 from downloader import reset_download_folder
 from downloader import select_download_folder
 from downloader import write_settings
+from downloader import get_statistics
 
 
 app = Flask(__name__)
@@ -97,6 +98,14 @@ def queue_status():
     return jsonify({
         "success": True,
         "queue": get_queue_status(),
+    })
+
+
+@app.route("/stats", methods=["GET"])
+def get_stats():
+    return jsonify({
+        "success": True,
+        "stats": get_statistics(),
     })
 
 

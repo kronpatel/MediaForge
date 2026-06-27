@@ -58,112 +58,100 @@ _STATUS_COLOR: dict[BackendStatus, str] = {
     BackendStatus.CRASHED:  _CLR_RED,
 }
 
-_STATUS_LABEL: dict[BackendStatus, str] = {
+_STATUS_TEXTS: dict[BackendStatus, str] = {
     BackendStatus.STOPPED:  "● Stopped",
     BackendStatus.STARTING: "● Starting…",
     BackendStatus.RUNNING:  "● Running",
     BackendStatus.CRASHED:  "● Crashed",
 }
 
-WINDOW_W = 420
-WINDOW_H = 640
-
-
-# ---------------------------------------------------------------------------
-# Helper widget: RoundedCard frame
-# ---------------------------------------------------------------------------
-
-class _Card(ctk.CTkFrame):
-    """A styled card frame used to group related controls."""
-
-    def __init__(self, master, **kwargs):
-        super().__init__(
-            master,
-            fg_color=_CLR_CARD,
-            corner_radius=12,
-            border_width=1,
-            border_color=_CLR_BORDER,
-            **kwargs,
-        )
-
+WINDOW_W = 900
+WINDOW_H = 650
 
 # ---------------------------------------------------------------------------
-# Log Viewer Toplevel
+# Base & Custom Pages
 # ---------------------------------------------------------------------------
 
-class LogViewerWindow(ctk.CTkToplevel):
-    """Modal-like window that displays the full scrollable log."""
+from base_page import BasePage
+from dashboard import DashboardController, DashboardPage
+from queue_panel import QueuePage
+from history_panel import HistoryPage
+from stats_panel import StatsPage
+from settings_panel import SettingsPage, read_local_settings
 
-    def __init__(self, parent: "CompanionWindow", logger: AppLogger) -> None:
-        super().__init__(parent)
-        self._logger = logger
-        self._parent = parent
 
-        self.title("MediaForge Companion – Logs")
-        self.geometry("640x480")
-        self.resizable(True, True)
-        self.configure(fg_color=_CLR_BG)
+class LogsPage(BasePage):
+    """
+    Embedded logs page in the dashboard.
+    Supports in-app log display, search, export to file, and clearing.
+    """
 
-        # Register live-update callback
-        self._logger.register_callback(self._on_new_entry)
-
+    def __init__(self, master: ctk.CTkFrame, manager: BackendManager, logger: AppLogger) -> None:
+        super().__init__(master, manager, logger)
         self._build_ui()
-        self._populate()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(100, self.lift)  # bring to front
 
     def _build_ui(self) -> None:
-        title_lbl = ctk.CTkLabel(
+        # Title
+        ctk.CTkLabel(
             self,
-            text="📜  Application Logs",
-            font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
-            text_color=_CLR_TEXT,
-        )
-        title_lbl.pack(pady=(16, 8), padx=16, anchor="w")
+            text="Companion Logs",
+            font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
+            text_color="#e8eaf0",
+        ).pack(anchor="w", padx=20, pady=(20, 10))
 
+        # Toolbar
+        toolbar = ctk.CTkFrame(self, fg_color="transparent")
+        toolbar.pack(fill="x", padx=20, pady=6)
+
+        self._export_btn = ctk.CTkButton(
+            toolbar,
+            text="Export Logs",
+            width=110,
+            height=30,
+            fg_color="#4f8ef7",
+            hover_color="#3a76e8",
+            text_color="#ffffff",
+            corner_radius=8,
+            command=self._export_logs_click,
+        )
+        self._export_btn.pack(side="left")
+
+        self._clear_btn = ctk.CTkButton(
+            toolbar,
+            text="Clear Logs",
+            width=110,
+            height=30,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            corner_radius=8,
+            command=self._clear_logs_click,
+        )
+        self._clear_btn.pack(side="left", padx=10)
+
+        # Log TextBox
         self._textbox = ctk.CTkTextbox(
             self,
-            font=ctk.CTkFont(family="Consolas", size=12),
-            fg_color=_CLR_SURFACE,
-            text_color=_CLR_TEXT,
-            border_color=_CLR_BORDER,
+            font=ctk.CTkFont(family="Consolas", size=11),
+            fg_color="#1a1d27",
+            text_color="#e8eaf0",
+            border_color="#2e3347",
             border_width=1,
             corner_radius=8,
             wrap="word",
             state="disabled",
         )
-        self._textbox.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self._textbox.pack(fill="both", expand=True, padx=20, pady=(10, 20))
 
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=16, pady=(0, 12))
+    def on_show(self) -> None:
+        self._populate_logs()
 
-        clear_btn = ctk.CTkButton(
-            btn_frame,
-            text="Clear Logs",
-            width=110,
-            height=32,
-            fg_color=_CLR_CARD,
-            hover_color=_CLR_BORDER,
-            text_color=_CLR_SUBTEXT,
-            corner_radius=8,
-            command=self._clear,
-        )
-        clear_btn.pack(side="left")
+    def refresh(self, data: dict[str, Any]) -> None:
+        # Avoid forcing textbox refreshes while in another tab
+        pass
 
-        close_btn = ctk.CTkButton(
-            btn_frame,
-            text="Close",
-            width=90,
-            height=32,
-            fg_color=_CLR_ACCENT,
-            hover_color=_CLR_ACCENT_HOV,
-            corner_radius=8,
-            command=self._on_close,
-        )
-        close_btn.pack(side="right")
-
-    def _populate(self) -> None:
-        entries = self._logger.get_entries()
+    def _populate_logs(self) -> None:
+        entries = self.logger.get_entries()
         self._textbox.configure(state="normal")
         self._textbox.delete("1.0", "end")
         for entry in entries:
@@ -171,550 +159,427 @@ class LogViewerWindow(ctk.CTkToplevel):
         self._textbox.configure(state="disabled")
         self._textbox.see("end")
 
-    def _on_new_entry(self, entry: LogEntry) -> None:
-        """Called from AppLogger (potentially non-UI thread)."""
-        try:
-            self.after(0, self._append_entry, entry)
-        except Exception:
-            pass
+    def _clear_logs_click(self) -> None:
+        self.logger.clear()
+        self._populate_logs()
 
-    def _append_entry(self, entry: LogEntry) -> None:
-        self._textbox.configure(state="normal")
-        self._textbox.insert("end", str(entry) + "\n")
-        self._textbox.configure(state="disabled")
-        self._textbox.see("end")
-
-    def _clear(self) -> None:
-        self._logger.clear()
-        self._textbox.configure(state="normal")
-        self._textbox.delete("1.0", "end")
-        self._textbox.configure(state="disabled")
-
-    def _on_close(self) -> None:
-        self._logger.unregister_callback(self._on_new_entry)
-        self.destroy()
+    def _export_logs_click(self) -> None:
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(
+            title="Export Logs As",
+            defaultextension=".log",
+            filetypes=[("Log files", "*.log"), ("All files", "*.*")]
+        )
+        if path:
+            try:
+                self.logger.export_logs(path)
+                self.logger.info(f"Logs successfully exported to: {path}")
+            except Exception as exc:
+                self.logger.error(f"Failed to export logs: {exc}")
 
 
 # ---------------------------------------------------------------------------
-# Main Companion Window
+# Main Window class
 # ---------------------------------------------------------------------------
 
 class CompanionWindow(ctk.CTk):
     """
-    Main application window for MediaForge Companion.
-
-    Fixed at WINDOW_W × WINDOW_H for Phase 1.
+    Multi-page Tkinter main window using CustomTkinter styling.
+    Features a persistent sidebar for backend lifecycle operations and navigation.
     """
 
     def __init__(self, manager: BackendManager, logger: AppLogger) -> None:
         super().__init__()
-
         self._manager = manager
-        self._logger = logger
-        self._log_viewer: LogViewerWindow | None = None
-        self._current_status: BackendStatus = BackendStatus.STOPPED
-
-        # Tray properties
+        self.logger = logger
         self.tray_active: bool = False
-        self._tray_manager: TrayManager | None = None
+        self._tray_manager: Any = None
+        self._current_page_name: str = ""
 
-        self._setup_window()
-        self._build_ui()
-
-        # Wire backend status updates into the UI
-        self._manager.register_status_callback(self._on_status_change)
-
-        # Wire log entries into the inline log panel
-        self._logger.register_callback(self._on_log_entry)
-
-        self.protocol("WM_DELETE_WINDOW", self._on_close_request)
-        self.bind("<Unmap>", self._on_unmap)
-
-        # Initial state sync
-        self._apply_status(self._manager.status, "Ready")
-
-    # ------------------------------------------------------------------
-    # Window setup
-    # ------------------------------------------------------------------
-
-    def _setup_window(self) -> None:
+        # Window settings
         self.title("MediaForge Companion")
         self.geometry(f"{WINDOW_W}x{WINDOW_H}")
         self.resizable(False, False)
         self.configure(fg_color=_CLR_BG)
 
-        # Try to set window icon
+        # Set taskbar icon
+        self._set_window_icon()
+
+        # Window closing events
+        self.protocol("WM_DELETE_WINDOW", self._on_close_request)
+        self.bind("<Unmap>", self._on_unmap)
+
+        # Build Sidebar & Pages
+        self._build_ui()
+
+        # Build pages
+        self._pages: dict[str, BasePage] = {
+            "Dashboard": DashboardPage(self._content_container, self._manager, self.logger),
+            "Queue": QueuePage(self._content_container, self._manager, self.logger),
+            "History": HistoryPage(self._content_container, self._manager, self.logger),
+            "Statistics": StatsPage(self._content_container, self._manager, self.logger),
+            "Settings": SettingsPage(self._content_container, self._manager, self.logger),
+            "Logs": LogsPage(self._content_container, self._manager, self.logger),
+        }
+
+        # Setup Unified Controller
+        self._dashboard_controller = DashboardController(self._manager, self.logger)
+        self._dashboard_controller.associate_window(self)
+        
+        # Load local settings for poll interval
+        local_settings = read_local_settings()
+        self._dashboard_controller.set_poll_interval(float(local_settings.get("backend_poll_interval", 3)))
+
+        # Register pages and start controller thread
+        for page in self._pages.values():
+            self._dashboard_controller.register_page(page)
+            
+        self._dashboard_controller.start()
+
+        # Show initial landing page
+        self.show_page("Dashboard")
+
+        # Sync backend managers callback to update UI
+        self._manager.register_status_callback(self._on_backend_status_change)
+        
+        # Trigger initial status application
+        self._on_backend_status_change(self._manager.status)
+
+    def _set_window_icon(self) -> None:
         try:
-            icon_path = _resource_path("icon.ico")
-            import os
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            icon_path = os.path.join(base_dir, "resources", "icon.ico")
             if os.path.exists(icon_path):
                 self.iconbitmap(icon_path)
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # UI construction
-    # ------------------------------------------------------------------
-
     def _build_ui(self) -> None:
-        # ── Header ───────────────────────────────────────────────────────
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=20, pady=(20, 0))
+        # Sidebar Frame (left)
+        self._sidebar = ctk.CTkFrame(
+            self,
+            width=180,
+            fg_color=_CLR_SURFACE,
+            border_color=_CLR_BORDER,
+            border_width=1,
+            corner_radius=0,
+        )
+        self._sidebar.pack(side="left", fill="y")
+        self._sidebar.pack_propagate(False)
 
+        # Title/Logo in sidebar
         logo_lbl = ctk.CTkLabel(
-            header,
-            text="⚡  MediaForge Companion",
+            self._sidebar,
+            text="⚡ MediaForge",
             font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
             text_color=_CLR_TEXT,
         )
-        logo_lbl.pack(side="left")
+        logo_lbl.pack(pady=(20, 16), padx=15, anchor="w")
 
-        self._version_lbl = ctk.CTkLabel(
-            header,
-            text="v—",
-            font=ctk.CTkFont(family="Segoe UI", size=12),
-            text_color=_CLR_SUBTEXT,
-        )
-        self._version_lbl.pack(side="right", pady=4)
+        # Sidebar navigation buttons
+        self._sidebar_buttons = {}
+        for name in ("Dashboard", "Queue", "History", "Statistics", "Settings", "Logs"):
+            btn = ctk.CTkButton(
+                self._sidebar,
+                text=name,
+                height=36,
+                fg_color="transparent",
+                hover_color=_CLR_BORDER,
+                text_color=_CLR_TEXT,
+                font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                anchor="w",
+                command=lambda n=name: self.show_page(n),
+                corner_radius=6,
+            )
+            btn.pack(fill="x", padx=10, pady=2)
+            self._sidebar_buttons[name] = btn
 
-        # ── Separator ────────────────────────────────────────────────────
-        sep = ctk.CTkFrame(self, height=1, fg_color=_CLR_BORDER)
-        sep.pack(fill="x", padx=20, pady=(12, 0))
+        # Bottom backend control in sidebar
+        self._sidebar_bottom = ctk.CTkFrame(self._sidebar, fg_color="transparent")
+        self._sidebar_bottom.pack(side="bottom", fill="x", padx=10, pady=16)
 
-        # ── Status card ──────────────────────────────────────────────────
-        status_card = _Card(self)
-        status_card.pack(fill="x", padx=20, pady=(14, 0))
+        # Separator line above status
+        ctk.CTkFrame(self._sidebar_bottom, height=1, fg_color=_CLR_BORDER).pack(fill="x", pady=(0, 12))
 
-        status_inner = ctk.CTkFrame(status_card, fg_color="transparent")
-        status_inner.pack(fill="x", padx=16, pady=14)
-
-        # Left: status
-        left_col = ctk.CTkFrame(status_inner, fg_color="transparent")
-        left_col.pack(side="left", fill="x", expand=True)
-
-        ctk.CTkLabel(
-            left_col,
-            text="Backend Status",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color=_CLR_SUBTEXT,
-        ).pack(anchor="w")
+        # Status Circle & Text
+        self._status_frame = ctk.CTkFrame(self._sidebar_bottom, fg_color="transparent")
+        self._status_frame.pack(fill="x", pady=(0, 4))
 
         self._status_lbl = ctk.CTkLabel(
-            left_col,
+            self._status_frame,
             text="● Stopped",
-            font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
             text_color=_CLR_RED,
+            anchor="w",
         )
-        self._status_lbl.pack(anchor="w", pady=(2, 0))
+        self._status_lbl.pack(side="left")
 
-        # Right: port
-        right_col = ctk.CTkFrame(status_inner, fg_color="transparent")
-        right_col.pack(side="right")
-
-        ctk.CTkLabel(
-            right_col,
-            text="Port",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color=_CLR_SUBTEXT,
-        ).pack(anchor="e")
-
-        self._port_lbl = ctk.CTkLabel(
-            right_col,
-            text=str(self._manager.port),
-            font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
-            text_color=_CLR_TEXT,
-        )
-        self._port_lbl.pack(anchor="e", pady=(2, 0))
-
-        # ── Action buttons card ───────────────────────────────────────────
-        btn_card = _Card(self)
-        btn_card.pack(fill="x", padx=20, pady=(10, 0))
-
-        ctk.CTkLabel(
-            btn_card,
-            text="Controls",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color=_CLR_SUBTEXT,
-        ).pack(anchor="w", padx=16, pady=(12, 6))
-
-        btn_grid = ctk.CTkFrame(btn_card, fg_color="transparent")
-        btn_grid.pack(fill="x", padx=12, pady=(0, 12))
-
-        # Row 1: Start / Stop / Restart
-        row1 = ctk.CTkFrame(btn_grid, fg_color="transparent")
-        row1.pack(fill="x", pady=(0, 6))
-
-        self._start_btn = self._make_btn(
-            row1, "▶  Start", _CLR_GREEN, "#16a34a", self._action_start
-        )
-        self._start_btn.pack(side="left", expand=True, fill="x", padx=(0, 4))
-
-        self._stop_btn = self._make_btn(
-            row1, "■  Stop", _CLR_RED, "#b91c1c", self._action_stop
-        )
-        self._stop_btn.pack(side="left", expand=True, fill="x", padx=(4, 4))
-
-        self._restart_btn = self._make_btn(
-            row1, "↻  Restart", _CLR_CARD, _CLR_BORDER, self._action_restart,
-            text_color=_CLR_TEXT,
-        )
-        self._restart_btn.pack(side="left", expand=True, fill="x", padx=(4, 0))
-
-        # Row 2: Open Backend / View Logs / Exit
-        row2 = ctk.CTkFrame(btn_grid, fg_color="transparent")
-        row2.pack(fill="x")
-
-        self._open_btn = self._make_btn(
-            row2, "🌐  Open Backend", _CLR_ACCENT, _CLR_ACCENT_HOV, self._action_open
-        )
-        self._open_btn.pack(side="left", expand=True, fill="x", padx=(0, 4))
-
-        logs_btn = self._make_btn(
-            row2, "📜  View Logs", _CLR_CARD, _CLR_BORDER, self._action_view_logs,
-            text_color=_CLR_TEXT,
-        )
-        logs_btn.pack(side="left", expand=True, fill="x", padx=(4, 4))
-
-        exit_btn = self._make_btn(
-            row2, "❌  Exit", _CLR_CARD, _CLR_BORDER, self._on_close_request,
-            text_color=_CLR_TEXT,
-        )
-        exit_btn.pack(side="left", expand=True, fill="x", padx=(4, 0))
-
-        # ── Inline Log Panel ─────────────────────────────────────────────
-        log_card = _Card(self)
-        log_card.pack(fill="both", expand=True, padx=20, pady=(10, 0))
-
-        log_header = ctk.CTkFrame(log_card, fg_color="transparent")
-        log_header.pack(fill="x", padx=14, pady=(10, 4))
-
-        ctk.CTkLabel(
-            log_header,
-            text="Recent Activity",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color=_CLR_SUBTEXT,
-        ).pack(side="left")
-
-        self._log_box = ctk.CTkTextbox(
-            log_card,
-            font=ctk.CTkFont(family="Consolas", size=11),
-            fg_color=_CLR_SURFACE,
-            text_color=_CLR_TEXT,
-            border_color=_CLR_BORDER,
-            border_width=1,
-            corner_radius=6,
-            wrap="word",
-            state="disabled",
-            height=160,
-        )
-        self._log_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-
-        # ── Status bar ───────────────────────────────────────────────────
-        status_bar = ctk.CTkFrame(self, fg_color=_CLR_SURFACE, height=28, corner_radius=0)
-        status_bar.pack(fill="x", side="bottom")
-        status_bar.pack_propagate(False)
-
-        self._statusbar_lbl = ctk.CTkLabel(
-            status_bar,
-            text="Ready",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
+        self._version_lbl = ctk.CTkLabel(
+            self._sidebar_bottom,
+            text="v—",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
             text_color=_CLR_SUBTEXT,
             anchor="w",
         )
-        self._statusbar_lbl.pack(side="left", padx=12, fill="y")
+        self._version_lbl.pack(fill="x", pady=(0, 10))
 
-        host_lbl = ctk.CTkLabel(
-            status_bar,
-            text=f"{self._manager.host}:{self._manager.port}",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color=_CLR_SUBTEXT,
-            anchor="e",
+        # Start / Stop / Restart buttons
+        self._start_btn = self._make_btn(
+            self._sidebar_bottom, "▶ Start", _CLR_GREEN, "#16a34a", self._action_start, height=30
         )
-        host_lbl.pack(side="right", padx=12, fill="y")
+        self._start_btn.pack(fill="x", pady=2)
 
-    # ------------------------------------------------------------------
-    # Button factory
-    # ------------------------------------------------------------------
+        self._stop_btn = self._make_btn(
+            self._sidebar_bottom, "■ Stop", _CLR_RED, "#b91c1c", self._action_stop, height=30
+        )
+        self._stop_btn.pack(fill="x", pady=2)
+        self._restart_btn = self._make_btn(
+            self._sidebar_bottom, "↻ Restart", _CLR_CARD, _CLR_BORDER, self._action_restart, height=30, text_color=_CLR_TEXT
+        )
+        self._restart_btn.pack(fill="x", pady=2)
 
-    @staticmethod
-    def _make_btn(
-        parent,
-        text: str,
-        fg: str,
-        hover: str,
-        command,
-        *,
-        text_color: str = "#ffffff",
-        height: int = 38,
-    ) -> ctk.CTkButton:
+        # ── Main Content Area Frame (right) ──────────────────────────────
+        self._content_container = ctk.CTkFrame(self, fg_color="transparent")
+        self._content_container.pack(side="right", fill="both", expand=True)
+        self._content_container.grid_rowconfigure(0, weight=1)
+        self._content_container.grid_columnconfigure(0, weight=1)
+
+    def _make_btn(self, parent, text, fg, hover, cmd, **kwargs) -> ctk.CTkButton:
         return ctk.CTkButton(
             parent,
             text=text,
-            height=height,
             fg_color=fg,
             hover_color=hover,
-            text_color=text_color,
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            command=cmd,
             corner_radius=8,
-            command=command,
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            **kwargs,
         )
 
     # ------------------------------------------------------------------
-    # Action handlers (all dispatch to threads)
+    # Page Switching Navigation
+    # ------------------------------------------------------------------
+
+    def show_page(self, name: str) -> None:
+        """Switch content view frame to the cached page."""
+        # Unsaved changes protection
+        if self._current_page_name == "Settings" and name != "Settings":
+            settings_page = self._pages["Settings"]
+            if settings_page.is_dirty():
+                from tkinter import messagebox
+                ans = messagebox.askyesnocancel(
+                    "Unsaved Changes",
+                    "You have unsaved changes in Settings.\nDo you want to save them before leaving?"
+                )
+                if ans is True:  # Save
+                    settings_page._save_click()
+                    if settings_page.is_dirty():
+                        return  # Validation failed, stop transition
+                elif ans is False:  # Discard
+                    settings_page._cancel_click()
+                else:  # Cancel page switch
+                    return
+
+        # Hide current
+        if self._current_page_name:
+            old_page = self._pages[self._current_page_name]
+            old_page.grid_forget()
+            old_page.on_hide()
+
+        # Show new page
+        self._current_page_name = name
+        new_page = self._pages[name]
+        new_page.grid(row=0, column=0, sticky="nsew")
+
+        # Style sidebar buttons
+        for btn_name, btn in self._sidebar_buttons.items():
+            if btn_name == name:
+                btn.configure(fg_color=_CLR_BORDER)
+            else:
+                btn.configure(fg_color="transparent")
+
+        new_page.on_show()
+
+        # Provide immediate refresh with cached data
+        if hasattr(self, "_dashboard_controller") and self._dashboard_controller:
+            new_page.refresh(self._dashboard_controller.get_cached_data())
+
+    # ------------------------------------------------------------------
+    # Unified status callback
+    # ------------------------------------------------------------------
+
+    def _on_backend_status_change(self, status: BackendStatus) -> None:
+        """Marshall status callbacks safely onto Tkinter thread."""
+        self.after(0, self._apply_status, status)
+
+    def _apply_status(self, status: BackendStatus) -> None:
+        lbl_text = _STATUS_TEXTS.get(status, f"● {status.name.capitalize()}")
+        self._status_lbl.configure(text=lbl_text)
+
+        if status == BackendStatus.RUNNING:
+            self._status_lbl.configure(text_color=_CLR_GREEN)
+            
+            # Adopted/External handling
+            if self._manager.is_managed():
+                self._start_btn.configure(state="disabled")
+                self._stop_btn.configure(state="normal")
+                self._restart_btn.configure(state="normal")
+            else:
+                self._start_btn.configure(state="disabled")
+                self._stop_btn.configure(state="disabled")
+                self._restart_btn.configure(state="disabled")
+                
+            # Fetch backend version
+            ver = self._manager.fetch_version()
+            self._version_lbl.configure(text=f"Version: v{ver}" if ver else "Version: v—")
+
+        elif status in (BackendStatus.STOPPED, BackendStatus.CRASHED):
+            self._status_lbl.configure(text_color=_CLR_RED)
+            self._start_btn.configure(state="normal")
+            self._stop_btn.configure(state="disabled")
+            self._restart_btn.configure(state="disabled")
+            self._version_lbl.configure(text="v—")
+        elif status == BackendStatus.STARTING:
+            self._status_lbl.configure(text_color=_CLR_YELLOW)
+            self._start_btn.configure(state="disabled")
+            self._stop_btn.configure(state="disabled")
+            self._restart_btn.configure(state="disabled")
+
+        # Let the tray update itself (tray_manager listens to manager state)
+        if self.tray_active and self._tray_manager:
+            self._tray_manager.refresh_menu()
+
+    # ------------------------------------------------------------------
+    # Backend lifecycle button hooks
     # ------------------------------------------------------------------
 
     def _action_start(self) -> None:
-        self._set_buttons_busy()
-        threading.Thread(target=self._manager.start, daemon=True).start()
+        self._manager.start()
 
     def _action_stop(self) -> None:
-        self._set_buttons_busy()
+        # Run stop in daemon thread to avoid blocking main Tk thread
         threading.Thread(target=self._manager.stop, daemon=True).start()
 
     def _action_restart(self) -> None:
-        self._set_buttons_busy()
         threading.Thread(target=self._manager.restart, daemon=True).start()
 
-    def _action_open(self) -> None:
-        webbrowser.open(self._manager.base_url)
-
-    def _action_view_logs(self) -> None:
-        if self._log_viewer and self._log_viewer.winfo_exists():
-            self._log_viewer.lift()
-            return
-        self._log_viewer = LogViewerWindow(self, self._logger)
-
-    # ------------------------------------------------------------------
-    # Status updates (called from BackendManager – may be non-UI thread)
-    # ------------------------------------------------------------------
-
-    def _on_status_change(self, status: BackendStatus, message: str) -> None:
-        self.after(0, self._apply_status, status, message)
-
-    def _apply_status(self, status: BackendStatus, message: str) -> None:
-        """Must be called on the UI thread."""
-        self._current_status = status
-        color = _STATUS_COLOR[status]
-        is_managed = self._manager.is_managed()
-
-        if status == BackendStatus.RUNNING and not is_managed:
-            label = "● Running (External)"
-        else:
-            label = _STATUS_LABEL[status]
-
-        self._status_lbl.configure(text=label, text_color=color)
-
-        # For externally adopted backends, override the message to be descriptive
-        if status == BackendStatus.RUNNING and not is_managed:
-            display_message = "External backend detected – monitoring only."
-        else:
-            display_message = message
-        self._statusbar_lbl.configure(text=display_message)
-
-        # Button states
-        is_stopped_or_crashed = status in (BackendStatus.STOPPED, BackendStatus.CRASHED)
-        is_running = status == BackendStatus.RUNNING
-
-        self._start_btn.configure(state="normal" if is_stopped_or_crashed else "disabled")
-        self._stop_btn.configure(state="normal" if (is_running and is_managed) else "disabled")
-        self._restart_btn.configure(state="normal" if (is_running and is_managed) else "disabled")
-        self._open_btn.configure(state="normal" if is_running else "disabled")
-
-        # Fetch version from API when running
-        if is_running:
-            threading.Thread(target=self._refresh_version, daemon=True).start()
-        else:
-            self._version_lbl.configure(text="v—")
-
-    # ------------------------------------------------------------------
-    # Log updates
-    # ------------------------------------------------------------------
-
-    def _on_log_entry(self, entry: LogEntry) -> None:
-        """Append a log entry to the inline log panel (thread-safe)."""
-        try:
-            self.after(0, self._append_log, entry)
-        except Exception:
-            pass
-
-    def _append_log(self, entry: LogEntry) -> None:
-        self._log_box.configure(state="normal")
-        ts_short = entry.timestamp[11:]   # HH:MM:SS only for inline panel
-        self._log_box.insert("end", f"[{ts_short}] {entry.message}\n")
-        self._log_box.configure(state="disabled")
-        self._log_box.see("end")
-
-    # ------------------------------------------------------------------
-    # Version refresh
-    # ------------------------------------------------------------------
-
-    def _refresh_version(self) -> None:
-        version = self._manager.fetch_version()
-        display = f"v{version}" if version else "v—"
-        try:
-            self.after(0, self._version_lbl.configure, {"text": display})
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    # Button busy state
-    # ------------------------------------------------------------------
-
-    def _set_buttons_busy(self) -> None:
-        for btn in (self._start_btn, self._stop_btn, self._restart_btn):
-            btn.configure(state="disabled")
-
-    # ------------------------------------------------------------------
-    # Window close
-    # ------------------------------------------------------------------
-
-    def _on_close_request(self) -> None:
-        """
-        Called when the user presses the X button or the Exit button.
-
-        If the backend is running and managed, show a confirmation dialog.
-        Otherwise, hide to tray if active, or exit if inactive.
-        """
-        is_running = self._current_status in (BackendStatus.RUNNING, BackendStatus.STARTING)
-        is_managed = self._manager.is_managed()
-
-        if is_running and is_managed:
-            self._show_shutdown_dialog()
-        else:
-            if self.tray_active:
-                self.withdraw()
-                if self._tray_manager:
-                    self._tray_manager.notify_background()
-            else:
-                self._do_exit(stop_backend=False)
-
-    def _show_shutdown_dialog(self) -> None:
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Confirm Exit")
-        dialog.geometry("360x200")
-        dialog.resizable(False, False)
-        dialog.configure(fg_color=_CLR_SURFACE)
-        dialog.grab_set()
-        dialog.focus_set()
-        dialog.after(100, dialog.lift)
-
-        ctk.CTkLabel(
-            dialog,
-            text="The backend is still running.",
-            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
-            text_color=_CLR_TEXT,
-        ).pack(pady=(24, 4))
-
-        ctk.CTkLabel(
-            dialog,
-            text="What would you like to do?",
-            font=ctk.CTkFont(family="Segoe UI", size=12),
-            text_color=_CLR_SUBTEXT,
-        ).pack(pady=(0, 16))
-
-        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=20)
-
-        def stop_and_exit():
-            dialog.destroy()
-            self._do_exit(stop_backend=True)
-
-        def exit_only():
-            dialog.destroy()
-            if self.tray_active:
-                self.withdraw()
-                if self._tray_manager:
-                    self._tray_manager.notify_background()
-            else:
-                self._do_exit(stop_backend=False)
-
-        def cancel():
-            dialog.destroy()
-
-        ctk.CTkButton(
-            btn_frame,
-            text="Stop & Exit",
-            fg_color=_CLR_RED,
-            hover_color="#b91c1c",
-            height=36,
-            corner_radius=8,
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            command=stop_and_exit,
-        ).pack(side="left", expand=True, fill="x", padx=(0, 4))
-
-        ctk.CTkButton(
-            btn_frame,
-            text="Exit Only",
-            fg_color=_CLR_CARD,
-            hover_color=_CLR_BORDER,
-            text_color=_CLR_TEXT,
-            height=36,
-            corner_radius=8,
-            font=ctk.CTkFont(family="Segoe UI", size=12),
-            command=exit_only,
-        ).pack(side="left", expand=True, fill="x", padx=(4, 4))
-
-        ctk.CTkButton(
-            btn_frame,
-            text="Cancel",
-            fg_color=_CLR_ACCENT,
-            hover_color=_CLR_ACCENT_HOV,
-            height=36,
-            corner_radius=8,
-            font=ctk.CTkFont(family="Segoe UI", size=12),
-            command=cancel,
-        ).pack(side="left", expand=True, fill="x", padx=(4, 0))
-
-    def _do_exit(self, *, stop_backend: bool) -> None:
-        self._manager.shutdown()
-        if stop_backend and self._manager.is_managed():
-            # Run in thread so UI stays responsive during stop
-            def _stop_then_destroy():
-                self._manager.stop()
-                self.after(0, self.destroy)
-            threading.Thread(target=_stop_then_destroy, daemon=True).start()
-        else:
-            self.destroy()
-
-    def _on_unmap(self, event) -> None:
-        """Called on window state changes (e.g. minimizing)."""
-        if event.widget == self:
-            # Minimize Detection Clarification: only iconic state triggers tray hide
-            if self.state() == "iconic" and self.tray_active:
-                self.withdraw()
-                if self._tray_manager:
-                    self._tray_manager.notify_background()
-
-    def set_tray_manager(self, tray_manager: TrayManager) -> None:
-        """Register the TrayManager instance."""
+    def set_tray_manager(self, tray_manager: Any) -> None:
         self._tray_manager = tray_manager
+        self.tray_active = True
 
     def restore_window(self) -> None:
-        """Restore and focus the main window (thread-safe)."""
-        def _do_restore():
-            self.deiconify()
-            self.state("normal")
-            self.focus_force()
-            self.lift()
-        self.after(0, _do_restore)
+        """Restore window to normal size and lift to topmost."""
+        self.after(0, self._restore_safe)
+
+    def _restore_safe(self) -> None:
+        self.deiconify()
+        self.state("normal")
+        self.focus_force()
+        self.reveal_window()
+
+    def reveal_window(self) -> None:
+        self.lift()
+        self.focus_force()
 
     def trigger_start(self) -> None:
-        """Tray shortcut to trigger managed backend startup."""
         self._action_start()
 
     def trigger_stop(self) -> None:
-        """Tray shortcut to trigger managed backend stop."""
         self._action_stop()
 
     def trigger_restart(self) -> None:
-        """Tray shortcut to trigger managed backend restart."""
         self._action_restart()
 
+    # ------------------------------------------------------------------
+    # Close / Minimise events
+    # ------------------------------------------------------------------
+
+    def _on_unmap(self, event) -> None:
+        # Intercept iconic minimisation
+        if event.widget == self and self.state() == "iconic" and self.tray_active:
+            self.withdraw()
+            if self._tray_manager:
+                self._tray_manager.notify_background()
+
+    def _on_close_request(self) -> None:
+        # 1. Unsaved changes check
+        if "Settings" in self._pages:
+            settings_page = self._pages["Settings"]
+            if settings_page.is_dirty():
+                from tkinter import messagebox
+                ans = messagebox.askyesnocancel(
+                    "Unsaved Changes",
+                    "You have unsaved changes in Settings.\nDo you want to save them before exiting?"
+                )
+                if ans is True:
+                    settings_page._save_click()
+                    if settings_page.is_dirty():
+                        return  # Validation failed, stop exit
+                elif ans is False:
+                    pass  # proceed without saving
+                else:
+                    return  # cancel exit
+
+        # 2. Shutdown sequence checks
+        if not self.tray_active:
+            self._show_shutdown_dialog()
+            return
+
+        if self._manager.status == BackendStatus.RUNNING and self._manager.is_managed():
+            self._show_shutdown_dialog()
+        else:
+            self.withdraw()
+
+    def _show_shutdown_dialog(self) -> None:
+        from tkinter import messagebox
+        if self._manager.status == BackendStatus.RUNNING and self._manager.is_managed():
+            ans = messagebox.askyesnocancel(
+                "Exit Companion",
+                "The backend service is currently running.\n\n"
+                "• Click [Yes] to STOP the backend and exit.\n"
+                "• Click [No] to hide to tray (Exit Only) keeping backend active.\n"
+                "• Click [Cancel] to return."
+            )
+            if ans is True:
+                self.exit_completely()
+            elif ans is False:
+                if self.tray_active:
+                    self.withdraw()
+                else:
+                    self._do_exit(stop_backend=False)
+        else:
+            self.exit_completely()
+
+    def _do_exit(self, *, stop_backend: bool) -> None:
+        # Threaded stop to prevent freezing on window destroy
+        def _cleanup():
+            if stop_backend:
+                self._manager.stop()
+            self.after(0, self.destroy)
+        threading.Thread(target=_cleanup, daemon=True).start()
+
     def exit_completely(self) -> None:
-        """Exit the entire application completely, bypassing hide-to-tray."""
-        if self._tray_manager:
+        """Fully shut down companion and backend."""
+        self.logger.info("Initiating complete exit sequence...")
+        
+        # Stop polling thread first
+        if hasattr(self, "_dashboard_controller") and self._dashboard_controller:
+            self._dashboard_controller.stop()
+
+        # Stop pystray icon
+        if self.tray_active and self._tray_manager:
             self._tray_manager.stop()
-        self._do_exit(stop_backend=True)
+            self._tray_manager.join(timeout=2.0)
+
+        # Stop backend manager
+        self._manager.shutdown()
+        self._manager.stop()
+
+        # Destroy window
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
