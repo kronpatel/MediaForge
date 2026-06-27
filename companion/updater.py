@@ -48,12 +48,15 @@ class UpdateManager:
         self._lock = threading.Lock()
         self._callbacks: list[Callable[[str, float, str | None], None]] = []
 
-        # Threading / Control State
+        # Threading / Control State (Task 1 & Task 2)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._check_running = False
-        self._download_running = False
         self._download_stop_event = threading.Event()
+        self._shutdown = False
+        self._check_lock = threading.Lock()
+        self._checking = False
+        self._download_lock = threading.Lock()
+        self._downloading = False
 
         # Cache metadata
         self._latest_version = "v—"
@@ -69,6 +72,26 @@ class UpdateManager:
 
         # Load initial values from cache if possible
         self._load_cache()
+
+    @property
+    def _check_running(self) -> bool:
+        with self._check_lock:
+            return self._checking
+
+    @_check_running.setter
+    def _check_running(self, val: bool) -> None:
+        with self._check_lock:
+            self._checking = val
+
+    @property
+    def _download_running(self) -> bool:
+        with self._download_lock:
+            return self._downloading
+
+    @_download_running.setter
+    def _download_running(self, val: bool) -> None:
+        with self._download_lock:
+            self._downloading = val
 
     # ------------------------------------------------------------------
     # Public API
@@ -121,7 +144,8 @@ class UpdateManager:
 
     def shutdown(self) -> None:
         """Shut down poller threads and close the shared HTTP session cleanly."""
-        self.logger.info("Stopping auto updater thread...")
+        with self._lock:
+            self._shutdown = True
         self._stop_event.set()
         self.cancel_download()
 
@@ -142,6 +166,20 @@ class UpdateManager:
         Triggers a check for updates. If force=False, uses valid cached info (<1 hour old).
         Otherwise fetches fresh release metadata from GitHub API on a background thread.
         """
+        # Verify shutdown state (Task 2)
+        with self._lock:
+            if self._shutdown:
+                self.logger.warning("Update check rejected: updater is shutting down.")
+                return
+
+        # Check and set checking flag under check lock (Task 1)
+        with self._check_lock:
+            if self._checking:
+                self.logger.info("Update check already running. Request ignored.")
+                return
+            self._checking = True
+
+        # Check rate limit suspension (unless forced by manual click)
         is_rate_limited = False
         with self._lock:
             if time.time() < self._rate_limit_reset_until:
@@ -150,13 +188,9 @@ class UpdateManager:
         if not force and is_rate_limited:
             self.logger.warning("Update check skipped: GitHub API is currently rate limited.")
             self._notify("Rate Limited", 0.0)
+            with self._check_lock:
+                self._checking = False
             return
-
-        with self._lock:
-            if self._check_running:
-                self.logger.info("Update check already running. Request ignored.")
-                return
-            self._check_running = True
 
         def _worker():
             try:
@@ -247,28 +281,42 @@ class UpdateManager:
                 self.logger.warning(f"Error checking for updates: {exc}")
                 self._notify("Failed", 0.0, str(exc))
             finally:
-                with self._lock:
-                    self._check_running = False
+                with self._check_lock:
+                    self._checking = False
 
-        threading.Thread(target=_worker, name="UpdateCheckWorker", daemon=True).start()
+        try:
+            threading.Thread(target=_worker, name="UpdateCheckWorker", daemon=True).start()
+        except Exception:
+            with self._check_lock:
+                self._checking = False
+            raise
 
     def download_update(self) -> None:
         """Start downloading the latest release installer asset in a background thread."""
+        # Verify shutdown state (Task 2)
         with self._lock:
-            if self._download_running:
+            if self._shutdown:
+                self.logger.warning("Download rejected: updater is shutting down.")
+                return
+
+        # Check and set downloading flag under download lock (Task 1)
+        with self._download_lock:
+            if self._downloading:
                 self.logger.warning("Download already in progress. Request ignored.")
                 return
+            self._downloading = True
+            self._download_stop_event.clear()
+
+        with self._lock:
             asset_url = self._asset_url
             expected_size = self._asset_size
 
         if not asset_url:
             self.logger.error("No update asset download URL available.")
             self._notify("Failed", 0.0, "No asset URL found.")
+            with self._download_lock:
+                self._downloading = False
             return
-
-        with self._lock:
-            self._download_running = True
-            self._download_stop_event.clear()
 
         def _downloader():
             try:
@@ -380,8 +428,8 @@ class UpdateManager:
                 self._cleanup_temp_file()
                 self._notify("Failed", 0.0, str(exc))
             finally:
-                with self._lock:
-                    self._download_running = False
+                with self._download_lock:
+                    self._downloading = False
 
         threading.Thread(target=_downloader, name="UpdateDownloadWorker", daemon=True).start()
 

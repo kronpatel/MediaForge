@@ -502,6 +502,116 @@ class TestUpdateManager(unittest.TestCase):
 
         self.assertEqual(self.updater._asset_url, "http://github.com/no-time-first.exe")
 
+    # ------------------------------------------------------------------
+    # 10. Concurrency Prevention & Graceful Shutdown (Task 2)
+    # ------------------------------------------------------------------
+
+    @patch("requests.Session.get")
+    def test_concurrent_checks_rejection(self, mock_get):
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {"tag_name": "v2.0.0"}
+        mock_get.return_value = mock_response
+
+        # Double click check now
+        self.updater.check_for_updates(force=True)
+        self.updater.check_for_updates(force=True) # should be rejected
+        time.sleep(0.5)
+
+        # Assert only one request actually executed (verify call count)
+        mock_get.assert_called_once()
+
+    @patch("requests.Session.get")
+    def test_concurrent_downloads_rejection(self, mock_get):
+        self.updater._asset_url = "http://dummy-url/setup.exe"
+        self.updater._asset_size = 500
+
+        # Slow chunk return to keep downloader running
+        def slow_chunks(*args, **kwargs):
+            time.sleep(0.2)
+            yield b"a" * 500
+        mock_response = MagicMock()
+        mock_response.headers = {"content-length": "500"}
+        mock_response.iter_content = slow_chunks
+        mock_get.return_value = mock_response
+
+        # Trigger download twice in rapid succession
+        self.updater.download_update()
+        self.updater.download_update() # should be ignored
+        time.sleep(0.5)
+
+        # Since it's a mock, both calls to session.get would have been made if not prevented.
+        # Verify Session.get is only called once.
+        mock_get.assert_called_once()
+
+    @patch("requests.Session.get")
+    def test_shutdown_rejection_inactive(self, mock_get):
+        # Call shutdown
+        self.updater.shutdown()
+
+        # Try starting check
+        self.updater.check_for_updates(force=True)
+        time.sleep(0.1)
+        mock_get.assert_not_called()
+
+        # Try starting download
+        self.updater._asset_url = "http://dummy-url/setup.exe"
+        self.updater.download_update()
+        time.sleep(0.1)
+        # Should not start requests
+        mock_get.assert_not_called()
+
+    @patch("requests.Session.get")
+    def test_shutdown_rejection_during_active_download(self, mock_get):
+        self.updater._asset_url = "http://dummy-url/setup.exe"
+        self.updater._asset_size = 500
+
+        # Slow chunk return to keep downloader running
+        def slow_chunks(*args, **kwargs):
+            time.sleep(0.5)
+            yield b"a" * 500
+        mock_response = MagicMock()
+        mock_response.headers = {"content-length": "500"}
+        mock_response.iter_content = slow_chunks
+        mock_get.return_value = mock_response
+
+        # Start download
+        self.updater.download_update()
+        time.sleep(0.1)
+
+        # Call shutdown
+        self.updater.shutdown()
+
+        # Try triggering another download
+        self.updater.download_update() # rejected
+        time.sleep(0.6)
+
+        # session.get should not be called again
+        mock_get.assert_called_once()
+
+    @patch("requests.Session.get")
+    def test_shutdown_rejection_during_active_check(self, mock_get):
+        # Slow API response to keep check worker running
+        def slow_json(*args, **kwargs):
+            time.sleep(0.5)
+            return {"tag_name": "v2.0.0"}
+        mock_response = MagicMock(status_code=200)
+        mock_response.json = slow_json
+        mock_get.return_value = mock_response
+
+        # Start check
+        self.updater.check_for_updates(force=True)
+        time.sleep(0.1)
+
+        # Call shutdown
+        self.updater.shutdown()
+
+        # Try starting new check
+        self.updater.check_for_updates(force=True) # rejected
+        time.sleep(0.6)
+
+        # API should only have been called once
+        mock_get.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
