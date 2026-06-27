@@ -44,6 +44,47 @@ if sys.platform == "win32":
 from logger import AppLogger
 from backend_manager import BackendManager
 from ui import CompanionWindow
+from tray import TrayManager
+
+
+# ---------------------------------------------------------------------------
+# Icon Caching / Helper
+# ---------------------------------------------------------------------------
+
+def _ensure_icons(logger: AppLogger) -> None:
+    """Generate icon.ico and tray.ico from icon.png if they do not exist."""
+    import os
+    from PIL import Image
+
+    base = os.path.dirname(os.path.abspath(__file__))
+    resources_dir = os.path.join(base, "resources")
+    png_path = os.path.join(resources_dir, "icon.png")
+    ico_path = os.path.join(resources_dir, "icon.ico")
+    tray_ico_path = os.path.join(resources_dir, "tray.ico")
+
+    os.makedirs(resources_dir, exist_ok=True)
+
+    if not os.path.exists(png_path):
+        logger.warning(f"icon.png is missing from {png_path}; cannot generate .ico files.")
+        return
+
+    # Generate window icon if missing
+    if not os.path.exists(ico_path):
+        try:
+            logger.info(f"Generating window icon {ico_path}…")
+            img = Image.open(png_path)
+            img.save(ico_path, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+        except Exception as exc:
+            logger.error(f"Failed to generate window icon: {exc}", exc=exc)
+
+    # Generate tray icon if missing
+    if not os.path.exists(tray_ico_path):
+        try:
+            logger.info(f"Generating tray icon {tray_ico_path}…")
+            img = Image.open(png_path)
+            img.save(tray_ico_path, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
+        except Exception as exc:
+            logger.error(f"Failed to generate tray icon: {exc}", exc=exc)
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +96,9 @@ def main() -> None:
 
     logger = AppLogger(debug=False)
     logger.info("MediaForge Companion starting…")
+
+    # Generate icons only if they don't already exist
+    _ensure_icons(logger)
 
     try:
         manager = BackendManager(logger=logger)
@@ -79,6 +123,19 @@ def main() -> None:
         manager.shutdown()
         sys.exit(1)
 
+    # Initialize and wire TrayManager
+    tray_manager = None
+    try:
+        tray_manager = TrayManager(manager=manager, window=window, logger=logger)
+        window.set_tray_manager(tray_manager)
+        tray_ok = tray_manager.start()
+        window.tray_active = tray_ok
+        if not tray_ok:
+            logger.warning("System tray is disabled; falling back to windowed-only mode.")
+    except Exception as exc:
+        logger.warning(f"Error starting tray manager: {exc}. Running window-only.", exc=exc)
+        window.tray_active = False
+
     logger.info("Companion ready.")
 
     try:
@@ -86,6 +143,13 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        # Clean Tray Thread Shutdown: Stop tray and wait for it to exit
+        if window.tray_active and tray_manager:
+            try:
+                tray_manager.stop()
+            except Exception:
+                pass
+
         # Always signal the monitor thread to exit cleanly
         manager.shutdown()
         if manager.is_managed():

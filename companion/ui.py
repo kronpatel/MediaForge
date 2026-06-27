@@ -19,11 +19,15 @@ from __future__ import annotations
 import os
 import threading
 import webbrowser
+from typing import TYPE_CHECKING
 
 import customtkinter as ctk
 
 from backend_manager import BackendManager, BackendStatus
 from logger import AppLogger, LogEntry
+
+if TYPE_CHECKING:
+    from tray import TrayManager
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +214,10 @@ class CompanionWindow(ctk.CTk):
         self._log_viewer: LogViewerWindow | None = None
         self._current_status: BackendStatus = BackendStatus.STOPPED
 
+        # Tray properties
+        self.tray_active: bool = False
+        self._tray_manager: TrayManager | None = None
+
         self._setup_window()
         self._build_ui()
 
@@ -220,6 +228,7 @@ class CompanionWindow(ctk.CTk):
         self._logger.register_callback(self._on_log_entry)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close_request)
+        self.bind("<Unmap>", self._on_unmap)
 
         # Initial state sync
         self._apply_status(self._manager.status, "Ready")
@@ -503,10 +512,10 @@ class CompanionWindow(ctk.CTk):
         self._statusbar_lbl.configure(text=display_message)
 
         # Button states
-        is_stopped = status == BackendStatus.STOPPED
+        is_stopped_or_crashed = status in (BackendStatus.STOPPED, BackendStatus.CRASHED)
         is_running = status == BackendStatus.RUNNING
 
-        self._start_btn.configure(state="normal" if is_stopped else "disabled")
+        self._start_btn.configure(state="normal" if is_stopped_or_crashed else "disabled")
         self._stop_btn.configure(state="normal" if (is_running and is_managed) else "disabled")
         self._restart_btn.configure(state="normal" if (is_running and is_managed) else "disabled")
         self._open_btn.configure(state="normal" if is_running else "disabled")
@@ -564,7 +573,7 @@ class CompanionWindow(ctk.CTk):
         Called when the user presses the X button or the Exit button.
 
         If the backend is running and managed, show a confirmation dialog.
-        Otherwise, exit immediately without stopping/confirmation.
+        Otherwise, hide to tray if active, or exit if inactive.
         """
         is_running = self._current_status in (BackendStatus.RUNNING, BackendStatus.STARTING)
         is_managed = self._manager.is_managed()
@@ -572,7 +581,12 @@ class CompanionWindow(ctk.CTk):
         if is_running and is_managed:
             self._show_shutdown_dialog()
         else:
-            self._do_exit(stop_backend=False)
+            if self.tray_active:
+                self.withdraw()
+                if self._tray_manager:
+                    self._tray_manager.notify_background()
+            else:
+                self._do_exit(stop_backend=False)
 
     def _show_shutdown_dialog(self) -> None:
         dialog = ctk.CTkToplevel(self)
@@ -607,7 +621,12 @@ class CompanionWindow(ctk.CTk):
 
         def exit_only():
             dialog.destroy()
-            self._do_exit(stop_backend=False)
+            if self.tray_active:
+                self.withdraw()
+                if self._tray_manager:
+                    self._tray_manager.notify_background()
+            else:
+                self._do_exit(stop_backend=False)
 
         def cancel():
             dialog.destroy()
@@ -656,6 +675,46 @@ class CompanionWindow(ctk.CTk):
             threading.Thread(target=_stop_then_destroy, daemon=True).start()
         else:
             self.destroy()
+
+    def _on_unmap(self, event) -> None:
+        """Called on window state changes (e.g. minimizing)."""
+        if event.widget == self:
+            # Minimize Detection Clarification: only iconic state triggers tray hide
+            if self.state() == "iconic" and self.tray_active:
+                self.withdraw()
+                if self._tray_manager:
+                    self._tray_manager.notify_background()
+
+    def set_tray_manager(self, tray_manager: TrayManager) -> None:
+        """Register the TrayManager instance."""
+        self._tray_manager = tray_manager
+
+    def restore_window(self) -> None:
+        """Restore and focus the main window (thread-safe)."""
+        def _do_restore():
+            self.deiconify()
+            self.state("normal")
+            self.focus_force()
+            self.lift()
+        self.after(0, _do_restore)
+
+    def trigger_start(self) -> None:
+        """Tray shortcut to trigger managed backend startup."""
+        self._action_start()
+
+    def trigger_stop(self) -> None:
+        """Tray shortcut to trigger managed backend stop."""
+        self._action_stop()
+
+    def trigger_restart(self) -> None:
+        """Tray shortcut to trigger managed backend restart."""
+        self._action_restart()
+
+    def exit_completely(self) -> None:
+        """Exit the entire application completely, bypassing hide-to-tray."""
+        if self._tray_manager:
+            self._tray_manager.stop()
+        self._do_exit(stop_backend=True)
 
 
 # ---------------------------------------------------------------------------

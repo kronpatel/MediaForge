@@ -534,7 +534,7 @@ class BackendManager:
                 with self._lock:
                     self._process = None
                     self._is_managed = False
-                self._set_status(BackendStatus.STOPPED, "Unable to communicate with backend.")
+                self._set_status(BackendStatus.CRASHED, "Unable to communicate with backend.")
 
             time.sleep(HEALTH_CHECK_INTERVAL)
 
