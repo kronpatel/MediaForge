@@ -448,6 +448,53 @@ class BackendManager:
                 pass
         return None
 
+    def _normalize_job(self, raw_job: dict[str, Any]) -> dict[str, Any]:
+        """Normalize raw job dictionary into a consistent internal model."""
+        if not isinstance(raw_job, dict):
+            raw_job = {}
+        return {
+            "id": str(raw_job.get("id") or ""),
+            "url": str(raw_job.get("url") or ""),
+            "filename": str(raw_job.get("filename") or ""),
+            "label": str(raw_job.get("label") or raw_job.get("filename") or "Downloading…"),
+            "status": str(raw_job.get("status") or "queued").lower(),
+            "progress": float(raw_job.get("progress") or 0.0),
+            "speed": str(raw_job.get("speed") or "—"),
+            "eta": str(raw_job.get("eta") or "—"),
+            "mode": str(raw_job.get("mode") or "video").lower(),
+            "queued_at": str(raw_job.get("queued_at") or ""),
+            "started_at": str(raw_job.get("started_at") or ""),
+            "completed_at": str(raw_job.get("completed_at") or ""),
+        }
+
+    def _normalize_stats(self, raw_stats: dict[str, Any]) -> dict[str, Any]:
+        """Normalize raw stats dictionary into a consistent internal model."""
+        if not isinstance(raw_stats, dict):
+            raw_stats = {}
+        return {
+            "downloads_today": int(raw_stats.get("downloads_today") or 0),
+            "total_downloads": int(raw_stats.get("total_downloads") or 0),
+            "completed_count": int(raw_stats.get("completed_count") or 0),
+            "failed_count": int(raw_stats.get("failed_count") or 0),
+            "success_rate": float(raw_stats.get("success_rate") or 100.0),
+            "failure_rate": float(raw_stats.get("failure_rate") or 0.0),
+            "queue_length": int(raw_stats.get("queue_length") or 0),
+            "active_jobs": int(raw_stats.get("active_jobs") or 0),
+            "backend_uptime": int(raw_stats.get("backend_uptime") or 0),
+            "average_speed": str(raw_stats.get("average_speed") or "0 KB/s"),
+        }
+
+    def _normalize_settings(self, raw_settings: dict[str, Any]) -> dict[str, Any]:
+        """Normalize raw settings dictionary into a consistent internal model."""
+        if not isinstance(raw_settings, dict):
+            raw_settings = {}
+        return {
+            "download_folder": str(raw_settings.get("download_folder") or ""),
+            "ffmpeg_path": str(raw_settings.get("ffmpeg_path") or ""),
+            "backend_url": str(raw_settings.get("backend_url") or ""),
+            "theme": str(raw_settings.get("theme") or "dark").lower(),
+        }
+
     def get_queue(self) -> list[dict[str, Any]]:
         """Fetch the list of queued and downloading jobs from the backend."""
         resp = self._send_request("GET", "/queue", timeout=HTTP_TIMEOUT)
@@ -456,17 +503,18 @@ class BackendManager:
                 data = resp.json()
                 if data.get("success"):
                     qdata = data.get("queue")
+                    raw_jobs = []
                     if isinstance(qdata, dict):
                         # Flatten get_queue_status() dictionary into a single list of jobs
-                        jobs = []
                         active = qdata.get("active")
                         if active:
-                            jobs.append(active)
-                        jobs.extend(qdata.get("queued", []))
-                        jobs.extend(qdata.get("failed", []))
-                        return jobs
+                            raw_jobs.append(active)
+                        raw_jobs.extend(qdata.get("queued", []))
+                        raw_jobs.extend(qdata.get("failed", []))
                     elif isinstance(qdata, list):
-                        return qdata
+                        raw_jobs = qdata
+                    
+                    return [self._normalize_job(j) for j in raw_jobs]
             except Exception:
                 pass
         return []
@@ -478,7 +526,8 @@ class BackendManager:
             try:
                 data = resp.json()
                 if data.get("success"):
-                    return data.get("history", [])
+                    raw_history = data.get("history", [])
+                    return [self._normalize_job(h) for h in raw_history]
             except Exception:
                 pass
         return []
@@ -490,10 +539,10 @@ class BackendManager:
             try:
                 data = resp.json()
                 if data.get("success"):
-                    return data.get("stats", {})
+                    return self._normalize_stats(data.get("stats", {}))
             except Exception:
                 pass
-        return {}
+        return self._normalize_stats({})
 
     def get_settings(self) -> dict[str, Any]:
         """Fetch settings from the backend."""
@@ -502,10 +551,10 @@ class BackendManager:
             try:
                 data = resp.json()
                 if data.get("success"):
-                    return data.get("settings", {})
+                    return self._normalize_settings(data.get("settings", {}))
             except Exception:
                 pass
-        return {}
+        return self._normalize_settings({})
 
     def save_settings(self, changes: dict[str, Any]) -> dict[str, Any] | None:
         """Save settings updates to the backend."""
