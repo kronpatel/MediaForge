@@ -160,6 +160,13 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        # Stop updater thread cleanly (Phase 4.1)
+        if hasattr(window, "updater") and window.updater:
+            try:
+                window.updater.shutdown()
+            except Exception:
+                pass
+
         # Stop unified poller thread
         if hasattr(window, "_dashboard_controller") and window._dashboard_controller:
             try:

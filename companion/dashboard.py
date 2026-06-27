@@ -212,13 +212,49 @@ class DashboardPage(BasePage):
         cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         cards_frame.pack(fill="x", padx=20, pady=10)
 
-        # Columns configuration
-        cards_frame.columnconfigure((0, 1, 2, 3), weight=1, uniform="equal")
-
+        # Columns configuration (5 columns uniform for the new updater card)
+        cards_frame.columnconfigure((0, 1, 2, 3, 4), weight=1, uniform="equal")
+ 
         self._status_card = self._create_card(cards_frame, 0, "Backend Status", "Offline", "#ef4444")
-        self._version_card = self._create_card(cards_frame, 1, "Version", "v—", "#8b92a8")
+        self._version_card = self._create_card(cards_frame, 1, "Backend Version", "v—", "#8b92a8")
         self._uptime_card = self._create_card(cards_frame, 2, "Backend Uptime", "0s", "#8b92a8")
         self._queue_card = self._create_card(cards_frame, 3, "Queue Size", "0", "#8b92a8")
+
+        # ── Updater Info Card ──
+        update_card = ctk.CTkFrame(
+            cards_frame,
+            fg_color="#1a1d27",
+            border_color="#2e3347",
+            border_width=1,
+            corner_radius=12,
+        )
+        update_card.grid(row=0, column=4, padx=4, sticky="nsew")
+
+        update_inner = ctk.CTkFrame(update_card, fg_color="transparent")
+        update_inner.pack(padx=12, pady=12, fill="both")
+
+        ctk.CTkLabel(
+            update_inner,
+            text="Companion Update",
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            text_color="#8b92a8",
+        ).pack(anchor="w")
+
+        self._update_status_lbl = ctk.CTkLabel(
+            update_inner,
+            text="Checking...",
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color="#4f8ef7",
+        )
+        self._update_status_lbl.pack(anchor="w", pady=(4, 0))
+
+        self._update_versions_lbl = ctk.CTkLabel(
+            update_inner,
+            text="v— → v—",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color="#8b92a8",
+        )
+        self._update_versions_lbl.pack(anchor="w", pady=(2, 0))
 
         # ── Active Download Panel ─────────────────────────────────────────
         self._active_card = ctk.CTkFrame(
@@ -346,6 +382,76 @@ class DashboardPage(BasePage):
         return {"lbl": val_lbl, "default_color": color}
 
     # ------------------------------------------------------------------
+    # Updater Callbacks & UI Mapping
+    # ------------------------------------------------------------------
+
+    def on_show(self) -> None:
+        main_window = self.master.master
+        self.updater = getattr(main_window, "updater", None)
+        if self.updater:
+            self.updater.register_callback(self._on_update_status)
+            # Update initial status display
+            has_up = self.updater.has_update()
+            latest = self.updater.get_latest_version()
+            if has_up:
+                self._update_card_ui("Update Available", 0.0)
+            elif latest != "v—":
+                self._update_card_ui("Up To Date", 0.0)
+            else:
+                self._update_card_ui("Idle", 0.0)
+        self._populate_logs()
+
+    def on_hide(self) -> None:
+        if self.updater:
+            self.updater.unregister_callback(self._on_update_status)
+
+    def _on_update_status(self, status: str, progress: float, error_msg: str | None = None) -> None:
+        try:
+            self.after(0, self._update_card_ui, status, progress)
+        except Exception:
+            pass
+
+    def _update_card_ui(self, status: str, progress: float) -> None:
+        if not self.updater:
+            main_window = self.master.master
+            self.updater = getattr(main_window, "updater", None)
+        if not self.updater:
+            return
+
+        current = self.updater.get_current_version()
+        latest = self.updater.get_latest_version()
+        has_up = self.updater.has_update()
+
+        if status == "Checking":
+            status_text = "Checking..."
+            color = "#4f8ef7"
+        elif status == "Downloading":
+            status_text = f"Downloading ({int(progress)}%)"
+            color = "#f59e0b"
+        elif status == "Verifying":
+            status_text = "Verifying..."
+            color = "#f59e0b"
+        elif status == "Completed":
+            status_text = "Completed"
+            color = "#22c55e"
+        elif status == "Failed":
+            status_text = "❌ Check Failed"
+            color = "#ef4444"
+        elif status == "Offline":
+            status_text = "⚠ Offline"
+            color = "#f59e0b"
+        else:
+            if has_up:
+                status_text = "⬇ Update Available"
+                color = "#f59e0b"
+            else:
+                status_text = "✓ Up To Date"
+                color = "#22c55e"
+
+        self._update_status_lbl.configure(text=status_text, text_color=color)
+        self._update_versions_lbl.configure(text=f"v{current} → {latest}")
+
+    # ------------------------------------------------------------------
     # Lifecycle refresh
     # ------------------------------------------------------------------
 
@@ -410,9 +516,6 @@ class DashboardPage(BasePage):
         # 6. Incremental log append
         self._append_new_logs()
 
-    def on_show(self) -> None:
-        """Full repopulate when page becomes visible (may have missed log entries)."""
-        self._populate_logs()
 
     def _populate_logs(self) -> None:
         """Full rewrite — used on page show or when count drops (e.g. after clear)."""

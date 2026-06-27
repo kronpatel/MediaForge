@@ -44,6 +44,10 @@ def default_local_settings() -> dict[str, Any]:
         "notification_toggle": True,
         "backend_poll_interval": 3,
         "theme": "Dark",
+        # Phase 4.1 Auto-updates options
+        "auto_check_updates": True,
+        "update_poll_interval": 24,
+        "check_updates_startup": True,
     }
 
 
@@ -251,6 +255,77 @@ class SettingsPage(BasePage):
         )
         self._apply_theme_btn.pack(side="left", padx=(10, 0))
 
+        # ── Category: Update Settings ──────────────────────────────────────
+        self._create_section_label(self._form, "Update Settings")
+
+        self._auto_check_var = ctk.BooleanVar()
+        self._create_form_row_checkbox(self._form, "Auto Check Updates", "Automatically check for updates in the background", self._auto_check_var)
+
+        self._check_startup_var = ctk.BooleanVar()
+        self._create_form_row_checkbox(self._form, "Check on Startup", "Check for updates when the Companion launches", self._check_startup_var)
+
+        self._update_poll_var = ctk.StringVar()
+        self._create_form_row_entry(self._form, "Poll Interval (hours)", self._update_poll_var, "Default is 24 hours")
+
+        # Info row (Current Version, Latest Version, Last Checked)
+        info_row = ctk.CTkFrame(self._form, fg_color="transparent")
+        info_row.pack(fill="x", padx=10, pady=6)
+        ctk.CTkLabel(info_row, text="Update Status", width=150, anchor="w", text_color="#e8eaf0").pack(side="left")
+
+        self._update_info_lbl = ctk.CTkLabel(
+            info_row,
+            text="Current: v1.1.0 | Latest: v—\nLast checked: Never",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+            justify="left",
+            anchor="w"
+        )
+        self._update_info_lbl.pack(side="left", fill="x", expand=True)
+
+        # Action Row (Check Now, Download Update, Release Notes)
+        actions_row = ctk.CTkFrame(self._form, fg_color="transparent")
+        actions_row.pack(fill="x", padx=10, pady=8)
+        ctk.CTkLabel(actions_row, text="", width=150).pack(side="left")
+
+        self._check_now_btn = ctk.CTkButton(
+            actions_row,
+            text="Check Now",
+            width=100,
+            height=28,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            corner_radius=6,
+            command=self._check_now_click
+        )
+        self._check_now_btn.pack(side="left", padx=4)
+
+        self._download_update_btn = ctk.CTkButton(
+            actions_row,
+            text="Download Update",
+            width=125,
+            height=28,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            corner_radius=6,
+            command=self._download_update_click
+        )
+        self._download_update_btn.pack(side="left", padx=4)
+
+        self._release_notes_btn = ctk.CTkButton(
+            actions_row,
+            text="Release Notes",
+            width=100,
+            height=28,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            corner_radius=6,
+            command=self._release_notes_click
+        )
+        self._release_notes_btn.pack(side="left", padx=4)
+
         # ── Reset Default Button ──────────────────────────────────────────
         ctk.CTkFrame(self._form, height=1, fg_color="#2e3347").pack(fill="x", pady=20)
         
@@ -270,7 +345,8 @@ class SettingsPage(BasePage):
         # Trace general options variables for dynamic Save button enable/disable state
         for var in (self._dir_var, self._ffmpeg_var, self._url_var, self._poll_var,
                     self._auto_start_companion_var, self._auto_start_backend_var,
-                    self._notifications_var):
+                    self._notifications_var,
+                    self._auto_check_var, self._check_startup_var, self._update_poll_var):
             var.trace_add("write", lambda *_: self._update_save_btn_state())
 
     def _create_section_label(self, parent: ctk.CTkScrollableFrame, title: str) -> None:
@@ -337,6 +413,9 @@ class SettingsPage(BasePage):
             "auto_start_backend": local_settings.get("auto_start_backend", True),
             "notification_toggle": local_settings.get("notification_toggle", True),
             "backend_poll_interval": local_settings.get("backend_poll_interval", 3),
+            "auto_check_updates": local_settings.get("auto_check_updates", True),
+            "update_poll_interval": local_settings.get("update_poll_interval", 24),
+            "check_updates_startup": local_settings.get("check_updates_startup", True),
         }
 
         # Apply to form fields
@@ -349,6 +428,9 @@ class SettingsPage(BasePage):
         self._auto_start_companion_var.set(self._original_settings["auto_start_companion"])
         self._auto_start_backend_var.set(self._original_settings["auto_start_backend"])
         self._notifications_var.set(self._original_settings["notification_toggle"])
+        self._auto_check_var.set(self._original_settings["auto_check_updates"])
+        self._check_startup_var.set(self._original_settings["check_updates_startup"])
+        self._update_poll_var.set(str(self._original_settings["update_poll_interval"]))
 
         # Update Save changes button state
         self._update_save_btn_state()
@@ -363,6 +445,9 @@ class SettingsPage(BasePage):
             "auto_start_backend": self._auto_start_backend_var.get(),
             "notification_toggle": self._notifications_var.get(),
             "backend_poll_interval": int(self._poll_var.get().strip() or "3"),
+            "auto_check_updates": self._auto_check_var.get(),
+            "check_updates_startup": self._check_startup_var.get(),
+            "update_poll_interval": int(self._update_poll_var.get().strip() or "24"),
         }
 
     def is_dirty(self) -> bool:
@@ -419,6 +504,14 @@ class SettingsPage(BasePage):
         except ValueError:
             return False, "Backend Poll Interval must be an integer between 1 and 60 seconds."
 
+        # 5. Update polling rate must be 1–168 hours
+        try:
+            upoll = int(vals.get("update_poll_interval", 24))
+            if upoll < 1 or upoll > 168:
+                raise ValueError
+        except ValueError:
+            return False, "Update Poll Interval must be an integer between 1 and 168 hours."
+
         return True, ""
 
     # ------------------------------------------------------------------
@@ -452,6 +545,9 @@ class SettingsPage(BasePage):
             "auto_start_backend": vals["auto_start_backend"],
             "notification_toggle": vals["notification_toggle"],
             "backend_poll_interval": vals["backend_poll_interval"],
+            "auto_check_updates": vals["auto_check_updates"],
+            "check_updates_startup": vals["check_updates_startup"],
+            "update_poll_interval": vals["update_poll_interval"],
         })
         write_local_settings(local_settings)
 
@@ -479,6 +575,9 @@ class SettingsPage(BasePage):
         self._auto_start_companion_var.set(False)
         self._auto_start_backend_var.set(True)
         self._notifications_var.set(True)
+        self._auto_check_var.set(True)
+        self._check_startup_var.set(True)
+        self._update_poll_var.set("24")
         self._update_save_btn_state()
         self.logger.info("Restored settings controls to default values (click Save to apply).")
 
@@ -501,6 +600,103 @@ class SettingsPage(BasePage):
             self._save_btn.configure(state="disabled")
         else:
             self._save_btn.configure(state="normal" if general_dirty else "disabled")
+
+    def _check_now_click(self) -> None:
+        if self.updater:
+            self.updater.check_for_updates(force=True)
+
+    def _download_update_click(self) -> None:
+        if not self.updater:
+            return
+        btn_text = self._download_update_btn.cget("text")
+        if "Cancel" in btn_text:
+            self.updater.cancel_download()
+        else:
+            self.updater.download_update()
+
+    def _release_notes_click(self) -> None:
+        if self.updater:
+            self.updater.open_release_notes()
+
+    def _update_updater_status_ui(self, status: str, progress: float, error_msg: str | None = None) -> None:
+        if not self.updater:
+            main_window = self.master.master
+            self.updater = getattr(main_window, "updater", None)
+
+        if not self.updater:
+            return
+
+        current = self.updater.get_current_version()
+        latest = self.updater.get_latest_version()
+        last_checked_ts = self.updater.get_last_checked()
+
+        if last_checked_ts > 0:
+            from datetime import datetime
+            last_checked_str = datetime.fromtimestamp(last_checked_ts).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            last_checked_str = "Never"
+
+        # Update info text
+        info_text = f"Current: v{current} | Latest: {latest}\nLast checked: {last_checked_str}"
+        self._update_info_lbl.configure(text=info_text)
+
+        # Dynamic action buttons state
+        if status == "Checking":
+            self._check_now_btn.configure(state="disabled", text="Checking...")
+            self._download_update_btn.configure(state="disabled", text="Download Update")
+            self._release_notes_btn.configure(state="disabled")
+        elif status == "Downloading":
+            self._check_now_btn.configure(state="disabled", text="Check Now")
+            self._download_update_btn.configure(state="normal", text=f"Cancel ({int(progress)}%)")
+            self._release_notes_btn.configure(state="normal")
+        elif status == "Verifying":
+            self._check_now_btn.configure(state="disabled", text="Check Now")
+            self._download_update_btn.configure(state="disabled", text="Verifying...")
+            self._release_notes_btn.configure(state="normal")
+        elif status == "Completed":
+            self._check_now_btn.configure(state="normal", text="Check Now")
+            self._download_update_btn.configure(state="disabled", text="Completed")
+            self._release_notes_btn.configure(state="normal")
+        elif status == "Failed":
+            self._check_now_btn.configure(state="normal", text="Check Now")
+            has_up = self.updater.has_update()
+            self._download_update_btn.configure(
+                state="normal" if has_up else "disabled",
+                text="Retry Download" if has_up else "Download Update"
+            )
+            self._release_notes_btn.configure(state="normal" if latest != "v—" else "disabled")
+        else:  # Idle, Up To Date, Update Available, Offline
+            self._check_now_btn.configure(state="normal", text="Check Now")
+            has_up = self.updater.has_update()
+            self._download_update_btn.configure(
+                state="normal" if has_up else "disabled",
+                text="Download Update"
+            )
+            self._release_notes_btn.configure(state="normal" if latest != "v—" else "disabled")
+
+    def on_show(self) -> None:
+        main_window = self.master.master
+        self.updater = getattr(main_window, "updater", None)
+        if self.updater:
+            self.updater.register_callback(self._on_update_status)
+            has_up = self.updater.has_update()
+            latest = self.updater.get_latest_version()
+            if has_up:
+                self._update_updater_status_ui("Update Available", 0.0)
+            elif latest != "v—":
+                self._update_updater_status_ui("Up To Date", 0.0)
+            else:
+                self._update_updater_status_ui("Idle", 0.0)
+
+    def on_hide(self) -> None:
+        if self.updater:
+            self.updater.unregister_callback(self._on_update_status)
+
+    def _on_update_status(self, status: str, progress: float, error_msg: str | None = None) -> None:
+        try:
+            self.after(0, self._update_updater_status_ui, status, progress, error_msg)
+        except Exception:
+            pass
 
     def _apply_theme(self) -> None:
         """Apply and persist selected Theme Palette independently from the general Settings save workflow."""

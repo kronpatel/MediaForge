@@ -25,6 +25,7 @@ import customtkinter as ctk
 
 from backend_manager import BackendManager, BackendStatus
 from logger import AppLogger, LogEntry
+from updater import UpdateManager
 
 if TYPE_CHECKING:
     from tray import TrayManager
@@ -260,6 +261,11 @@ class CompanionWindow(ctk.CTk):
         
         # Trigger initial status application
         self._on_backend_status_change(self._manager.status)
+
+        # Initialize and start Auto Update System (Phase 4.1)
+        self.updater = UpdateManager(logger=self.logger)
+        self.updater.register_callback(self._on_updater_event)
+        self.updater.start()
 
     def _set_window_icon(self) -> None:
         try:
@@ -589,6 +595,9 @@ class CompanionWindow(ctk.CTk):
             self.exit_completely()
 
     def _do_exit(self, *, stop_backend: bool) -> None:
+        # Stop updater thread cleanly (Phase 4.1)
+        if hasattr(self, "updater") and self.updater:
+            self.updater.shutdown()
         # Threaded stop to prevent freezing on window destroy
         def _cleanup():
             if stop_backend:
@@ -599,6 +608,10 @@ class CompanionWindow(ctk.CTk):
     def exit_completely(self) -> None:
         """Fully shut down companion and backend."""
         self.logger.info("Initiating complete exit sequence...")
+
+        # Stop updater thread cleanly (Phase 4.1)
+        if hasattr(self, "updater") and self.updater:
+            self.updater.shutdown()
 
         # Stop polling thread first
         if hasattr(self, "_dashboard_controller") and self._dashboard_controller:
@@ -617,6 +630,41 @@ class CompanionWindow(ctk.CTk):
             self.destroy()
         except Exception:
             pass
+
+    def _on_updater_event(self, status: str, progress: float, error_msg: str | None = None) -> None:
+        """Handle updater events, displaying tray notification bubbles once per release version."""
+        if status == "Update Available" and self.tray_active and self._tray_manager:
+            latest = self.updater.get_latest_version()
+            
+            # Retrieve cache to see if we already notified for this version
+            from updater import CACHE_FILE
+            import json
+            last_notified = ""
+            if os.path.exists(CACHE_FILE):
+                try:
+                    with open(CACHE_FILE, "r", encoding="utf-8") as fh:
+                        data = json.load(fh)
+                        last_notified = data.get("last_notified_version", "")
+                except Exception:
+                    pass
+            
+            if latest != last_notified:
+                # Update last notified version in cache
+                if os.path.exists(CACHE_FILE):
+                    try:
+                        with open(CACHE_FILE, "r", encoding="utf-8") as fh:
+                            data = json.load(fh)
+                        data["last_notified_version"] = latest
+                        with open(CACHE_FILE, "w", encoding="utf-8") as fh:
+                            json.dump(data, fh, indent=2)
+                    except Exception:
+                        pass
+                
+                # Trigger tray notification bubble
+                self._tray_manager.notify(
+                    "MediaForge Update Available",
+                    f"Version {latest} is ready."
+                )
 
 
 # ---------------------------------------------------------------------------
