@@ -86,6 +86,9 @@ class DashboardController:
     def _poll_loop(self) -> None:
         while not self._stop_event.is_set():
             self._poll_event.clear()
+            if self._stop_event.is_set():
+                break
+                
             status = self._manager.status
             
             if status == BackendStatus.RUNNING:
@@ -112,6 +115,8 @@ class DashboardController:
                 self._handle_offline()
 
             # Wait for next interval or immediate trigger
+            if self._stop_event.is_set():
+                break
             self._poll_event.wait(self._poll_interval)
 
     def _handle_offline(self) -> None:
@@ -148,10 +153,19 @@ class DashboardController:
             self._last_data = data
             subs = list(self._subscribers)
         
+        try:
+            if self._window_ref:
+                # Route the entire broadcast onto the Tkinter main thread for absolute thread-safety
+                self._window_ref.after(0, self._safe_broadcast_on_main, data, subs)
+        except Exception:
+            pass
+
+    def _safe_broadcast_on_main(self, data: dict[str, Any], subs: list[Any]) -> None:
+        """Updates pages. Runs entirely on the Tkinter main thread."""
         for sub in subs:
             try:
                 if sub.winfo_exists():
-                    sub.after(0, sub.refresh, data)
+                    sub.refresh(data)
             except Exception:
                 pass
 
@@ -173,16 +187,26 @@ class DashboardPage(BasePage):
     def __init__(self, master: ctk.CTk, manager: BackendManager, logger: AppLogger) -> None:
         super().__init__(master, manager, logger)
         self._cached_hash = None
+        self._cached_version: str | None = None  # avoid per-poll HTTP round trip
+        self._log_count: int = 0               # for incremental log appending
         self._build_ui()
 
     def _build_ui(self) -> None:
         # Title
         ctk.CTkLabel(
             self,
-            text="Dashboard",
+            text="Companion Dashboard",
             font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
             text_color="#e8eaf0",
         ).pack(anchor="w", padx=20, pady=(20, 10))
+
+        # Subtitle
+        ctk.CTkLabel(
+            self,
+            text="Overview of backend services, active downloads, and logs.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+        ).pack(anchor="w", padx=20, pady=(0, 20))
 
         # ── Grid of Info Cards ───────────────────────────────────────────
         cards_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -222,7 +246,15 @@ class DashboardPage(BasePage):
             font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
             text_color="#e8eaf0",
         )
-        self._title_lbl.pack(anchor="w", pady=(4, 8))
+        self._title_lbl.pack(anchor="w", pady=(4, 2))
+
+        self._mode_lbl = ctk.CTkLabel(
+            self._active_inner,
+            text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+        )
+        self._mode_lbl.pack(anchor="w", pady=(0, 6))
 
         self._progress_bar = ctk.CTkProgressBar(
             self._active_inner,
@@ -319,14 +351,13 @@ class DashboardPage(BasePage):
 
     def refresh(self, data: dict[str, Any]) -> None:
         """Invoked on the Tkinter thread with polled backend state."""
-        # Performance check: serialize state to check if change occurred
         current_hash = hash(str(data))
         if current_hash == self._cached_hash:
             return
         self._cached_hash = current_hash
 
         offline = data.get("offline", True)
-        
+
         # 1. Status card
         if offline:
             status_text = "Offline"
@@ -336,9 +367,14 @@ class DashboardPage(BasePage):
             status_color = "#22c55e"
         self._status_card["lbl"].configure(text=status_text, text_color=status_color)
 
-        # 2. Version card
-        version = self.manager.fetch_version() if not offline else None
-        self._version_card["lbl"].configure(text=f"v{version}" if version else "v—")
+        # 2. Version card — only re-fetch on first online tick (cached afterwards)
+        if not offline and self._cached_version is None:
+            self._cached_version = self.manager.fetch_version()
+        if offline:
+            self._cached_version = None
+        self._version_card["lbl"].configure(
+            text=f"v{self._cached_version}" if self._cached_version else "v—"
+        )
 
         # 3. Uptime card
         stats = data.get("stats", {})
@@ -350,37 +386,70 @@ class DashboardPage(BasePage):
         self._queue_card["lbl"].configure(text=str(len(queue)))
 
         # 5. Active download block
-        # Active download is defined as any job in queue with status "downloading"
-        active_job = None
-        for job in queue:
-            if job.get("status") == "downloading":
-                active_job = job
-                break
+        active_job = next(
+            (job for job in queue if job.get("status") == "downloading"),
+            None
+        )
 
         if active_job:
-            self._title_lbl.configure(text=active_job.get("label", active_job.get("filename", "Downloading…")))
-            progress = active_job.get("progress", 0.0)
-            self._progress_bar.set(float(progress) / 100.0)
-            self._speed_lbl.configure(text=f"Speed: {active_job.get('speed', '—')}")
-            self._eta_lbl.configure(text=f"ETA: {active_job.get('eta', '—')}")
+            self._title_lbl.configure(text=active_job.get("label") or active_job.get("filename") or "Downloading…")
+            mode = active_job.get("mode", "video")
+            mode_icons = {"video": "🎬 Video", "audio": "🎵 Audio"}
+            self._mode_lbl.configure(text=mode_icons.get(mode, mode.capitalize()))
+            progress = float(active_job.get("progress") or 0.0)
+            self._progress_bar.set(progress / 100.0)
+            self._speed_lbl.configure(text=f"Speed: {active_job.get('speed') or '—'}")
+            self._eta_lbl.configure(text=f"ETA: {active_job.get('eta') or '—'}")
         else:
             self._title_lbl.configure(text="No active downloads.")
+            self._mode_lbl.configure(text="")
             self._progress_bar.set(0.0)
             self._speed_lbl.configure(text="Speed: —")
             self._eta_lbl.configure(text="ETA: —")
 
+        # 6. Incremental log append
+        self._append_new_logs()
+
     def on_show(self) -> None:
-        """Trigger log populate when page is focused."""
+        """Full repopulate when page becomes visible (may have missed log entries)."""
         self._populate_logs()
 
     def _populate_logs(self) -> None:
+        """Full rewrite — used on page show or when count drops (e.g. after clear)."""
         entries = self.logger.get_entries()
         self._log_textbox.configure(state="normal")
         self._log_textbox.delete("1.0", "end")
-        for entry in entries[-20:]:  # show recent 20 logs
+        for entry in entries[-50:]:  # show recent 50 logs
             self._log_textbox.insert("end", str(entry) + "\n")
+        self._log_count = len(entries)
         self._log_textbox.configure(state="disabled")
         self._log_textbox.see("end")
+
+    def _append_new_logs(self) -> None:
+        """Append only newly-added log entries; preserve user scroll position."""
+        entries = self.logger.get_entries()
+        current_count = len(entries)
+        if current_count <= self._log_count:
+            # Count dropped (e.g. logs cleared) — do a full repopulate
+            if current_count < self._log_count:
+                self._populate_logs()
+            return
+
+        new_entries = entries[self._log_count:]
+        # Auto-scroll only if user is already at (or near) the bottom
+        try:
+            at_bottom = self._log_textbox.yview()[1] >= 0.95
+        except Exception:
+            at_bottom = True
+
+        self._log_textbox.configure(state="normal")
+        for entry in new_entries:
+            self._log_textbox.insert("end", str(entry) + "\n")
+        self._log_count = current_count
+        self._log_textbox.configure(state="disabled")
+
+        if at_bottom:
+            self._log_textbox.see("end")
 
     def _format_uptime(self, secs: int) -> str:
         if secs < 60:

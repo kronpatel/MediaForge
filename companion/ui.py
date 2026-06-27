@@ -34,7 +34,8 @@ if TYPE_CHECKING:
 # Theme / palette
 # ---------------------------------------------------------------------------
 
-ctk.set_appearance_mode("dark")
+# Theme is applied dynamically from local settings at startup (see CompanionWindow.__init__)
+ctk.set_appearance_mode("dark")  # fallback — overridden immediately after
 ctk.set_default_color_theme("blue")
 
 # Custom accent palette
@@ -98,6 +99,14 @@ class LogsPage(BasePage):
             font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
             text_color="#e8eaf0",
         ).pack(anchor="w", padx=20, pady=(20, 10))
+
+        # Subtitle
+        ctk.CTkLabel(
+            self,
+            text="Diagnostics and internal log activity stream.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+        ).pack(anchor="w", padx=20, pady=(0, 20))
 
         # Toolbar
         toolbar = ctk.CTkFrame(self, fg_color="transparent")
@@ -196,6 +205,11 @@ class CompanionWindow(ctk.CTk):
         self._tray_manager: Any = None
         self._current_page_name: str = ""
 
+        # Apply saved theme preference before building UI
+        local_settings = read_local_settings()
+        _saved_theme = local_settings.get("theme", "Dark")
+        ctk.set_appearance_mode(_saved_theme)
+
         # Window settings
         self.title("MediaForge Companion")
         self.geometry(f"{WINDOW_W}x{WINDOW_H}")
@@ -208,6 +222,9 @@ class CompanionWindow(ctk.CTk):
         # Window closing events
         self.protocol("WM_DELETE_WINDOW", self._on_close_request)
         self.bind("<Unmap>", self._on_unmap)
+
+        # Busy guard for lifecycle operations (prevents rapid double-clicks)
+        self._lifecycle_busy: bool = False
 
         # Build Sidebar & Pages
         self._build_ui()
@@ -225,9 +242,8 @@ class CompanionWindow(ctk.CTk):
         # Setup Unified Controller
         self._dashboard_controller = DashboardController(self._manager, self.logger)
         self._dashboard_controller.associate_window(self)
-        
-        # Load local settings for poll interval
-        local_settings = read_local_settings()
+
+        # Poll interval from local settings (theme already applied above)
         self._dashboard_controller.set_poll_interval(float(local_settings.get("backend_poll_interval", 3)))
 
         # Register pages and start controller thread
@@ -458,14 +474,31 @@ class CompanionWindow(ctk.CTk):
     # ------------------------------------------------------------------
 
     def _action_start(self) -> None:
+        if self._lifecycle_busy:
+            return
         self._manager.start()
 
     def _action_stop(self) -> None:
-        # Run stop in daemon thread to avoid blocking main Tk thread
-        threading.Thread(target=self._manager.stop, daemon=True).start()
+        if self._lifecycle_busy:
+            return
+        self._lifecycle_busy = True
+        def _run():
+            try:
+                self._manager.stop()
+            finally:
+                self._lifecycle_busy = False
+        threading.Thread(target=_run, daemon=True).start()
 
     def _action_restart(self) -> None:
-        threading.Thread(target=self._manager.restart, daemon=True).start()
+        if self._lifecycle_busy:
+            return
+        self._lifecycle_busy = True
+        def _run():
+            try:
+                self._manager.restart()
+            finally:
+                self._lifecycle_busy = False
+        threading.Thread(target=_run, daemon=True).start()
 
     def set_tray_manager(self, tray_manager: Any) -> None:
         self._tray_manager = tray_manager
@@ -541,16 +574,18 @@ class CompanionWindow(ctk.CTk):
                 "Exit Companion",
                 "The backend service is currently running.\n\n"
                 "• Click [Yes] to STOP the backend and exit.\n"
-                "• Click [No] to hide to tray (Exit Only) keeping backend active.\n"
+                "• Click [No] to hide to tray / exit Companion (backend stays active).\n"
                 "• Click [Cancel] to return."
             )
             if ans is True:
                 self.exit_completely()
             elif ans is False:
+                # Tray active → hide to tray; tray unavailable → destroy window only
                 if self.tray_active:
                     self.withdraw()
                 else:
                     self._do_exit(stop_backend=False)
+            # ans is None (Cancel) → do nothing
         else:
             self.exit_completely()
 
@@ -565,15 +600,14 @@ class CompanionWindow(ctk.CTk):
     def exit_completely(self) -> None:
         """Fully shut down companion and backend."""
         self.logger.info("Initiating complete exit sequence...")
-        
+
         # Stop polling thread first
         if hasattr(self, "_dashboard_controller") and self._dashboard_controller:
             self._dashboard_controller.shutdown()
 
-        # Stop pystray icon
+        # Stop pystray icon (stop() already joins the thread internally)
         if self.tray_active and self._tray_manager:
             self._tray_manager.stop()
-            self._tray_manager.join(timeout=2.0)
 
         # Stop backend manager
         self._manager.shutdown()

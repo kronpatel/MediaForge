@@ -24,7 +24,15 @@ if TYPE_CHECKING:
 class QueueRow(ctk.CTkFrame):
     """
     A single reusable row widget in the queue table.
+    Stacked layout: title row → progress bar → meta row (speed / ETA / badge).
     """
+
+    _STATUS_COLORS = {
+        "queued":      "#f59e0b",   # amber
+        "downloading": "#4f8ef7",   # blue
+        "completed":   "#22c55e",   # green
+        "failed":      "#ef4444",   # red
+    }
 
     def __init__(self, master: ctk.CTkFrame, on_copy: Callable[[str], None], on_open_folder: Callable[[], None]) -> None:
         super().__init__(
@@ -32,138 +40,132 @@ class QueueRow(ctk.CTkFrame):
             fg_color="#1a1d27",
             border_color="#2e3347",
             border_width=1,
-            corner_radius=8,
+            corner_radius=10,
         )
         self._on_copy = on_copy
         self._on_open_folder = on_open_folder
         self.job_id: str | None = None
         self.job_url: str = ""
-
         self._build_ui()
 
     def _build_ui(self) -> None:
-        # Title & Meta Info
+        outer = ctk.CTkFrame(self, fg_color="transparent")
+        outer.pack(fill="x", padx=14, pady=10)
+
+        # ── Row 1: Title + Action Buttons ────────────────────────────────
+        top_row = ctk.CTkFrame(outer, fg_color="transparent")
+        top_row.pack(fill="x")
+
         self._title_lbl = ctk.CTkLabel(
-            self,
+            top_row,
             text="Job Title",
             font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
             text_color="#e8eaf0",
             anchor="w",
+            wraplength=380,
+            justify="left",
         )
-        self._title_lbl.pack(side="left", fill="x", expand=True, padx=12, pady=10)
+        self._title_lbl.pack(side="left", fill="x", expand=True)
 
-        # Progress Block
-        self._progress_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self._progress_frame.pack(side="left", fill="y", padx=12)
+        self._copy_btn = ctk.CTkButton(
+            top_row, text="📋", width=26, height=26,
+            fg_color="#20232f", hover_color="#2e3347", corner_radius=6,
+            command=self._copy_click,
+        )
+        self._copy_btn.pack(side="right", padx=(4, 0))
+
+        self._open_btn = ctk.CTkButton(
+            top_row, text="📂", width=26, height=26,
+            fg_color="#20232f", hover_color="#2e3347", corner_radius=6,
+            command=self._open_click,
+        )
+        self._open_btn.pack(side="right", padx=(4, 0))
+
+        # ── Row 2: Full-width Progress Bar ───────────────────────────────
+        prog_row = ctk.CTkFrame(outer, fg_color="transparent")
+        prog_row.pack(fill="x", pady=(6, 3))
 
         self._progress_bar = ctk.CTkProgressBar(
-            self._progress_frame,
+            prog_row,
             fg_color="#20232f",
             progress_color="#4f8ef7",
-            width=120,
-            height=6,
+            height=7,
+            corner_radius=4,
         )
-        self._progress_bar.pack(anchor="w", pady=(8, 2))
+        self._progress_bar.pack(fill="x")
         self._progress_bar.set(0.0)
 
-        self._progress_lbl = ctk.CTkLabel(
-            self._progress_frame,
-            text="0%",
-            font=ctk.CTkFont(family="Segoe UI", size=10),
-            text_color="#8b92a8",
-        )
-        self._progress_lbl.pack(anchor="w")
-
-        # Stats Column (Speed & ETA)
-        self._stats_frame = ctk.CTkFrame(self, fg_color="transparent", width=100)
-        self._stats_frame.pack(side="left", padx=12)
-        self._stats_frame.pack_propagate(False)
+        # ── Row 3: Speed · ETA · % · Status badge ────────────────────────
+        meta_row = ctk.CTkFrame(outer, fg_color="transparent")
+        meta_row.pack(fill="x")
 
         self._speed_lbl = ctk.CTkLabel(
-            self._stats_frame,
-            text="— KB/s",
+            meta_row,
+            text="—",
             font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#e8eaf0",
-            anchor="w",
-        )
-        self._speed_lbl.pack(fill="x")
-
-        self._eta_lbl = ctk.CTkLabel(
-            self._stats_frame,
-            text="ETA: —",
-            font=ctk.CTkFont(family="Segoe UI", size=10),
             text_color="#8b92a8",
             anchor="w",
         )
-        self._eta_lbl.pack(fill="x")
+        self._speed_lbl.pack(side="left")
 
-        # Status badge
+        self._eta_lbl = ctk.CTkLabel(
+            meta_row,
+            text="ETA: —",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+            anchor="w",
+        )
+        self._eta_lbl.pack(side="left", padx=(12, 0))
+
+        self._progress_lbl = ctk.CTkLabel(
+            meta_row,
+            text="0%",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+        )
+        self._progress_lbl.pack(side="left", padx=(12, 0))
+
+        # Status pill badge (right-aligned)
+        self._badge_frame = ctk.CTkFrame(
+            meta_row,
+            fg_color="#2e3347",
+            corner_radius=8,
+        )
+        self._badge_frame.pack(side="right")
         self._status_lbl = ctk.CTkLabel(
-            self,
+            self._badge_frame,
             text="Queued",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             text_color="#f59e0b",
-            width=90,
-            anchor="center",
+            padx=8, pady=2,
         )
-        self._status_lbl.pack(side="left", padx=12)
-
-        # Action Buttons
-        self._copy_btn = ctk.CTkButton(
-            self,
-            text="📋",
-            width=28,
-            height=28,
-            fg_color="#20232f",
-            hover_color="#2e3347",
-            corner_radius=6,
-            command=self._copy_click,
-        )
-        self._copy_btn.pack(side="left", padx=4)
-
-        self._open_btn = ctk.CTkButton(
-            self,
-            text="📂",
-            width=28,
-            height=28,
-            fg_color="#20232f",
-            hover_color="#2e3347",
-            corner_radius=6,
-            command=self._open_click,
-        )
-        self._open_btn.pack(side="left", padx=(4, 12))
+        self._status_lbl.pack()
 
     def update_job(self, job: dict[str, Any]) -> None:
         self.job_id = job.get("id")
         self.job_url = job.get("url", "")
-        
-        # Title truncation
+
+        # Title — truncate at 55 chars
         label = job.get("label") or job.get("filename") or "Download Job"
-        if len(label) > 42:
-            label = label[:40] + "…"
+        if len(label) > 55:
+            label = label[:53] + "…"
         self._title_lbl.configure(text=label)
 
         # Progress
-        progress = float(job.get("progress", 0.0))
+        progress = float(job.get("progress") or 0.0)
         self._progress_bar.set(progress / 100.0)
         self._progress_lbl.configure(text=f"{int(progress)}%")
 
-        # Status styling
-        status = job.get("status", "queued").lower()
-        status_colors = {
-            "queued": "#f59e0b",      # amber
-            "downloading": "#4f8ef7", # blue
-            "completed": "#22c55e",   # green
-            "failed": "#ef4444",      # red
-        }
-        color = status_colors.get(status, "#8b92a8")
-        self._status_lbl.configure(text=status.capitalize(), text_color=color)
-
         # Speed and ETA
-        speed = job.get("speed")
-        eta = job.get("eta")
-        self._speed_lbl.configure(text=speed if speed else "—")
-        self._eta_lbl.configure(text=f"ETA: {eta}" if eta else "ETA: —")
+        speed = job.get("speed") or "—"
+        eta = job.get("eta") or "—"
+        self._speed_lbl.configure(text=speed)
+        self._eta_lbl.configure(text=f"ETA: {eta}")
+
+        # Status badge
+        status = job.get("status", "queued").lower()
+        color = self._STATUS_COLORS.get(status, "#8b92a8")
+        self._status_lbl.configure(text=status.capitalize(), text_color=color)
 
     def _copy_click(self) -> None:
         if self.job_url:
@@ -192,12 +194,22 @@ class QueuePage(BasePage):
         header_frame = ctk.CTkFrame(self, fg_color="transparent")
         header_frame.pack(fill="x", padx=20, pady=(20, 10))
 
+        title_container = ctk.CTkFrame(header_frame, fg_color="transparent")
+        title_container.pack(side="left", anchor="w")
+
         ctk.CTkLabel(
-            header_frame,
+            title_container,
             text="Download Queue",
             font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
             text_color="#e8eaf0",
-        ).pack(side="left")
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            title_container,
+            text="Manage ongoing and pending download tasks.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+        ).pack(anchor="w", pady=(4, 0))
 
         # Toolbar Buttons
         self._open_dir_btn = ctk.CTkButton(

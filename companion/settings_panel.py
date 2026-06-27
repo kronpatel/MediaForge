@@ -33,12 +33,16 @@ _COMPANION_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_SETTINGS_FILE = os.path.join(_COMPANION_DIR, "settings.json")
 
 
+DEFAULT_BACKEND_URL = "http://127.0.0.1:5000"
+
+
 def default_local_settings() -> dict[str, Any]:
     return {
         "auto_start_companion": False,
         "auto_start_backend": True,
         "notification_toggle": True,
         "backend_poll_interval": 3,
+        "theme": "Dark",
     }
 
 
@@ -120,12 +124,22 @@ class SettingsPage(BasePage):
         header_frame = ctk.CTkFrame(self, fg_color="transparent")
         header_frame.pack(fill="x", padx=20, pady=(20, 10))
 
+        title_container = ctk.CTkFrame(header_frame, fg_color="transparent")
+        title_container.pack(side="left", anchor="w")
+
         ctk.CTkLabel(
-            header_frame,
+            title_container,
             text="Settings Center",
             font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
             text_color="#e8eaf0",
-        ).pack(side="left")
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            title_container,
+            text="Configure local app preferences and backend behaviors.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+        ).pack(anchor="w", pady=(4, 0))
 
         # Action buttons in header
         self._save_btn = ctk.CTkButton(
@@ -195,7 +209,7 @@ class SettingsPage(BasePage):
         # ── Category: Appearance ──────────────────────────────────────────
         self._create_section_label(self._form, "Appearance")
         self._theme_var = ctk.StringVar()
-        self._create_form_row_menu(self._form, "Theme Palette", self._theme_var, ["Dark", "Midnight", "Contrast"])
+        self._create_form_row_menu(self._form, "Theme Palette", self._theme_var, ["Dark", "Light", "System"])
 
         # ── Reset Default Button ──────────────────────────────────────────
         ctk.CTkFrame(self._form, height=1, fg_color="#2e3347").pack(fill="x", pady=20)
@@ -255,28 +269,37 @@ class SettingsPage(BasePage):
     # ------------------------------------------------------------------
 
     def _load_all_settings(self) -> None:
-        # Load backend settings (from memory/polled state or fresh GET)
+        """Load backend and local settings and populate all form fields."""
         backend_settings = self.manager.get_settings()
         local_settings = read_local_settings()
+
+        # Backend URL: prefer backend response, then manager's current base_url,
+        # then the universal default. Never leave it blank.
+        backend_url = (
+            backend_settings.get("backend_url")
+            or self.manager.base_url
+            or DEFAULT_BACKEND_URL
+        )
 
         self._original_settings = {
             "download_folder": backend_settings.get("download_folder", ""),
             "ffmpeg_path": backend_settings.get("ffmpeg_path", ""),
-            "backend_url": backend_settings.get("backend_url", self.manager.base_url),
-            "theme": backend_settings.get("theme", "dark").capitalize(),
+            "backend_url": backend_url,
+            # Theme is a local Companion preference — stored in settings.json only
+            "theme": local_settings.get("theme", "Dark"),
             "auto_start_companion": local_settings.get("auto_start_companion", False),
             "auto_start_backend": local_settings.get("auto_start_backend", True),
             "notification_toggle": local_settings.get("notification_toggle", True),
             "backend_poll_interval": local_settings.get("backend_poll_interval", 3),
         }
 
-        # Apply to fields
+        # Apply to form fields
         self._dir_var.set(self._original_settings["download_folder"])
         self._ffmpeg_var.set(self._original_settings["ffmpeg_path"])
         self._url_var.set(self._original_settings["backend_url"])
         self._poll_var.set(str(self._original_settings["backend_poll_interval"]))
         self._theme_var.set(self._original_settings["theme"])
-        
+
         self._auto_start_companion_var.set(self._original_settings["auto_start_companion"])
         self._auto_start_backend_var.set(self._original_settings["auto_start_backend"])
         self._notifications_var.set(self._original_settings["notification_toggle"])
@@ -317,26 +340,29 @@ class SettingsPage(BasePage):
     # ------------------------------------------------------------------
 
     def _validate_settings(self, vals: dict[str, Any]) -> tuple[bool, str]:
-        # 1. Download folder exists
+        """Validate settings values. Only validates Backend URL if it was changed."""
+        # 1. Download folder must be a valid existing directory
         folder = vals["download_folder"]
         if not folder or not os.path.isdir(folder):
             return False, "Download Folder path must be a valid existing directory."
 
-        # 2. FFmpeg path exists (if provided)
+        # 2. FFmpeg path must exist if provided (empty = use system PATH)
         ffmpeg = vals["ffmpeg_path"]
         if ffmpeg and not os.path.exists(ffmpeg):
             return False, "FFmpeg Path must point to an existing file/directory, or be left empty for system defaults."
 
-        # 3. Valid Backend URL
+        # 3. Backend URL — only validate if it was changed by the user
         url = vals["backend_url"]
-        try:
-            parsed = urllib.parse.urlparse(url)
-            if not parsed.scheme or not parsed.netloc:
-                raise ValueError
-        except Exception:
-            return False, "Backend URL must be a valid HTTP/HTTPS address (e.g. http://127.0.0.1:5000)."
+        original_url = self._original_settings.get("backend_url", "")
+        if url != original_url:
+            try:
+                parsed = urllib.parse.urlparse(url)
+                if not parsed.scheme or not parsed.netloc:
+                    raise ValueError
+            except Exception:
+                return False, "Backend URL must be a valid HTTP/HTTPS address (e.g. http://127.0.0.1:5000)."
 
-        # 4. Valid Polling Rate
+        # 4. Polling rate must be 1–60 seconds
         try:
             poll = int(vals["backend_poll_interval"])
             if poll < 1 or poll > 60:
@@ -353,7 +379,7 @@ class SettingsPage(BasePage):
     def _save_click(self) -> None:
         try:
             vals = self._get_widget_values()
-        except ValueError as exc:
+        except ValueError:
             self._show_validation_error("Backend Poll Interval must be a number.")
             return
 
@@ -362,27 +388,30 @@ class SettingsPage(BasePage):
             self._show_validation_error(err)
             return
 
-        # 1. Save Backend Settings
+        # 1. Save Backend Settings (theme excluded — it is a local preference)
         backend_changes = {
             "download_folder": vals["download_folder"],
-            "theme": vals["theme"].lower(),
             "ffmpeg_path": vals["ffmpeg_path"],
             "backend_url": vals["backend_url"],
         }
         self.manager.save_settings(backend_changes)
 
-        # 2. Save Local Companion Settings
+        # 2. Save Local Companion Settings (theme lives here)
         local_changes = {
             "auto_start_companion": vals["auto_start_companion"],
             "auto_start_backend": vals["auto_start_backend"],
             "notification_toggle": vals["notification_toggle"],
             "backend_poll_interval": vals["backend_poll_interval"],
+            "theme": vals["theme"],
         }
         write_local_settings(local_changes)
 
-        # Apply polling update
+        # 3. Apply theme change immediately — no restart required
+        import customtkinter as ctk
+        ctk.set_appearance_mode(vals["theme"])
+
+        # 4. Apply updated poll interval to the live controller
         try:
-            # Get window reference
             main_window = self.master.master
             if hasattr(main_window, "_dashboard_controller") and main_window._dashboard_controller:
                 main_window._dashboard_controller.set_poll_interval(float(vals["backend_poll_interval"]))
@@ -390,7 +419,7 @@ class SettingsPage(BasePage):
             pass
 
         self.logger.info("Settings saved successfully.")
-        self._load_all_settings() # reload references
+        self._load_all_settings()  # reload to refresh originals
 
     def _cancel_click(self) -> None:
         self._load_all_settings()
@@ -399,7 +428,7 @@ class SettingsPage(BasePage):
     def _restore_defaults_click(self) -> None:
         self._dir_var.set(os.path.expanduser("~/Downloads"))
         self._ffmpeg_var.set("")
-        self._url_var.set("http://127.0.0.1:5000")
+        self._url_var.set(DEFAULT_BACKEND_URL)
         self._poll_var.set("3")
         self._theme_var.set("Dark")
         self._auto_start_companion_var.set(False)

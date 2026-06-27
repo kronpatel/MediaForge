@@ -485,14 +485,17 @@ class BackendManager:
         }
 
     def _normalize_settings(self, raw_settings: dict[str, Any]) -> dict[str, Any]:
-        """Normalize raw settings dictionary into a consistent internal model."""
+        """Normalize raw settings dictionary into a consistent internal model.
+
+        NOTE: 'theme' is intentionally excluded — it is a Companion UI preference
+        stored exclusively in local settings.json, not a backend responsibility.
+        """
         if not isinstance(raw_settings, dict):
             raw_settings = {}
         return {
             "download_folder": str(raw_settings.get("download_folder") or ""),
             "ffmpeg_path": str(raw_settings.get("ffmpeg_path") or ""),
             "backend_url": str(raw_settings.get("backend_url") or ""),
-            "theme": str(raw_settings.get("theme") or "dark").lower(),
         }
 
     def get_queue(self) -> list[dict[str, Any]]:

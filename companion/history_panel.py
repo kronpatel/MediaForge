@@ -33,7 +33,7 @@ class HistoryRow(ctk.CTkFrame):
             fg_color="#1a1d27",
             border_color="#2e3347",
             border_width=1,
-            corner_radius=8,
+            corner_radius=10,
         )
         self._on_copy = on_copy
         self._on_open_folder = on_open_folder
@@ -89,8 +89,8 @@ class HistoryRow(ctk.CTkFrame):
         self._copy_btn = ctk.CTkButton(
             self,
             text="📋",
-            width=28,
-            height=28,
+            width=26,
+            height=26,
             fg_color="#20232f",
             hover_color="#2e3347",
             corner_radius=6,
@@ -101,8 +101,8 @@ class HistoryRow(ctk.CTkFrame):
         self._open_btn = ctk.CTkButton(
             self,
             text="📂",
-            width=28,
-            height=28,
+            width=26,
+            height=26,
             fg_color="#20232f",
             hover_color="#2e3347",
             corner_radius=6,
@@ -170,12 +170,22 @@ class HistoryPage(BasePage):
         header_frame = ctk.CTkFrame(self, fg_color="transparent")
         header_frame.pack(fill="x", padx=20, pady=(20, 10))
 
+        title_container = ctk.CTkFrame(header_frame, fg_color="transparent")
+        title_container.pack(side="left", anchor="w")
+
         ctk.CTkLabel(
-            header_frame,
+            title_container,
             text="Download History",
             font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
             text_color="#e8eaf0",
-        ).pack(side="left")
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            title_container,
+            text="Review and manage completed or failed download tasks.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+        ).pack(anchor="w", pady=(4, 0))
 
         # Clear Button
         self._clear_btn = ctk.CTkButton(
@@ -250,17 +260,22 @@ class HistoryPage(BasePage):
             text="No history records found.",
             font=ctk.CTkFont(family="Segoe UI", size=13),
             text_color="#8b92a8",
+            anchor="center",
         )
-        self._empty_lbl.pack(pady=40)
+        self._empty_lbl.pack(pady=60, fill="x")
 
     def refresh(self, data: dict[str, Any]) -> None:
-        """Called automatically on unified poll tick."""
+        """Called automatically on unified poll tick.
+
+        Preserves current search text, filter selection, and sort order.
+        Only the underlying data is updated; UI controls are never reset.
+        """
         offline = data.get("offline", True)
-        
-        # Disable buttons if offline
+
+        # Disable clear button when offline
         self._clear_btn.configure(state="disabled" if offline else "normal")
 
-        # Load history
+        # Update data and re-apply the current filter/sort state
         history: list[dict[str, Any]] = data.get("history", [])
         settings = data.get("settings", {})
         self._download_folder = settings.get("download_folder", "")
