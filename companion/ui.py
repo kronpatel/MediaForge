@@ -408,7 +408,7 @@ class CompanionWindow(ctk.CTk):
     # Unified status callback
     # ------------------------------------------------------------------
 
-    def _on_backend_status_change(self, status: BackendStatus) -> None:
+    def _on_backend_status_change(self, status: BackendStatus, message: str = "") -> None:
         """Marshall status callbacks safely onto Tkinter thread."""
         self.after(0, self._apply_status, status)
 

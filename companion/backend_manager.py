@@ -455,7 +455,18 @@ class BackendManager:
             try:
                 data = resp.json()
                 if data.get("success"):
-                    return data.get("queue", [])
+                    qdata = data.get("queue")
+                    if isinstance(qdata, dict):
+                        # Flatten get_queue_status() dictionary into a single list of jobs
+                        jobs = []
+                        active = qdata.get("active")
+                        if active:
+                            jobs.append(active)
+                        jobs.extend(qdata.get("queued", []))
+                        jobs.extend(qdata.get("failed", []))
+                        return jobs
+                    elif isinstance(qdata, list):
+                        return qdata
             except Exception:
                 pass
         return []
