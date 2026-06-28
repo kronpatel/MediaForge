@@ -111,27 +111,13 @@ class BackendManager:
 
         self._load_config()
 
-        # Startup Detection: check if backend is already running & authentic
-        if self._is_port_in_use():
-            if self._ping():
-                self._status = BackendStatus.RUNNING
-                self._is_managed = False
-                self._monitor_active.set()
-                self._logger.info(
-                    f"Startup check: Detected backend already running on port {self._port} "
-                    "(externally managed). Adopting for monitoring."
-                )
-            else:
-                self._status = BackendStatus.STOPPED
-                self._is_managed = False
-                self._logger.warning(
-                    f"Startup check: Port {self._port} is in use, but identity verification failed. "
-                    f"The service at {self.base_url} is not a valid MediaForge backend. "
-                    "Another application may be using this port."
-                )
-        else:
-            self._status = BackendStatus.STOPPED
-            self._is_managed = False
+        # Deferred startup — port check / ping moved to deferred_init() so
+        # the constructor returns instantly and never blocks the UI thread.
+        self._status = BackendStatus.STOPPED
+        self._is_managed = False
+        self._cached_version: str | None = None
+        self._startup_lock = threading.Lock()
+        self._startup_done = False
 
         self._start_monitor_thread()
 
@@ -434,16 +420,54 @@ class BackendManager:
             and data.get("version") is not None
         )
 
+    def deferred_init(self) -> None:
+        """Check if backend is already running. Runs in a daemon thread — never blocks UI."""
+        if self._is_port_in_use():
+            if self._ping():
+                with self._lock:
+                    self._is_managed = False
+                self._set_status(BackendStatus.RUNNING, "Backend already running.")
+                self._monitor_active.set()
+                self._logger.info(
+                    f"Startup check: Detected backend already running on port {self._port} "
+                    "(externally managed). Adopting for monitoring."
+                )
+                # Pre-cache version so UI never waits on HTTP during startup
+                resp = self._send_request("GET", self.base_url, timeout=HTTP_TIMEOUT)
+                if resp is not None and resp.status_code == 200:
+                    try:
+                        ver = resp.json().get("version")
+                        with self._lock:
+                            self._cached_version = ver
+                    except Exception:
+                        pass
+            else:
+                self._logger.warning(
+                    f"Startup check: Port {self._port} is in use, but identity verification failed. "
+                    f"The service at {self.base_url} is not a valid MediaForge backend. "
+                    "Another application may be using this port."
+                )
+
+        with self._startup_lock:
+            self._startup_done = True
+
     def fetch_version(self) -> str | None:
         """
         Fetch the backend version string from the root API endpoint.
 
         Returns the version string (e.g. '1.1.0') or None on failure.
+        Uses cached value if available to avoid blocking during startup.
         """
+        with self._lock:
+            if self._cached_version is not None:
+                return self._cached_version
         resp = self._send_request("GET", self.base_url, timeout=HTTP_TIMEOUT)
         if resp is not None and resp.status_code == 200:
             try:
-                return resp.json().get("version")
+                ver = resp.json().get("version")
+                with self._lock:
+                    self._cached_version = ver
+                return ver
             except Exception:
                 pass
         return None

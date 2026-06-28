@@ -48,6 +48,13 @@ def default_local_settings() -> dict[str, Any]:
         "auto_check_updates": True,
         "update_poll_interval": 24,
         "check_updates_startup": True,
+        # Phase 4.3 Scheduler options
+        "scheduler_enabled": True,
+        "scheduler_poll_interval": 1,
+        "scheduler_auto_retry": True,
+        "scheduler_max_retries": 3,
+        "scheduler_run_missed_startup": True,
+        "scheduler_notify_before_exec": True,
     }
 
 
@@ -326,6 +333,96 @@ class SettingsPage(BasePage):
         )
         self._release_notes_btn.pack(side="left", padx=4)
 
+        # ── Category: Scheduler Settings (Phase 4.3) ─────────────────────────
+        self._create_section_label(self._form, "Download Scheduler Settings")
+
+        self._scheduler_enabled_var = ctk.BooleanVar()
+        self._create_form_row_checkbox(self._form, "Enable Scheduler", "Enable background scheduler engine", self._scheduler_enabled_var)
+
+        self._scheduler_poll_var = ctk.StringVar()
+        self._create_form_row_entry(self._form, "Poll Interval (sec)", self._scheduler_poll_var, "Scheduler poll sleep interval (default 1)")
+
+        self._scheduler_auto_retry_var = ctk.BooleanVar()
+        self._create_form_row_checkbox(self._form, "Auto Retry Failed Jobs", "Automatically retry failed scheduled downloads", self._scheduler_auto_retry_var)
+
+        self._scheduler_max_retries_var = ctk.StringVar()
+        self._create_form_row_entry(self._form, "Max Retries Count", self._scheduler_max_retries_var, "Max retry attempts per job (0-5, default 3)")
+
+        self._scheduler_run_missed_startup_var = ctk.BooleanVar()
+        self._create_form_row_checkbox(self._form, "Run Missed Jobs", "Run missed schedules immediately on Companion startup", self._scheduler_run_missed_startup_var)
+
+        self._scheduler_notify_before_exec_var = ctk.BooleanVar()
+        self._create_form_row_checkbox(self._form, "Notify Before Execution", "Show tray notification before starting scheduled download", self._scheduler_notify_before_exec_var)
+
+        # ── Category: Installer Options ──────────────────────────────────────
+        self._create_section_label(self._form, "Installer Options")
+
+        self._restart_after_install_var = ctk.BooleanVar(value=True)
+        self._create_form_row_checkbox(
+            self._form, 
+            "Auto Restart", 
+            "Restart Companion automatically after successful installation", 
+            self._restart_after_install_var,
+            command=self._on_restart_toggle
+        )
+
+        details_row = ctk.CTkFrame(self._form, fg_color="transparent")
+        details_row.pack(fill="x", padx=10, pady=6)
+        ctk.CTkLabel(details_row, text="Current Installer", width=150, anchor="w", text_color="#e8eaf0").pack(side="left")
+
+        self._installer_details_lbl = ctk.CTkLabel(
+            details_row,
+            text="No installer downloaded.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+            justify="left",
+            anchor="w"
+        )
+        self._installer_details_lbl.pack(side="left", fill="x", expand=True)
+
+        installer_actions_row = ctk.CTkFrame(self._form, fg_color="transparent")
+        installer_actions_row.pack(fill="x", padx=10, pady=8)
+        ctk.CTkLabel(installer_actions_row, text="", width=150).pack(side="left")
+
+        self._install_update_btn = ctk.CTkButton(
+            installer_actions_row,
+            text="Install Update",
+            width=120,
+            height=28,
+            fg_color="#22c55e",
+            hover_color="#16a34a",
+            text_color="#ffffff",
+            corner_radius=6,
+            command=self._install_update_click
+        )
+        self._install_update_btn.pack(side="left", padx=4)
+
+        self._locate_installer_btn = ctk.CTkButton(
+            installer_actions_row,
+            text="Locate Installer",
+            width=120,
+            height=28,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            corner_radius=6,
+            command=self._locate_installer_click
+        )
+        self._locate_installer_btn.pack(side="left", padx=4)
+
+        self._delete_installer_btn = ctk.CTkButton(
+            installer_actions_row,
+            text="Delete Installer",
+            width=120,
+            height=28,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            corner_radius=6,
+            command=self._delete_installer_click
+        )
+        self._delete_installer_btn.pack(side="left", padx=4)
+
         # ── Reset Default Button ──────────────────────────────────────────
         ctk.CTkFrame(self._form, height=1, fg_color="#2e3347").pack(fill="x", pady=20)
         
@@ -346,7 +443,10 @@ class SettingsPage(BasePage):
         for var in (self._dir_var, self._ffmpeg_var, self._url_var, self._poll_var,
                     self._auto_start_companion_var, self._auto_start_backend_var,
                     self._notifications_var,
-                    self._auto_check_var, self._check_startup_var, self._update_poll_var):
+                    self._auto_check_var, self._check_startup_var, self._update_poll_var,
+                    self._scheduler_enabled_var, self._scheduler_poll_var,
+                    self._scheduler_auto_retry_var, self._scheduler_max_retries_var,
+                    self._scheduler_run_missed_startup_var, self._scheduler_notify_before_exec_var):
             var.trace_add("write", lambda *_: self._update_save_btn_state())
 
     def _create_section_label(self, parent: ctk.CTkScrollableFrame, title: str) -> None:
@@ -372,12 +472,12 @@ class SettingsPage(BasePage):
         ctk.CTkEntry(row, textvariable=var, height=28, fg_color="#1a1d27", border_color="#2e3347", corner_radius=6).pack(side="left", fill="x", expand=True)
         ctk.CTkButton(row, text=btn_text, width=80, height=28, fg_color="#20232f", hover_color="#2e3347", text_color="#e8eaf0", command=command, corner_radius=6).pack(side="left", padx=(6, 0))
 
-    def _create_form_row_checkbox(self, parent: ctk.CTkScrollableFrame, label: str, desc: str, var: ctk.BooleanVar) -> None:
+    def _create_form_row_checkbox(self, parent: ctk.CTkScrollableFrame, label: str, desc: str, var: ctk.BooleanVar, command=None) -> None:
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=4)
         
         ctk.CTkLabel(row, text=label, width=150, anchor="w", text_color="#e8eaf0").pack(side="left")
-        ctk.CTkCheckBox(row, variable=var, text=desc, font=ctk.CTkFont(family="Segoe UI", size=11), text_color="#8b92a8", border_width=2, corner_radius=4, width=20, height=20).pack(side="left", fill="x", expand=True)
+        ctk.CTkCheckBox(row, variable=var, text=desc, font=ctk.CTkFont(family="Segoe UI", size=11), text_color="#8b92a8", border_width=2, corner_radius=4, width=20, height=20, command=command).pack(side="left", fill="x", expand=True)
 
     def _create_form_row_menu(self, parent: ctk.CTkScrollableFrame, label: str, var: ctk.StringVar, values: list[str]) -> None:
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -416,6 +516,13 @@ class SettingsPage(BasePage):
             "auto_check_updates": local_settings.get("auto_check_updates", True),
             "update_poll_interval": local_settings.get("update_poll_interval", 24),
             "check_updates_startup": local_settings.get("check_updates_startup", True),
+            # Scheduler
+            "scheduler_enabled": local_settings.get("scheduler_enabled", True),
+            "scheduler_poll_interval": local_settings.get("scheduler_poll_interval", 1),
+            "scheduler_auto_retry": local_settings.get("scheduler_auto_retry", True),
+            "scheduler_max_retries": local_settings.get("scheduler_max_retries", 3),
+            "scheduler_run_missed_startup": local_settings.get("scheduler_run_missed_startup", True),
+            "scheduler_notify_before_exec": local_settings.get("scheduler_notify_before_exec", True),
         }
 
         # Apply to form fields
@@ -448,6 +555,12 @@ class SettingsPage(BasePage):
             "auto_check_updates": self._auto_check_var.get(),
             "check_updates_startup": self._check_startup_var.get(),
             "update_poll_interval": int(self._update_poll_var.get().strip() or "24"),
+            "scheduler_enabled": self._scheduler_enabled_var.get(),
+            "scheduler_poll_interval": int(self._scheduler_poll_var.get().strip() or "1"),
+            "scheduler_auto_retry": self._scheduler_auto_retry_var.get(),
+            "scheduler_max_retries": int(self._scheduler_max_retries_var.get().strip() or "3"),
+            "scheduler_run_missed_startup": self._scheduler_run_missed_startup_var.get(),
+            "scheduler_notify_before_exec": self._scheduler_notify_before_exec_var.get(),
         }
 
     def is_dirty(self) -> bool:
@@ -512,6 +625,22 @@ class SettingsPage(BasePage):
         except ValueError:
             return False, "Update Poll Interval must be an integer between 1 and 168 hours."
 
+        # 6. Scheduler poll rate must be 1–60 seconds
+        try:
+            spoll = int(vals.get("scheduler_poll_interval", 1))
+            if spoll < 1 or spoll > 60:
+                raise ValueError
+        except ValueError:
+            return False, "Scheduler Poll Interval must be an integer between 1 and 60 seconds."
+
+        # 7. Scheduler max retries must be 0-5
+        try:
+            sret = int(vals.get("scheduler_max_retries", 3))
+            if sret < 0 or sret > 5:
+                raise ValueError
+        except ValueError:
+            return False, "Scheduler Maximum Retry Count must be an integer between 0 and 5."
+
         return True, ""
 
     # ------------------------------------------------------------------
@@ -548,6 +677,12 @@ class SettingsPage(BasePage):
             "auto_check_updates": vals["auto_check_updates"],
             "check_updates_startup": vals["check_updates_startup"],
             "update_poll_interval": vals["update_poll_interval"],
+            "scheduler_enabled": vals["scheduler_enabled"],
+            "scheduler_poll_interval": vals["scheduler_poll_interval"],
+            "scheduler_auto_retry": vals["scheduler_auto_retry"],
+            "scheduler_max_retries": vals["scheduler_max_retries"],
+            "scheduler_run_missed_startup": vals["scheduler_run_missed_startup"],
+            "scheduler_notify_before_exec": vals["scheduler_notify_before_exec"],
         })
         write_local_settings(local_settings)
 
@@ -578,6 +713,12 @@ class SettingsPage(BasePage):
         self._auto_check_var.set(True)
         self._check_startup_var.set(True)
         self._update_poll_var.set("24")
+        self._scheduler_enabled_var.set(True)
+        self._scheduler_poll_var.set("1")
+        self._scheduler_auto_retry_var.set(True)
+        self._scheduler_max_retries_var.set("3")
+        self._scheduler_run_missed_startup_var.set(True)
+        self._scheduler_notify_before_exec_var.set(True)
         self._update_save_btn_state()
         self.logger.info("Restored settings controls to default values (click Save to apply).")
 
@@ -643,6 +784,10 @@ class SettingsPage(BasePage):
             info_text = f"Current: v{current} | Latest: Installer Not Found\nLast checked: {last_checked_str}"
         elif status == "Pending Install":
             info_text = "Installer downloaded and ready for installation."
+        elif status in ("Launching", "Waiting For Exit"):
+            info_text = "Installer running..."
+        elif status == "Completed":
+            info_text = "Update installation complete!"
         else:
             info_text = f"Current: v{current} | Latest: {latest}\nLast checked: {last_checked_str}"
         self._update_info_lbl.configure(text=info_text)
@@ -660,30 +805,14 @@ class SettingsPage(BasePage):
             self._check_now_btn.configure(state="disabled", text="Check Now")
             self._download_update_btn.configure(state="disabled", text="Verifying...")
             self._release_notes_btn.configure(state="normal")
-        elif status == "Completed":
-            self._check_now_btn.configure(state="normal", text="Check Now")
-            self._download_update_btn.configure(state="disabled", text="Completed")
-            self._release_notes_btn.configure(state="normal")
-        elif status == "Pending Install":
-            self._check_now_btn.configure(state="normal", text="Check Now")
+        elif status in ("Completed", "Pending Install", "Launching", "Waiting For Exit", "Cancelled", "Failed", "Restarting Companion"):
+            self._check_now_btn.configure(state="normal" if status not in ("Launching", "Waiting For Exit", "Restarting Companion") else "disabled", text="Check Now")
             self._download_update_btn.configure(state="disabled", text="Download Update")
             self._release_notes_btn.configure(state="normal" if latest != "v—" else "disabled")
-        elif status == "Failed":
-            self._check_now_btn.configure(state="normal", text="Check Now")
-            has_up = self.updater.has_update()
-            self._download_update_btn.configure(
-                state="normal" if has_up else "disabled",
-                text="Retry Download" if has_up else "Download Update"
-            )
-            self._release_notes_btn.configure(state="normal" if latest != "v—" else "disabled")
-        elif status == "Rate Limited":
-            self._check_now_btn.configure(state="normal", text="Check Now")
-            self._download_update_btn.configure(state="disabled", text="Download Update")
-            self._release_notes_btn.configure(state="disabled")
         elif status == "Installer Not Found":
             self._check_now_btn.configure(state="normal", text="Check Now")
             self._download_update_btn.configure(state="disabled", text="Download Update")
-            self._release_notes_btn.configure(state="normal" if latest != "v—" else "disabled")
+            self._release_notes_btn.configure(state="disabled")
         else:  # Idle, Up To Date, Update Available, Offline
             self._check_now_btn.configure(state="normal", text="Check Now")
             has_up = self.updater.has_update()
@@ -698,18 +827,81 @@ class SettingsPage(BasePage):
         self.updater = getattr(main_window, "updater", None)
         if self.updater:
             self.updater.register_callback(self._on_update_status)
-            has_up = self.updater.has_update()
-            latest = self.updater.get_latest_version()
-            if has_up:
-                self._update_updater_status_ui("Update Available", 0.0)
-            elif latest != "v—":
-                self._update_updater_status_ui("Up To Date", 0.0)
-            else:
-                self._update_updater_status_ui("Idle", 0.0)
+            self._restart_after_install_var.set(self.updater._restart_after_install)
+            
+            # Show status dynamically using get_status()
+            status = self.updater.get_status()
+            self._update_updater_status_ui(status, 100.0 if self.updater._pending_install else 0.0)
 
     def on_hide(self) -> None:
         if self.updater:
             self.updater.unregister_callback(self._on_update_status)
+
+    def _on_restart_toggle(self) -> None:
+        if self.updater:
+            self.updater._restart_after_install = self._restart_after_install_var.get()
+            self.updater._save_cache()
+
+    def _install_update_click(self) -> None:
+        main_window = self.master.master
+        if hasattr(main_window, "installer") and main_window.installer:
+            main_window.installer.install_update()
+
+    def _locate_installer_click(self) -> None:
+        if self.updater:
+            path = self.updater._installer_path
+            import subprocess
+            if path and os.path.exists(path):
+                if sys.platform == "win32":
+                    subprocess.run(["explorer", "/select,", os.path.abspath(path)])
+                else:
+                    subprocess.run(["explorer", os.path.dirname(os.path.abspath(path))])
+            else:
+                from updater import UPDATES_DIR
+                if os.path.exists(UPDATES_DIR):
+                    if sys.platform == "win32":
+                        subprocess.run(["explorer", os.path.abspath(UPDATES_DIR)])
+                    else:
+                        subprocess.run(["explorer", os.path.dirname(os.path.abspath(UPDATES_DIR))])
+
+    def _delete_installer_click(self) -> None:
+        from tkinter import messagebox
+        ans = messagebox.askyesno(
+            "Delete Installer",
+            "Are you sure you want to delete the downloaded installer?\n\n"
+            "This will reset the update status and you will need to re-download it to install."
+        )
+        if ans:
+            if self.updater:
+                path = self.updater._installer_path
+                success = False
+                if path and os.path.exists(path):
+                    for i in range(3):
+                        try:
+                            os.remove(path)
+                            success = True
+                            break
+                        except OSError:
+                            time.sleep(0.5)
+                else:
+                    success = True
+                
+                if success:
+                    with self.updater._lock:
+                        self.updater._pending_install = False
+                        self.updater._installer_path = ""
+                        self.updater._installer_version = ""
+                        self.updater._download_completed_at = 0.0
+                        self.updater._installer_sha256 = ""
+                        self.updater._installer_state = "Idle"
+                        self.updater._save_cache()
+                    self.updater._notify_current_state()
+                    self.logger.info("Installer file deleted and pending state cleared.")
+                else:
+                    messagebox.showerror(
+                        "Delete Error",
+                        "Unable to delete the installer file because it is locked by another application."
+                    )
 
     def _on_update_status(self, status: str, progress: float, error_msg: str | None = None) -> None:
         try:

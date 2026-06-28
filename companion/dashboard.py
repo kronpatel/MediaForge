@@ -192,71 +192,112 @@ class DashboardPage(BasePage):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        # Title
+        # ── Page header ────────────────────────────────────────────────────
+        hdr_frame = ctk.CTkFrame(self, fg_color="transparent")
+        hdr_frame.pack(fill="x", padx=20, pady=(20, 4))
+
         ctk.CTkLabel(
-            self,
+            hdr_frame,
             text="Companion Dashboard",
             font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
             text_color="#e8eaf0",
-        ).pack(anchor="w", padx=20, pady=(20, 10))
+        ).pack(side="left", anchor="w")
 
-        # Subtitle
         ctk.CTkLabel(
             self,
             text="Overview of backend services, active downloads, and logs.",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color="#8b92a8",
-        ).pack(anchor="w", padx=20, pady=(0, 20))
+        ).pack(anchor="w", padx=20, pady=(0, 14))
 
-        # ── Grid of Info Cards ───────────────────────────────────────────
-        cards_frame = ctk.CTkFrame(self, fg_color="transparent")
-        cards_frame.pack(fill="x", padx=20, pady=10)
+        # ── Grid of Info Cards ─────────────────────────────────────────────
+        self._cards_parent_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._cards_parent_frame.pack(fill="x", padx=20, pady=(0, 10))
 
-        # Columns configuration (5 columns uniform for the new updater card)
-        cards_frame.columnconfigure((0, 1, 2, 3, 4), weight=1, uniform="equal")
- 
-        self._status_card = self._create_card(cards_frame, 0, "Backend Status", "Offline", "#ef4444")
-        self._version_card = self._create_card(cards_frame, 1, "Backend Version", "v—", "#8b92a8")
-        self._uptime_card = self._create_card(cards_frame, 2, "Backend Uptime", "0s", "#8b92a8")
-        self._queue_card = self._create_card(cards_frame, 3, "Queue Size", "0", "#8b92a8")
+        self._status_card    = self._create_card(self._cards_parent_frame, "Backend Status",  "Loading\u2026", "#f59e0b")
+        self._version_card   = self._create_card(self._cards_parent_frame, "Backend Version", "v\u2014",   "#8b92a8")
+        self._uptime_card    = self._create_card(self._cards_parent_frame, "Backend Uptime",  "0s",     "#8b92a8")
+        self._queue_card     = self._create_card(self._cards_parent_frame, "Queue Size",      "0",      "#8b92a8")
 
-        # ── Updater Info Card ──
-        update_card = ctk.CTkFrame(
-            cards_frame,
+        # ── Companion Update card ──────────────────────────────────────────
+        self._update_card_frame = ctk.CTkFrame(
+            self._cards_parent_frame,
             fg_color="#1a1d27",
             border_color="#2e3347",
             border_width=1,
             corner_radius=12,
         )
-        update_card.grid(row=0, column=4, padx=4, sticky="nsew")
-
-        update_inner = ctk.CTkFrame(update_card, fg_color="transparent")
-        update_inner.pack(padx=12, pady=12, fill="both")
-
+        _uc = ctk.CTkFrame(self._update_card_frame, fg_color="transparent")
+        _uc.pack(padx=14, pady=14, fill="both", expand=True)
         ctk.CTkLabel(
-            update_inner,
+            _uc,
             text="Companion Update",
-            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             text_color="#8b92a8",
         ).pack(anchor="w")
-
         self._update_status_lbl = ctk.CTkLabel(
-            update_inner,
-            text="Checking...",
-            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            _uc,
+            text="Checking\u2026",
+            font=ctk.CTkFont(family="Segoe UI", size=24, weight="bold"),
             text_color="#4f8ef7",
+            wraplength=160,
+            justify="left",
         )
-        self._update_status_lbl.pack(anchor="w", pady=(4, 0))
-
+        self._update_status_lbl.pack(anchor="w", pady=(6, 0))
         self._update_versions_lbl = ctk.CTkLabel(
-            update_inner,
-            text="v— → v—",
-            font=ctk.CTkFont(family="Segoe UI", size=10),
+            _uc,
+            text="v\u2014 \u2192 v\u2014",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color="#8b92a8",
         )
-        self._update_versions_lbl.pack(anchor="w", pady=(2, 0))
+        self._update_versions_lbl.pack(anchor="w", pady=(3, 0))
 
-        # ── Active Download Panel ─────────────────────────────────────────
+        # ── Upcoming Schedule card ─────────────────────────────────────────
+        self._scheduler_card_frame = ctk.CTkFrame(
+            self._cards_parent_frame,
+            fg_color="#1a1d27",
+            border_color="#2e3347",
+            border_width=1,
+            corner_radius=12,
+        )
+        _sc = ctk.CTkFrame(self._scheduler_card_frame, fg_color="transparent")
+        _sc.pack(padx=14, pady=14, fill="both", expand=True)
+        ctk.CTkLabel(
+            _sc,
+            text="Upcoming Schedule",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color="#8b92a8",
+        ).pack(anchor="w")
+        self._sched_next_run_lbl = ctk.CTkLabel(
+            _sc,
+            text="Loading\u2026",
+            font=ctk.CTkFont(family="Segoe UI", size=24, weight="bold"),
+            text_color="#f59e0b",
+            wraplength=160,
+            justify="left",
+        )
+        self._sched_next_run_lbl.pack(anchor="w", pady=(6, 0))
+        self._sched_details_lbl = ctk.CTkLabel(
+            _sc,
+            text="\u2014",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+        )
+        self._sched_details_lbl.pack(anchor="w", pady=(3, 0))
+
+        self._cards_list = [
+            self._status_card["card"],
+            self._version_card["card"],
+            self._uptime_card["card"],
+            self._queue_card["card"],
+            self._update_card_frame,
+            self._scheduler_card_frame,
+        ]
+        self._resize_timer: str | None = None
+        self._last_width_bucket: int = 0
+        self.bind("<Configure>", self._on_resize)
+
+        # ── Active Download Panel ──────────────────────────────────────────
         self._active_card = ctk.CTkFrame(
             self,
             fg_color="#1a1d27",
@@ -264,7 +305,7 @@ class DashboardPage(BasePage):
             border_width=1,
             corner_radius=12,
         )
-        self._active_card.pack(fill="x", padx=20, pady=10)
+        self._active_card.pack(fill="x", padx=20, pady=(0, 10))
 
         self._active_inner = ctk.CTkFrame(self._active_card, fg_color="transparent")
         self._active_inner.pack(fill="x", padx=16, pady=14)
@@ -276,24 +317,52 @@ class DashboardPage(BasePage):
             text_color="#8b92a8",
         ).pack(anchor="w")
 
+        # Empty-state container (shown when idle)
+        self._empty_dl_frame = ctk.CTkFrame(self._active_inner, fg_color="transparent")
+        self._empty_dl_frame.pack(fill="x", pady=(8, 0))
+        ctk.CTkLabel(
+            self._empty_dl_frame,
+            text="\u2b07",
+            font=ctk.CTkFont(family="Segoe UI", size=28),
+            text_color="#2e3347",
+        ).pack()
+        ctk.CTkLabel(
+            self._empty_dl_frame,
+            text="No active downloads",
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color="#8b92a8",
+        ).pack(pady=(4, 2))
+        ctk.CTkLabel(
+            self._empty_dl_frame,
+            text="Downloads will appear here automatically.",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#5a6072",
+        ).pack()
+
+        # Active-state container (shown during download)
+        self._active_dl_frame = ctk.CTkFrame(self._active_inner, fg_color="transparent")
+        # Do NOT pack yet — shown only when download is active
+
         self._title_lbl = ctk.CTkLabel(
-            self._active_inner,
-            text="No active downloads.",
+            self._active_dl_frame,
+            text="",
             font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
             text_color="#e8eaf0",
+            anchor="w",
         )
         self._title_lbl.pack(anchor="w", pady=(4, 2))
 
         self._mode_lbl = ctk.CTkLabel(
-            self._active_inner,
+            self._active_dl_frame,
             text="",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color="#8b92a8",
+            anchor="w",
         )
         self._mode_lbl.pack(anchor="w", pady=(0, 6))
 
         self._progress_bar = ctk.CTkProgressBar(
-            self._active_inner,
+            self._active_dl_frame,
             fg_color="#20232f",
             progress_color="#4f8ef7",
             height=8,
@@ -301,27 +370,25 @@ class DashboardPage(BasePage):
         self._progress_bar.pack(fill="x", pady=(0, 8))
         self._progress_bar.set(0.0)
 
-        # Meta panel: Speed & ETA
-        self._meta_frame = ctk.CTkFrame(self._active_inner, fg_color="transparent")
-        self._meta_frame.pack(fill="x")
-
+        _meta = ctk.CTkFrame(self._active_dl_frame, fg_color="transparent")
+        _meta.pack(fill="x")
         self._speed_lbl = ctk.CTkLabel(
-            self._meta_frame,
-            text="Speed: —",
+            _meta, text="Speed: \u2014",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color="#8b92a8",
         )
         self._speed_lbl.pack(side="left")
-
         self._eta_lbl = ctk.CTkLabel(
-            self._meta_frame,
-            text="ETA: —",
+            _meta, text="ETA: \u2014",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color="#8b92a8",
         )
         self._eta_lbl.pack(side="right")
 
-        # ── Logs & Activity ──────────────────────────────────────────────
+        # Track empty/active state to avoid redundant frame swaps
+        self._dl_state_active: bool = False
+
+        # ── Logs & Activity ────────────────────────────────────────────────
         logs_card = ctk.CTkFrame(
             self,
             fg_color="#1a1d27",
@@ -329,29 +396,44 @@ class DashboardPage(BasePage):
             border_width=1,
             corner_radius=12,
         )
-        logs_card.pack(fill="both", expand=True, padx=20, pady=(10, 20))
+        logs_card.pack(fill="both", expand=True, padx=20, pady=(0, 20))
 
+        # Logs header row with Clear View button
+        _logs_hdr = ctk.CTkFrame(logs_card, fg_color="transparent")
+        _logs_hdr.pack(fill="x", padx=16, pady=(12, 6))
         ctk.CTkLabel(
-            logs_card,
+            _logs_hdr,
             text="Recent Activity Logs",
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             text_color="#8b92a8",
-        ).pack(anchor="w", padx=16, pady=(12, 6))
+        ).pack(side="left")
+        ctk.CTkButton(
+            _logs_hdr,
+            text="Clear View",
+            width=80,
+            height=24,
+            corner_radius=6,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#8b92a8",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            command=self._clear_log_view,
+        ).pack(side="right")
 
         self._log_textbox = ctk.CTkTextbox(
             logs_card,
             font=ctk.CTkFont(family="Consolas", size=11),
             fg_color="#0f1117",
-            text_color="#e8eaf0",
+            text_color="#c9d1d9",
             border_color="#2e3347",
             border_width=1,
             corner_radius=8,
-            wrap="word",
+            wrap="none",
             state="disabled",
         )
         self._log_textbox.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-    def _create_card(self, parent: ctk.CTkFrame, col: int, title: str, val: str, color: str) -> dict[str, Any]:
+    def _create_card(self, parent: ctk.CTkFrame, title: str, val: str, color: str) -> dict[str, Any]:
         card = ctk.CTkFrame(
             parent,
             fg_color="#1a1d27",
@@ -359,27 +441,57 @@ class DashboardPage(BasePage):
             border_width=1,
             corner_radius=12,
         )
-        card.grid(row=0, column=col, padx=4, sticky="nsew")
-
         inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(padx=12, pady=12, fill="both")
-
+        inner.pack(padx=14, pady=14, fill="both", expand=True)
         ctk.CTkLabel(
             inner,
             text=title,
-            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             text_color="#8b92a8",
         ).pack(anchor="w")
-
         val_lbl = ctk.CTkLabel(
             inner,
             text=val,
-            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=24, weight="bold"),
             text_color=color,
         )
-        val_lbl.pack(anchor="w", pady=(4, 0))
+        val_lbl.pack(anchor="w", pady=(6, 0))
+        return {"card": card, "lbl": val_lbl, "default_color": color}
 
-        return {"lbl": val_lbl, "default_color": color}
+    def _on_resize(self, event) -> None:
+        if event.widget != self:
+            return
+        new_width = self.winfo_width()
+        bucket = 3 if new_width > 900 else (2 if new_width > 600 else 1)
+        if bucket == self._last_width_bucket:
+            return
+        self._last_width_bucket = bucket
+        if self._resize_timer is not None:
+            try:
+                self.after_cancel(self._resize_timer)
+            except Exception:
+                pass
+        self._resize_timer = self.after(100, self._grid_cards_responsive)
+
+    def _grid_cards_responsive(self) -> None:
+        self._resize_timer = None
+        width = self.winfo_width()
+        cols = 3 if width > 900 else (2 if width > 600 else 1)
+        
+        # Avoid redundant grid configurations
+        if getattr(self, "_current_grid_cols", None) == cols:
+            return
+        self._current_grid_cols = cols
+        
+        # Reset all possible columns configuration (max 6)
+        for i in range(6):
+            self._cards_parent_frame.grid_columnconfigure(i, weight=0, uniform="")
+            
+        for i in range(cols):
+            self._cards_parent_frame.grid_columnconfigure(i, weight=1, uniform="equal")
+            
+        for i, card in enumerate(self._cards_list):
+            card.grid(row=i // cols, column=i % cols, padx=4, pady=4, sticky="nsew")
 
     # ------------------------------------------------------------------
     # Updater Callbacks & UI Mapping
@@ -399,11 +511,28 @@ class DashboardPage(BasePage):
                 self._update_card_ui("Up To Date", 0.0)
             else:
                 self._update_card_ui("Idle", 0.0)
+
+        self.scheduler = getattr(main_window, "scheduler", None)
+        if self.scheduler:
+            self.scheduler.register_listener(self._on_scheduler_event)
+            
         self._populate_logs()
+        self._update_scheduler_countdown()
 
     def on_hide(self) -> None:
         if self.updater:
             self.updater.unregister_callback(self._on_update_status)
+        if hasattr(self, "scheduler") and self.scheduler:
+            self.scheduler.unregister_listener(self._on_scheduler_event)
+
+    def _on_scheduler_event(self, name: str, payload: dict) -> None:
+        try:
+            self.after(0, self._force_update_countdown)
+        except Exception:
+            pass
+
+    def _force_update_countdown(self) -> None:
+        self._update_scheduler_countdown()
 
     def _on_update_status(self, status: str, progress: float, error_msg: str | None = None) -> None:
         try:
@@ -423,6 +552,7 @@ class DashboardPage(BasePage):
         has_up = self.updater.has_update()
 
         is_pending = False
+        subtitle_text = ""
         if status == "Checking":
             status_text = "Checking..."
             color = "#4f8ef7"
@@ -433,15 +563,43 @@ class DashboardPage(BasePage):
             status_text = "Verifying..."
             color = "#f59e0b"
         elif status == "Completed":
-            status_text = "Completed"
+            status_text = "Installation Complete"
             color = "#22c55e"
+            is_pending = True
+            subtitle_text = "MediaForge update completed successfully!"
         elif status == "Pending Install":
             status_text = "Ready to Install"
             color = "#22c55e"
             is_pending = True
+            subtitle_text = "Installer downloaded successfully"
+        elif status == "Launching":
+            status_text = "Installing..."
+            color = "#f59e0b"
+            is_pending = True
+            subtitle_text = "Starting the installer process..."
+        elif status == "Waiting For Exit":
+            status_text = "Waiting For Installer"
+            color = "#f59e0b"
+            is_pending = True
+            subtitle_text = "Installer running. Please complete instructions..."
         elif status == "Failed":
-            status_text = "❌ Check Failed"
+            if getattr(self.updater, "_installer_state", "Idle") == "Failed":
+                status_text = "Installation Failed"
+                subtitle_text = "Installation failed or verification error."
+            else:
+                status_text = "❌ Check Failed"
             color = "#ef4444"
+            is_pending = True if subtitle_text else False
+        elif status == "Cancelled":
+            status_text = "Installation Cancelled"
+            color = "#ef4444"
+            is_pending = True
+            subtitle_text = "Installation was cancelled by the user."
+        elif status == "Restarting Companion":
+            status_text = "Restarting Companion"
+            color = "#22c55e"
+            is_pending = True
+            subtitle_text = "Restarting application..."
         elif status == "Offline":
             status_text = "⚠ Offline"
             color = "#f59e0b"
@@ -460,7 +618,9 @@ class DashboardPage(BasePage):
                 color = "#22c55e"
 
         self._update_status_lbl.configure(text=status_text, text_color=color)
-        if is_pending:
+        if is_pending and subtitle_text:
+            self._update_versions_lbl.configure(text=subtitle_text)
+        elif is_pending:
             self._update_versions_lbl.configure(text="Installer downloaded successfully")
         else:
             self._update_versions_lbl.configure(text=f"v{current} → {latest}")
@@ -512,33 +672,53 @@ class DashboardPage(BasePage):
         )
 
         if active_job:
-            self._title_lbl.configure(text=active_job.get("label") or active_job.get("filename") or "Downloading…")
+            if not self._dl_state_active:
+                self._empty_dl_frame.pack_forget()
+                self._active_dl_frame.pack(fill="x", pady=(8, 0))
+                self._dl_state_active = True
             mode = active_job.get("mode", "video")
-            mode_icons = {"video": "🎬 Video", "audio": "🎵 Audio"}
+            mode_icons = {"video": "\U0001f3ac Video", "audio": "\U0001f3b5 Audio"}
+            self._title_lbl.configure(
+                text=active_job.get("label") or active_job.get("filename") or "Downloading\u2026"
+            )
             self._mode_lbl.configure(text=mode_icons.get(mode, mode.capitalize()))
-            progress = float(active_job.get("progress") or 0.0)
-            self._progress_bar.set(progress / 100.0)
-            self._speed_lbl.configure(text=f"Speed: {active_job.get('speed') or '—'}")
-            self._eta_lbl.configure(text=f"ETA: {active_job.get('eta') or '—'}")
+            self._progress_bar.set(float(active_job.get("progress") or 0.0) / 100.0)
+            self._speed_lbl.configure(text=f"Speed: {active_job.get('speed') or '\u2014'}")
+            self._eta_lbl.configure(text=f"ETA: {active_job.get('eta') or '\u2014'}")
         else:
-            self._title_lbl.configure(text="No active downloads.")
-            self._mode_lbl.configure(text="")
+            if self._dl_state_active:
+                self._active_dl_frame.pack_forget()
+                self._empty_dl_frame.pack(fill="x", pady=(8, 0))
+                self._dl_state_active = False
             self._progress_bar.set(0.0)
-            self._speed_lbl.configure(text="Speed: —")
-            self._eta_lbl.configure(text="ETA: —")
+            self._speed_lbl.configure(text="Speed: \u2014")
+            self._eta_lbl.configure(text="ETA: \u2014")
 
         # 6. Incremental log append
         self._append_new_logs()
 
+
+    def _clear_log_view(self) -> None:
+        """Clear the visible log textbox without removing stored log entries."""
+        self._log_textbox.configure(state="normal")
+        self._log_textbox.delete("1.0", "end")
+        self._log_textbox.insert("end", "Log view cleared. New entries will appear below.\n")
+        self._log_textbox.configure(state="disabled")
+        # Reset counter so next append reloads from current position
+        self._log_count = len(self.logger.get_entries())
 
     def _populate_logs(self) -> None:
         """Full rewrite — used on page show or when count drops (e.g. after clear)."""
         entries = self.logger.get_entries()
         self._log_textbox.configure(state="normal")
         self._log_textbox.delete("1.0", "end")
-        for entry in entries[-50:]:  # show recent 50 logs
-            self._log_textbox.insert("end", str(entry) + "\n")
-        self._log_count = len(entries)
+        if not entries:
+            self._log_textbox.insert("end", "System ready. No activity logs recorded yet.\n")
+            self._log_count = 0
+        else:
+            for entry in entries[-50:]:
+                self._log_textbox.insert("end", str(entry) + "\n")
+            self._log_count = len(entries)
         self._log_textbox.configure(state="disabled")
         self._log_textbox.see("end")
 
@@ -546,6 +726,14 @@ class DashboardPage(BasePage):
         """Append only newly-added log entries; preserve user scroll position."""
         entries = self.logger.get_entries()
         current_count = len(entries)
+        if current_count == 0:
+            self._populate_logs()
+            return
+
+        if self._log_count == 0 and current_count > 0:
+            self._populate_logs()
+            return
+
         if current_count <= self._log_count:
             # Count dropped (e.g. logs cleared) — do a full repopulate
             if current_count < self._log_count:
@@ -575,3 +763,60 @@ class DashboardPage(BasePage):
             return f"{secs // 60}m"
         else:
             return f"{secs // 3600}h {(secs % 3600) // 60}m"
+
+    def _update_scheduler_countdown(self) -> None:
+        if not hasattr(self, "scheduler") or not self.scheduler:
+            main_window = self.master.master
+            self.scheduler = getattr(main_window, "scheduler", None)
+            
+        if self.scheduler:
+            next_job = self.scheduler.get_next_job()
+            all_jobs = self.scheduler.get_schedules()
+            enabled_count = sum(1 for j in all_jobs if j.get("enabled"))
+            
+            self._sched_details_lbl.configure(text=f"{enabled_count} enabled schedule(s)")
+            
+            if next_job and next_job.get("next_run"):
+                next_run_str = next_job["next_run"]
+                try:
+                    next_dt = datetime.strptime(next_run_str, "%Y-%m-%d %H:%M:%S")
+                    now = datetime.now()
+                    diff = next_dt - now
+                    if diff.total_seconds() > 0:
+                        hours, remainder = divmod(int(diff.total_seconds()), 3600)
+                        minutes, seconds = divmod(remainder, 60)
+                        
+                        countdown_str = ""
+                        if hours > 24:
+                            days = hours // 24
+                            countdown_str = f"{days}d remaining"
+                        elif hours > 0:
+                            countdown_str = f"{hours}h {minutes}m remaining"
+                        elif minutes > 0:
+                            countdown_str = f"{minutes}m {seconds}s remaining"
+                        else:
+                            countdown_str = f"{seconds}s remaining"
+                            
+                        time_str = next_dt.strftime("%H:%M")
+                        date_prefix = "Today" if next_dt.date() == now.date() else next_dt.strftime("%m-%d")
+                        
+                        self._sched_next_run_lbl.configure(
+                            text=f"{date_prefix} at {time_str}",
+                            text_color="#f59e0b"
+                        )
+                        self._sched_details_lbl.configure(
+                            text=f"{countdown_str} | {enabled_count} enabled"
+                        )
+                    else:
+                        self._sched_next_run_lbl.configure(text="Due now...", text_color="#22c55e")
+                except Exception:
+                    self._sched_next_run_lbl.configure(text="No upcoming jobs", text_color="#8b92a8")
+            else:
+                self._sched_next_run_lbl.configure(text="No upcoming jobs", text_color="#8b92a8")
+        
+        # Schedule next tick in 1s if this widget is active and alive
+        try:
+            if self.winfo_exists():
+                self.after(1000, self._update_scheduler_countdown)
+        except Exception:
+            pass

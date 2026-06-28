@@ -56,6 +56,10 @@ class TrayManager:
         # Sync tray status automatically when the backend manager status changes
         self._manager.register_status_callback(self._on_backend_status_change)
 
+        # Register to Scheduler Event Bus (Phase 4.3 Tray Integration)
+        if hasattr(self._window, "scheduler") and self._window.scheduler:
+            self._window.scheduler.register_listener(self._on_scheduler_event)
+
     def start(self) -> bool:
         """
         Initialize and run the system tray icon in a background thread.
@@ -102,6 +106,10 @@ class TrayManager:
 
     def stop(self) -> None:
         """Clean up the system tray icon and wait for the thread to exit."""
+        # Unregister scheduler listener
+        if hasattr(self._window, "scheduler") and self._window.scheduler:
+            self._window.scheduler.unregister_listener(self._on_scheduler_event)
+
         with self._running_lock:
             if not self._is_running or not self._icon:
                 return
@@ -200,6 +208,55 @@ class TrayManager:
     def _on_exit_companion(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         self._marshal(self._window.exit_completely)
 
+    def _on_install_update(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        def _do_install():
+            if hasattr(self._window, "installer") and self._window.installer:
+                self._window.installer.install_update()
+        self._marshal(_do_install)
+
+    def _on_pause_scheduler(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        def _do_pause():
+            if hasattr(self._window, "scheduler") and self._window.scheduler:
+                self._window.scheduler.pause_scheduler()
+                self.notify("MediaForge Companion", "Scheduler Paused")
+        self._marshal(_do_pause)
+
+    def _on_resume_scheduler(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        def _do_resume():
+            if hasattr(self._window, "scheduler") and self._window.scheduler:
+                self._window.scheduler.resume_scheduler()
+                self.notify("MediaForge Companion", "Scheduler Resumed")
+        self._marshal(_do_resume)
+
+    def _on_open_scheduler(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        def _do_open():
+            self._window.restore_window()
+            self._window.show_page("Scheduler")
+        self._marshal(_do_open)
+
+    def _on_scheduler_event(self, name: str, payload: dict) -> None:
+        # Schedule Started, Completed, Failed notifications (Component 6)
+        if name == "Schedule Started":
+            self.notify("MediaForge Schedule Started", f"Download started: {payload.get('url')}")
+        elif name == "Schedule Completed":
+            self.notify("MediaForge Schedule Completed", f"Completed: {payload.get('url')}")
+        elif name == "Schedule Failed":
+            self.notify("MediaForge Schedule Failed", f"Failed: {payload.get('error_message') or 'Network error'}")
+        
+        self.refresh_menu()
+
+    def refresh_menu(self) -> None:
+        """Force a rebuild of the tray menu based on current statuses (marshaled to Tkinter thread)."""
+        def _do_refresh():
+            if not self._icon:
+                return
+            is_managed = self._manager.is_managed()
+            status = self._manager.status
+            status_str = self._get_status_string(status, is_managed)
+            self._icon.title = f"MediaForge Companion\nBackend: {status_str}"
+            self._icon.menu = self._build_menu(status, is_managed)
+        self._marshal(_do_refresh)
+
     # ------------------------------------------------------------------
     # Status Sync & Menu Rebuilding
     # ------------------------------------------------------------------
@@ -246,11 +303,59 @@ class TrayManager:
 
         status_str = self._get_status_string(status, is_managed)
 
-        return pystray.Menu(
+        # Check if update is pending install (Phase 4.2 Tray integration)
+        show_install_update = False
+        if hasattr(self._window, "updater") and self._window.updater:
+            # Check if pending install status
+            show_install_update = self._window.updater.get_status() == "Pending Install"
+
+        # Build Scheduler submenu (Phase 4.3 Tray integration)
+        sched_items = []
+        if hasattr(self._window, "scheduler") and self._window.scheduler:
+            from settings_panel import read_local_settings
+            local_settings = read_local_settings(self._logger)
+            sched_enabled = local_settings.get("scheduler_enabled", True)
+            
+            status_text = "Status: Active" if sched_enabled else "Status: Paused"
+            sched_items.append(pystray.MenuItem(status_text, action=None, enabled=False))
+            
+            next_job = self._window.scheduler.get_next_job()
+            if next_job and next_job.get("next_run"):
+                next_run_str = next_job["next_run"]
+                try:
+                    import datetime
+                    next_dt = datetime.datetime.strptime(next_run_str, "%Y-%m-%d %H:%M:%S")
+                    time_str = next_dt.strftime("%H:%M")
+                    date_prefix = "Today" if next_dt.date() == datetime.date.today() else next_dt.strftime("%m-%d")
+                    sched_items.append(pystray.MenuItem(f"Next: {date_prefix} at {time_str}", action=None, enabled=False))
+                except Exception:
+                    sched_items.append(pystray.MenuItem(f"Next: {next_run_str}", action=None, enabled=False))
+            else:
+                sched_items.append(pystray.MenuItem("Next: None", action=None, enabled=False))
+                
+            sched_items.append(pystray.Menu.SEPARATOR)
+            if sched_enabled:
+                sched_items.append(pystray.MenuItem("Pause Scheduler", self._on_pause_scheduler))
+            else:
+                sched_items.append(pystray.MenuItem("Resume Scheduler", self._on_resume_scheduler))
+                
+            sched_items.append(pystray.MenuItem("Open Scheduler", self._on_open_scheduler))
+        else:
+            sched_items.append(pystray.MenuItem("Scheduler Not Loaded", action=None, enabled=False))
+            
+        scheduler_menu = pystray.Menu(*sched_items)
+
+        menu_items = [
             pystray.MenuItem("MediaForge Companion", self._on_show_companion, default=True),
+        ]
+        if show_install_update:
+            menu_items.append(pystray.MenuItem("Install Update", self._on_install_update))
+            
+        menu_items.extend([
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Show Companion", self._on_show_companion),
             pystray.MenuItem("Open Backend", self._on_open_backend, enabled=is_running),
+            pystray.MenuItem("Scheduler", scheduler_menu),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Start Backend", self._on_start_backend, enabled=is_stopped_or_crashed),
             pystray.MenuItem("Stop Backend", self._on_stop_backend, enabled=is_managed_running),
@@ -259,7 +364,9 @@ class TrayManager:
             pystray.MenuItem(f"Backend Status: {status_str}", action=None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit Companion", self._on_exit_companion)
-        )
+        ])
+
+        return pystray.Menu(*menu_items)
 
     def _get_status_string(self, status: BackendStatus, is_managed: bool) -> str:
         if status == BackendStatus.RUNNING:

@@ -45,7 +45,7 @@ class UpdateManager:
 
     def __init__(self, logger: AppLogger) -> None:
         self.logger = logger
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._callbacks: list[Callable[[str, float, str | None], None]] = []
 
         # Threading / Control State (Task 1 & Task 2)
@@ -72,6 +72,16 @@ class UpdateManager:
         self._installer_path = ""
         self._installer_version = ""
         self._download_completed_at = 0.0
+        self._installer_state = "Idle"
+        self._last_install_attempt = 0.0
+        self._last_install_result = ""
+        self._last_install_error = ""
+        self._last_exit_code = 0
+        self._restart_after_install = True
+        self._installer_sha256 = ""
+        self._installation_in_progress = False
+        self._recovery_completed = False
+        self._startup_recovery_events: list[str] = []
 
         # Create shared HTTP Session
         self._session = requests.Session()
@@ -288,6 +298,9 @@ class UpdateManager:
                     self._html_url = html_url
                     self._save_cache()
 
+                with self._check_lock:
+                    self._checking = False
+
                 self._notify_current_state()
 
             except Exception as exc:
@@ -439,6 +452,7 @@ class UpdateManager:
                     self._installer_path = os.path.abspath(FINAL_DOWNLOAD_FILE)
                     self._installer_version = self._latest_version
                     self._download_completed_at = time.time()
+                    self._installer_sha256 = sha256_hash
                     self._save_cache()
 
                 self._notify("Pending Install", 100.0)
@@ -510,33 +524,30 @@ class UpdateManager:
             except Exception:
                 pass
 
+    def get_status(self) -> str:
+        """Retrieve the current unified status string."""
+        with self._lock:
+            if self._pending_install:
+                if self._installer_state != "Idle":
+                    return self._installer_state
+                return "Pending Install"
+            if self._downloading:
+                return "Downloading"
+            if self._checking:
+                return "Checking"
+            if self._latest_version == "v—":
+                return "Idle"
+            if not self._asset_url:
+                return "Installer Not Found"
+            if self.has_update():
+                return "Update Available"
+            return "Up To Date"
+
     def _notify_current_state(self) -> None:
         """Dispatch current check details as state notification."""
-        with self._lock:
-            latest = self._latest_version
-            asset_url = self._asset_url
-            pending = self._pending_install
-
-        # Verify installer file exists if pending
-        if pending and not os.path.exists(FINAL_DOWNLOAD_FILE):
-            with self._lock:
-                self._pending_install = False
-                self._installer_path = ""
-                self._installer_version = ""
-                self._download_completed_at = 0.0
-                self._save_cache()
-            pending = False
-
-        if pending:
-            self._notify("Pending Install", 100.0)
-        elif latest == "v—":
-            self._notify("Idle", 0.0)
-        elif not asset_url:
-            self._notify("Installer Not Found", 0.0)
-        elif self.has_update():
-            self._notify("Update Available", 0.0)
-        else:
-            self._notify("Up To Date", 0.0)
+        status = self.get_status()
+        progress = 100.0 if status in ("Pending Install", "Completed", "Waiting For Exit", "Launching") else 0.0
+        self._notify(status, progress)
 
     def _cleanup_temp_file(self) -> None:
         if os.path.exists(TEMP_DOWNLOAD_FILE):
@@ -625,6 +636,8 @@ class UpdateManager:
 
     def _load_cache(self) -> None:
         """Load release metadata snapshot from local cache, handling corruption gracefully."""
+        if getattr(self, "_recovery_completed", False):
+            return
         if not os.path.exists(CACHE_FILE):
             return
         try:
@@ -632,6 +645,44 @@ class UpdateManager:
                 data = json.load(fh)
             if not isinstance(data, dict):
                 return
+        except (json.JSONDecodeError, KeyError, OSError, TypeError) as exc:
+            self.logger.warning(f"Corrupted cache file found. Regenerating defaults. Error: {exc}")
+            try:
+                corrupt_path = CACHE_FILE.replace(".json", ".corrupt.json")
+                if os.path.exists(corrupt_path):
+                    os.remove(corrupt_path)
+                os.rename(CACHE_FILE, corrupt_path)
+            except Exception as e:
+                self.logger.error(f"Failed to rename corrupted cache file: {e}")
+            
+            # Reset parameters to default
+            self._latest_version = "v—"
+            self._release_notes = ""
+            self._published = "Never"
+            self._asset_url = ""
+            self._asset_size = 0
+            self._last_checked = 0.0
+            self._rate_limit_reset_until = 0.0
+            self._pending_install = False
+            self._installer_path = ""
+            self._installer_version = ""
+            self._download_completed_at = 0.0
+            self._installer_state = "Idle"
+            self._last_install_attempt = 0.0
+            self._last_install_result = ""
+            self._last_install_error = ""
+            self._last_exit_code = 0
+            self._restart_after_install = True
+            self._installer_sha256 = ""
+            self._installation_in_progress = False
+            self._recovery_completed = True
+            try:
+                self._save_cache()
+            except Exception:
+                pass
+            return
+
+        try:
             self._latest_version = data.get("latest_version", "v—")
             self._release_notes = data.get("release_notes", "")
             self._published = data.get("published", "Never")
@@ -645,13 +696,123 @@ class UpdateManager:
             self._installer_path = data.get("installer_path", "")
             self._installer_version = data.get("installer_version", "")
             self._download_completed_at = float(data.get("download_completed_at") or 0.0)
+            self._installer_state = data.get("installer_state", "Idle")
+            self._last_install_attempt = float(data.get("last_install_attempt") or 0.0)
+            self._last_install_result = data.get("last_install_result", "")
+            self._last_install_error = data.get("last_install_error", "")
+            self._last_exit_code = int(data.get("last_exit_code") or 0)
+            self._restart_after_install = bool(data.get("restart_after_install") if "restart_after_install" in data else True)
+            self._installer_sha256 = data.get("installer_sha256", "")
+            self._installation_in_progress = bool(data.get("installation_in_progress") or False)
 
-            # Verify installer file exists if pending
-            if self._pending_install and not os.path.exists(FINAL_DOWNLOAD_FILE):
-                self._pending_install = False
-                self._installer_path = ""
-                self._installer_version = ""
-                self._download_completed_at = 0.0
+            if self._installation_in_progress:
+                self.logger.info("Companion started with an installation in progress. Running recovery checks...")
+                self._startup_recovery_events.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Recovery Executed")
+                if self._installer_path and os.path.exists(self._installer_path):
+                    # File exists on disk. Verify size and version to determine health.
+                    stale = False
+                    reason = ""
+                    try:
+                        sz = os.path.getsize(self._installer_path)
+                        if sz <= 0:
+                            stale = True
+                            reason = "installer size is zero"
+                        elif sz != self._asset_size:
+                            stale = True
+                            reason = f"size mismatch (disk={sz}, expected={self._asset_size})"
+                    except OSError as exc:
+                        stale = True
+                        reason = f"unreadable file: {exc}"
+
+                    if not stale and self._installer_version != self._latest_version:
+                        stale = True
+                        reason = f"version mismatch (installer={self._installer_version}, latest={self._latest_version})"
+
+                    if stale:
+                        self.logger.warning(f"Installer validation failed on recovery: {reason}. Restoring state to Failed.")
+                        self._installer_state = "Failed"
+                        self._last_install_result = "failed"
+                        self._last_install_error = f"Recovery failed: {reason}"
+                        self._installation_in_progress = False
+                    else:
+                        self.logger.info("Installer file is valid. Restoring state to Pending Install.")
+                        self._pending_install = True
+                        self._installer_state = "Idle"
+                        self._installation_in_progress = False
+                else:
+                    # Installer file does not exist
+                    if self._installer_version == COMPANION_VERSION:
+                        self.logger.info("Installation completed successfully (version matches COMPANION_VERSION). Restoring state to Completed.")
+                        self._installer_state = "Completed"
+                        self._last_install_result = "success"
+                        self._pending_install = False
+                        self._installer_path = ""
+                        self._installer_version = ""
+                        self._download_completed_at = 0.0
+                        self._installer_sha256 = ""
+                    else:
+                        self.logger.warning("Installer file no longer exists and version not updated. Restoring state to Failed.")
+                        self._installer_state = "Failed"
+                        self._last_install_result = "failed"
+                        self._last_install_error = "Recovery failed: installer file no longer exists"
+                        self._pending_install = False
+                        self._installer_path = ""
+                        self._installer_version = ""
+                        self._download_completed_at = 0.0
+                        self._installer_sha256 = ""
+                    self._installation_in_progress = False
+                
+                self._recovery_completed = True
+                try:
+                    self._save_cache()
+                except Exception:
+                    pass
+            else:
+                self._recovery_completed = True
+
+            # Verify installer files (Component 5 / Refinements)
+            if self._pending_install:
+                stale = False
+                reason = ""
+                if not self._installer_path or not os.path.isabs(self._installer_path):
+                    stale = True
+                    reason = "invalid installer path"
+                elif not os.path.exists(self._installer_path):
+                    stale = True
+                    reason = "installer file no longer exists"
+                else:
+                    try:
+                        sz = os.path.getsize(self._installer_path)
+                        if sz <= 0:
+                            stale = True
+                            reason = "installer size is zero"
+                        elif sz != self._asset_size:
+                            stale = True
+                            reason = f"installer size differs (disk={sz}, cached={self._asset_size})"
+                    except OSError as exc:
+                        stale = True
+                        reason = f"installer file unreadable: {exc}"
+                
+                if not stale and self._installer_version != self._latest_version:
+                    stale = True
+                    reason = f"installer version differs (installer={self._installer_version}, latest={self._latest_version})"
+                
+                if stale:
+                    self.logger.warning(f"Stale Pending Install detected on startup: {reason}. Clearing state.")
+                    self._pending_install = False
+                    self._installer_path = ""
+                    self._installer_version = ""
+                    self._download_completed_at = 0.0
+                    self._installer_state = "Idle"
+                    self._last_install_attempt = 0.0
+                    self._last_install_result = ""
+                    self._last_install_error = ""
+                    self._last_exit_code = 0
+                    self._installer_sha256 = ""
+                    try:
+                        self._save_cache()
+                    except Exception:
+                        pass
         except Exception:
             # Corrupted cache recovery -> reset parameters to default and recreate cache (Task 2)
             self._latest_version = "v—"
@@ -687,16 +848,25 @@ class UpdateManager:
                 "installer_path": self._installer_path,
                 "installer_version": self._installer_version,
                 "download_completed_at": self._download_completed_at,
+                "installer_state": self._installer_state,
+                "last_install_attempt": self._last_install_attempt,
+                "last_install_result": self._last_install_result,
+                "last_install_error": self._last_install_error,
+                "last_exit_code": self._last_exit_code,
+                "restart_after_install": self._restart_after_install,
+                "installer_sha256": self._installer_sha256,
+                "installation_in_progress": getattr(self, "_installation_in_progress", False),
             }
             cache_dir = os.path.dirname(CACHE_FILE)
-            tmp_file = os.path.join(cache_dir, "update_cache.tmp")
+            tmp_file = CACHE_FILE + ".tmp"
             with open(tmp_file, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, indent=2, ensure_ascii=False)
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp_file, CACHE_FILE)
-        except Exception:
-            tmp_file = os.path.join(os.path.dirname(CACHE_FILE), "update_cache.tmp")
+        except Exception as exc:
+            self.logger.error(f"Failed to save cache file: {exc}")
+            tmp_file = CACHE_FILE + ".tmp"
             if os.path.exists(tmp_file):
                 try:
                     os.remove(tmp_file)

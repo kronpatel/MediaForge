@@ -510,7 +510,11 @@ class TestUpdateManager(unittest.TestCase):
     def test_concurrent_checks_rejection(self, mock_get):
         mock_response = MagicMock(status_code=200)
         mock_response.json.return_value = {"tag_name": "v2.0.0"}
-        mock_get.return_value = mock_response
+        
+        def slow_get(*args, **kwargs):
+            time.sleep(0.2)
+            return mock_response
+        mock_get.side_effect = slow_get
 
         # Double click check now
         self.updater.check_for_updates(force=True)

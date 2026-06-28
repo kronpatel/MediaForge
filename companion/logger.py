@@ -8,6 +8,7 @@ whenever a new line is appended.
 
 from __future__ import annotations
 
+import time as _time
 import threading
 import traceback
 from datetime import datetime
@@ -48,6 +49,8 @@ class AppLogger:
         self._callbacks: list[Callable[[LogEntry], None]] = []
         self.debug: bool = debug
         self.max_entries: int = MAX_LOG_ENTRIES
+        self._timings: dict[str, float] = {}
+        self._t0 = _time.monotonic()
 
     # ------------------------------------------------------------------
     # Public API
@@ -142,3 +145,30 @@ class AppLogger:
         """Discard all stored entries."""
         with self._lock:
             self._entries.clear()
+
+    # ------------------------------------------------------------------
+    # Startup timing helpers
+    # ------------------------------------------------------------------
+
+    def mark_timing(self, label: str) -> None:
+        """Record a named timing checkpoint relative to logger creation."""
+        with self._lock:
+            self._timings[label] = _time.monotonic()
+
+    def log_startup_timings(self) -> None:
+        """Log all recorded timing checkpoints as a formatted table with total."""
+        with self._lock:
+            timings = dict(self._timings)
+        if not timings:
+            return
+        t0 = self._t0
+        lines = [""]
+        for label, t in timings.items():
+            elapsed = (t - t0) * 1000
+            label_padded = (label + " ").ljust(27, ".")
+            lines.append(f"{label_padded} {elapsed:>6.0f} ms")
+        last = timings.get("Startup Complete") or max(timings.values(), default=t0)
+        total = (last - t0) * 1000
+        lines.append("")
+        lines.append(f"{'Startup Complete':<28} {total:>6.0f} ms")
+        self.info("Startup Performance\n" + "\n".join(lines))
