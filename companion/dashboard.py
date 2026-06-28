@@ -422,6 +422,7 @@ class DashboardPage(BasePage):
         latest = self.updater.get_latest_version()
         has_up = self.updater.has_update()
 
+        is_pending = False
         if status == "Checking":
             status_text = "Checking..."
             color = "#4f8ef7"
@@ -434,6 +435,10 @@ class DashboardPage(BasePage):
         elif status == "Completed":
             status_text = "Completed"
             color = "#22c55e"
+        elif status == "Pending Install":
+            status_text = "Ready to Install"
+            color = "#22c55e"
+            is_pending = True
         elif status == "Failed":
             status_text = "❌ Check Failed"
             color = "#ef4444"
@@ -455,7 +460,10 @@ class DashboardPage(BasePage):
                 color = "#22c55e"
 
         self._update_status_lbl.configure(text=status_text, text_color=color)
-        self._update_versions_lbl.configure(text=f"v{current} → {latest}")
+        if is_pending:
+            self._update_versions_lbl.configure(text="Installer downloaded successfully")
+        else:
+            self._update_versions_lbl.configure(text=f"v{current} → {latest}")
 
     # ------------------------------------------------------------------
     # Lifecycle refresh

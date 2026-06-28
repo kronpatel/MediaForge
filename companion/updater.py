@@ -67,6 +67,12 @@ class UpdateManager:
         self._last_checked = 0.0
         self._rate_limit_reset_until = 0.0
 
+        # Pending Install State Metadata (Pending Install Refinement)
+        self._pending_install = False
+        self._installer_path = ""
+        self._installer_version = ""
+        self._download_completed_at = 0.0
+
         # Create shared HTTP Session
         self._session = requests.Session()
 
@@ -266,6 +272,13 @@ class UpdateManager:
                     asset_size = 0
 
                 with self._lock:
+                    # Invalidate pending install if a new version is fetched that differs from the pending installer version
+                    if self._pending_install and self._installer_version != tag_name:
+                        self._pending_install = False
+                        self._installer_path = ""
+                        self._installer_version = ""
+                        self._download_completed_at = 0.0
+
                     self._latest_version = tag_name
                     self._release_notes = body
                     self._published = published_at
@@ -420,8 +433,16 @@ class UpdateManager:
                             pass
                     raise exc
 
-                self._notify("Completed", 100.0)
-                self.logger.info(f"Update download completed successfully: {FINAL_DOWNLOAD_FILE}")
+                # Update pending install state (Pending Install Refinement)
+                with self._lock:
+                    self._pending_install = True
+                    self._installer_path = os.path.abspath(FINAL_DOWNLOAD_FILE)
+                    self._installer_version = self._latest_version
+                    self._download_completed_at = time.time()
+                    self._save_cache()
+
+                self._notify("Pending Install", 100.0)
+                self.logger.info(f"Update download completed successfully. Ready to install: {FINAL_DOWNLOAD_FILE}")
 
             except Exception as exc:
                 self.logger.error(f"Download failed: {exc}")
@@ -494,7 +515,21 @@ class UpdateManager:
         with self._lock:
             latest = self._latest_version
             asset_url = self._asset_url
-        if latest == "v—":
+            pending = self._pending_install
+
+        # Verify installer file exists if pending
+        if pending and not os.path.exists(FINAL_DOWNLOAD_FILE):
+            with self._lock:
+                self._pending_install = False
+                self._installer_path = ""
+                self._installer_version = ""
+                self._download_completed_at = 0.0
+                self._save_cache()
+            pending = False
+
+        if pending:
+            self._notify("Pending Install", 100.0)
+        elif latest == "v—":
             self._notify("Idle", 0.0)
         elif not asset_url:
             self._notify("Installer Not Found", 0.0)
@@ -606,6 +641,17 @@ class UpdateManager:
             self._html_url = data.get("html_url", "")
             self._last_notified_version = data.get("last_notified_version", "")
             self._rate_limit_reset_until = float(data.get("rate_limit_reset_until") or 0.0)
+            self._pending_install = bool(data.get("pending_install") or False)
+            self._installer_path = data.get("installer_path", "")
+            self._installer_version = data.get("installer_version", "")
+            self._download_completed_at = float(data.get("download_completed_at") or 0.0)
+
+            # Verify installer file exists if pending
+            if self._pending_install and not os.path.exists(FINAL_DOWNLOAD_FILE):
+                self._pending_install = False
+                self._installer_path = ""
+                self._installer_version = ""
+                self._download_completed_at = 0.0
         except Exception:
             # Corrupted cache recovery -> reset parameters to default and recreate cache (Task 2)
             self._latest_version = "v—"
@@ -615,6 +661,10 @@ class UpdateManager:
             self._asset_size = 0
             self._last_checked = 0.0
             self._rate_limit_reset_until = 0.0
+            self._pending_install = False
+            self._installer_path = ""
+            self._installer_version = ""
+            self._download_completed_at = 0.0
             try:
                 self._save_cache()
             except Exception:
@@ -633,6 +683,10 @@ class UpdateManager:
                 "html_url": getattr(self, "_html_url", ""),
                 "last_notified_version": getattr(self, "_last_notified_version", ""),
                 "rate_limit_reset_until": getattr(self, "_rate_limit_reset_until", 0.0),
+                "pending_install": self._pending_install,
+                "installer_path": self._installer_path,
+                "installer_version": self._installer_version,
+                "download_completed_at": self._download_completed_at,
             }
             cache_dir = os.path.dirname(CACHE_FILE)
             tmp_file = os.path.join(cache_dir, "update_cache.tmp")

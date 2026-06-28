@@ -15,3 +15,6 @@ Thumbs.db
 unused_files/
 *.lnk
 ffmpeg/
+companion/settings.json
+companion/cache/
+companion/updates/

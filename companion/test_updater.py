@@ -15,7 +15,7 @@ import json
 import time
 import shutil
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, mock_open
 
 import requests
 
@@ -611,6 +611,93 @@ class TestUpdateManager(unittest.TestCase):
 
         # API should only have been called once
         mock_get.assert_called_once()
+
+    # ------------------------------------------------------------------
+    # 11. Pending Install State Flow (Task 2)
+    # ------------------------------------------------------------------
+
+    @patch("requests.Session.get")
+    def test_successful_download_pending_install_state(self, mock_get):
+        self.updater._asset_url = "http://dummy-url/setup.exe"
+        self.updater._asset_size = 500
+        self.updater._latest_version = "v2.0.0"
+
+        # Mock download response
+        mock_response = MagicMock()
+        mock_response.headers = {"content-length": "500"}
+        mock_response.iter_content = lambda chunk_size: [b"a" * 500]
+        mock_get.return_value = mock_response
+
+        # Stub os.path.exists and rename/getsize
+        with patch("os.path.exists", return_value=True), \
+             patch("os.path.getsize", return_value=500), \
+             patch("os.rename") as mock_rename:
+             
+             notifications = []
+             def _cb(status, progress, err):
+                 notifications.append(status)
+             self.updater.register_callback(_cb)
+
+             self.updater.download_update()
+             time.sleep(0.5)
+
+             self.assertIn("Pending Install", notifications)
+             self.assertTrue(self.updater._pending_install)
+             self.assertEqual(self.updater._installer_version, "v2.0.0")
+             self.assertGreater(self.updater._download_completed_at, 0)
+             # Verify it saved cache
+             with open(CACHE_FILE, "r") as fh:
+                 cache_data = json.load(fh)
+                 self.assertTrue(cache_data["pending_install"])
+                 self.assertEqual(cache_data["installer_version"], "v2.0.0")
+
+    @patch("requests.Session.get")
+    def test_check_for_updates_invalidates_pending_on_new_version(self, mock_get):
+        # Set pending install status
+        self.updater._pending_install = True
+        self.updater._installer_version = "v2.0.0"
+        self.updater._installer_path = "some-path"
+        self.updater._download_completed_at = 12345.0
+
+        # Mock newer version release check
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {
+            "tag_name": "v3.0.0",
+            "assets": [
+                {
+                    "name": "MediaForge-Setup.exe",
+                    "state": "uploaded",
+                    "size": 500,
+                    "browser_download_url": "http://github.com/setup3.exe"
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        self.updater.check_for_updates(force=True)
+        time.sleep(0.5)
+
+        # Assert pending install is invalidated since tag_name v3.0.0 is different
+        self.assertFalse(self.updater._pending_install)
+        self.assertEqual(self.updater._installer_version, "")
+
+    def test_load_cache_verifies_file_exists(self):
+        # Write dummy cache with pending install set to True
+        cache_data = {
+            "latest_version": "v2.0.0",
+            "pending_install": True,
+            "installer_version": "v2.0.0",
+            "installer_path": "dummy-path"
+        }
+        with open(CACHE_FILE, "w") as fh:
+            json.dump(cache_data, fh)
+
+        # Mock os.path.exists to return False for FINAL_DOWNLOAD_FILE
+        # (meaning installer file was deleted)
+        with patch("os.path.exists", side_effect=lambda path: False if "MediaForge-Setup.exe" in path else True):
+            self.updater._load_cache()
+            self.assertFalse(self.updater._pending_install)
+            self.assertEqual(self.updater._installer_version, "")
 
 
 if __name__ == "__main__":
