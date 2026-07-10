@@ -181,6 +181,28 @@ Since FFmpeg binaries are too large for Git/GitHub, you must obtain them manuall
 
 ---
 
+## Downloads
+
+You can download the latest production releases from the [GitHub Releases](https://github.com/kronpatel/MediaForge/releases) page:
+
+*   **Windows Setup Installer (`MediaForge-Setup.exe`)**: Recommended for standard desktop setups. Installs the application to your local user directory.
+*   **Portable ZIP Edition (`MediaForge_Portable.zip`)**: A standalone edition that runs without installation and keeps all user configurations self-contained.
+
+### Windows Installer
+
+The Windows Setup Installer provides a guided setup wizard:
+1. Run `MediaForge-Setup.exe`.
+2. Follow the prompt steps to complete installation.
+3. MediaForge will register shortcuts on your Desktop and Start Menu.
+
+### Portable Edition
+
+To use the Portable Edition:
+1. Extract `MediaForge_Portable.zip` to a folder of your choice.
+2. Run the application via the `mediaforge_start.bat` launcher.
+
+---
+
 ## Usage Instructions
 
 1.  **Start the Backend**:
@@ -244,10 +266,19 @@ For guidelines on coding style, branch naming, and pull requests, refer to [CONT
 
 ## Support & Community
 
+*   **Changelog:** Review all historical releases and changes in the [CHANGELOG.md](CHANGELOG.md).
 *   **Troubleshooting:** Make sure the local Flask backend is running (`python backend/app.py`) and that FFmpeg is located in `Project Root/ffmpeg` if you experience any merge or extraction errors.
 *   **Contributions:** We welcome pull requests! Check out our [Contributing Guidelines](CONTRIBUTING.md) to get started.
 *   **Security:** Report any vulnerabilities confidentially by following our [Security Policy](SECURITY.md).
 *   **Issues:** Open a ticket on the [GitHub Issues tracker](https://github.com/kronpatel/MediaForge/issues) for bug reports and enhancements.
+
+---
+
+## Support
+
+If you encounter a bug or have a feature request, please open an Issue or start a Discussion on GitHub.
+
+Contributions are welcome.
 
 ---
 
