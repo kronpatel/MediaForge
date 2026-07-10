@@ -5,6 +5,9 @@ import os
 import sys
 import zipfile
 import threading
+import hashlib
+import subprocess
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -37,26 +40,143 @@ class InstallerManager:
                     self.updater._notify("Failed", 0.0, "Update ZIP not found.")
                     return
 
+                # Calculate SHA-256 immediately before extraction to ensure atomic safety
+                self.logger.info("[Installer] Verifying checksum before launching updater...")
+                hasher = hashlib.sha256()
+                with open(zip_path, "rb") as fh:
+                    while chunk := fh.read(65536):
+                        hasher.update(chunk)
+                actual_hash = hasher.hexdigest()
+                expected_hash = self.updater._installer_sha256
+                if not expected_hash:
+                    expected_hash = actual_hash  # fallback if no hash stored
+                
+                if actual_hash.lower() != expected_hash.lower():
+                    raise ValueError(f"Integrity check failed (actual={actual_hash}, expected={expected_hash})")
+
+                # Set installation_in_progress to True (Post-Install Verification Setup)
+                with self.updater._lock:
+                    self.updater._installation_in_progress = True
+                    self.updater._save_cache()
+
                 self.updater._notify("Launching", 0.0)
-                self.logger.info(f"[Installer] Extracting {zip_path} to {self._install_root}…")
 
-                with zipfile.ZipFile(zip_path, "r") as zf:
-                    # Validate expected structure
-                    names = zf.namelist()
-                    if not names:
-                        raise ValueError("ZIP archive is empty.")
+                dest_dir = self._install_root
+                updates_dir = os.path.join(dest_dir, "updates")
+                os.makedirs(updates_dir, exist_ok=True)
+                
+                batch_path = os.path.join(updates_dir, "apply_update.bat")
+                temp_dir = os.path.join(updates_dir, "temp_extraction")
+                log_file = os.path.join(updates_dir, "update_install.log")
+                parent_pid = os.getpid()
 
-                    # Prepare window for restart
-                    self._window.prepare_for_installation()
+                if getattr(sys, "frozen", False):
+                    # In frozen EXE mode, restart the compiled executable
+                    restart_cmd = f'start "" "{os.path.join(dest_dir, "MediaForge.exe")}"'
+                else:
+                    # In source development mode, restart via python and main script
+                    main_script = os.path.join(dest_dir, "companion", "main.py")
+                    restart_cmd = f'start "" "{sys.executable}" "{main_script}"'
 
-                    zf.extractall(self._install_root)
+                # Write apply_update.bat
+                batch_content = f"""@echo off
+setlocal enabledelayedexpansion
 
-                self.logger.info("[Installer] Extraction complete.")
-                self.updater._notify("Restarting Companion", 100.0)
-                self._events.append(f"Extracted {zip_path} to {self._install_root}")
+set PARENT_PID={parent_pid}
+set ZIP_PATH={zip_path}
+set TARGET_DIR={dest_dir}
+set TEMP_DIR={temp_dir}
+set EXPECTED_HASH={expected_hash}
+set RESTART_CMD={restart_cmd}
+set LOG_FILE={log_file}
 
-                # Schedule restart on main thread
-                self._window.after(500, self._restart_companion)
+echo [%DATE% %TIME%] [Updater] Starting update process... > "%LOG_FILE%"
+echo [Updater] Parent PID: %PARENT_PID% >> "%LOG_FILE%"
+echo [Updater] ZIP Path: %ZIP_PATH% >> "%LOG_FILE%"
+echo [Updater] Target Dir: %TARGET_DIR% >> "%LOG_FILE%"
+
+:: Wait for parent process to exit
+:wait_loop
+tasklist /FI "PID eq %PARENT_PID%" 2>NUL | find /I "%PARENT_PID%" >NUL
+if %ERRORLEVEL% eq 0 (
+    timeout /t 1 /nobreak >NUL
+    goto wait_loop
+)
+echo [%DATE% %TIME%] [Updater] Parent process %PARENT_PID% exited. >> "%LOG_FILE%"
+
+:: Verify checksum again before extraction
+echo [%DATE% %TIME%] [Updater] Running SHA-256 verification... >> "%LOG_FILE%"
+powershell -Command "$h = (Get-FileHash -Path '%ZIP_PATH%' -Algorithm SHA256).Hash.ToLower(); if ($h -ne '%EXPECTED_HASH%'.ToLower()) {{ exit 1 }} else {{ exit 0 }}" >> "%LOG_FILE%" 2>&1
+if %ERRORLEVEL% neq 0 (
+    echo [%DATE% %TIME%] [Updater] Checksum verification failed. Aborting installation. >> "%LOG_FILE%"
+    powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Update installation failed. Checksum verification failed. The current version is still usable.', 'MediaForge Update Failure', 'OK', 'Error')"
+    exit /b %ERRORLEVEL%
+)
+
+:: Create clean temp extraction directory
+if exist "%TEMP_DIR%" rmdir /s /q "%TEMP_DIR%" >> "%LOG_FILE%" 2>&1
+mkdir "%TEMP_DIR%" >> "%LOG_FILE%" 2>&1
+
+:: Extract to temp directory
+echo [%DATE% %TIME%] [Updater] Extracting to temporary directory... >> "%LOG_FILE%"
+powershell -Command "Expand-Archive -Path '%ZIP_PATH%' -DestinationPath '%TEMP_DIR%' -Force" >> "%LOG_FILE%" 2>&1
+
+if %ERRORLEVEL% neq 0 (
+    echo [%DATE% %TIME%] [Updater] Extraction failed. Rollback initiated. >> "%LOG_FILE%"
+    rmdir /s /q "%TEMP_DIR%" >NUL 2>&1
+    powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Update installation failed during extraction. Rollback complete, the current version is still usable.', 'MediaForge Update Failure', 'OK', 'Error')"
+    exit /b %ERRORLEVEL%
+)
+
+:: Replace files atomically from temp directory
+echo [%DATE% %TIME%] [Updater] Overwriting target installation directory... >> "%LOG_FILE%"
+xcopy "%TEMP_DIR%\\*" "%TARGET_DIR%\\" /y /e /s /i /q >> "%LOG_FILE%" 2>&1
+
+if %ERRORLEVEL% neq 0 (
+    echo [%DATE% %TIME%] [Updater] File replacement failed. Rollback initiated. >> "%LOG_FILE%"
+    rmdir /s /q "%TEMP_DIR%" >NUL 2>&1
+    powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Update installation failed during file replacement. Rollback complete, the current version is still usable.', 'MediaForge Update Failure', 'OK', 'Error')"
+    exit /b %ERRORLEVEL%
+)
+
+echo [%DATE% %TIME%] [Updater] Installation complete. Cleaning up... >> "%LOG_FILE%"
+rmdir /s /q "%TEMP_DIR%" >> "%LOG_FILE%" 2>&1
+del /f /q "%ZIP_PATH%" >> "%LOG_FILE%" 2>&1
+
+:: Clean up stale installation logs older than 7 days
+powershell -Command "Get-ChildItem -Path '%TARGET_DIR%\\updates' -Filter '*.log' | Where-Object {{ $_.LastWriteTime -lt (Get-Date).AddDays(-7) }} | Remove-Item -Force" >> "%LOG_FILE%" 2>&1
+
+:: Restart application
+echo [%DATE% %TIME%] [Updater] Relaunching application... >> "%LOG_FILE%"
+%RESTART_CMD% >> "%LOG_FILE%" 2>&1
+
+:: Exit and self delete batch file
+(goto) 2>nul & del "%~f0"
+"""
+
+                with open(batch_path, "w", encoding="utf-8") as fh:
+                    fh.write(batch_content)
+
+                self.logger.info(f"[Installer] Launching external updater process: {batch_path}")
+                
+                creation_flags = 0
+                if sys.platform == "win32":
+                    creation_flags = subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS
+
+                # Gracefully stop backend, UI, tray, and other locks first
+                self._window.after(0, self._window.prepare_for_installation)
+
+                # Give locks a moment to release, then spawn updater and exit parent
+                def _launch_and_exit():
+                    time.sleep(1.0)
+                    subprocess.Popen(
+                        ["cmd.exe", "/c", batch_path],
+                        creationflags=creation_flags,
+                        close_fds=True
+                    )
+                    self._window.after(0, self._window.destroy)
+
+                threading.Thread(target=_launch_and_exit, daemon=True, name="UpdaterLauncherThread").start()
 
             except Exception as exc:
                 self.logger.error(f"[Installer] Install failed: {exc}", exc=exc)

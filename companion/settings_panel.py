@@ -861,6 +861,13 @@ class SettingsPage(BasePage):
             info_text = f"Current: v{current} | Latest: {latest}\nLast checked: {last_checked_str}"
         self._update_info_lbl.configure(text=info_text)
 
+        # Update installer details label dynamically
+        if self.updater and (status == "Pending Install" or (self.updater._installer_path and os.path.exists(self.updater._installer_path))):
+            ver_str = self.updater._installer_version or latest
+            self._installer_details_lbl.configure(text=f"MediaForge_Portable.zip (v{ver_str})")
+        else:
+            self._installer_details_lbl.configure(text="No installer downloaded.")
+
         # Dynamic action buttons state
         if status == "Checking":
             self._check_now_btn.configure(state="disabled", text="Checking...")

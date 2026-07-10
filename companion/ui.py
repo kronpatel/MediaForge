@@ -670,6 +670,9 @@ class CompanionWindow(ctk.CTk):
             if hasattr(self, "_dashboard_controller") and self._dashboard_controller:
                 self._dashboard_controller.trigger_poll()
 
+            # Trigger post-install update verification
+            self.after(100, self._verify_post_install)
+
         elif status in (BackendStatus.STOPPED, BackendStatus.CRASHED):
             self._status_lbl.configure(text_color=_CLR_RED)
             self._start_btn.configure(state="normal")
@@ -684,6 +687,65 @@ class CompanionWindow(ctk.CTk):
 
         # Let the tray update itself (tray_manager listens to manager state)
         pass
+
+    def _verify_post_install(self) -> None:
+        if not hasattr(self, "updater") or not self.updater:
+            return
+        # Only verify if an installation was in progress
+        with self.updater._lock:
+            in_progress = self.updater._installation_in_progress
+        if not in_progress:
+            return
+        
+        self.logger.info("[Updater] Starting post-install verification...")
+        try:
+            # 1. Verify companion version matches target version
+            comp_ver = self.updater.get_current_version()
+            target_ver = self.updater._installer_version
+            if not target_ver:
+                target_ver = self.updater.get_latest_version()
+            
+            # If target_ver has 'v' prefix, normalize
+            target_ver_clean = target_ver.lstrip("v")
+            comp_ver_clean = comp_ver.lstrip("v")
+            
+            if target_ver_clean != comp_ver_clean:
+                raise ValueError(f"Companion version mismatch (running={comp_ver_clean}, expected={target_ver_clean})")
+            
+            # 2. Verify backend version matches companion version
+            backend_ver = self._manager.fetch_version()
+            if not backend_ver:
+                raise ValueError("Backend version could not be retrieved")
+            
+            backend_ver_clean = backend_ver.lstrip("v")
+            if backend_ver_clean != comp_ver_clean:
+                raise ValueError(f"Backend version mismatch (running={backend_ver_clean}, expected={comp_ver_clean})")
+            
+            # All checks passed! Update cache state.
+            self.logger.info("[Updater] Post-install verification successful! Marking update as Completed.")
+            with self.updater._lock:
+                self.updater._installation_in_progress = False
+                self.updater._pending_install = False
+                self.updater._installer_path = ""
+                self.updater._installer_version = ""
+                self.updater._download_completed_at = 0.0
+                self.updater._installer_sha256 = ""
+                self.updater._installer_state = "Completed"
+                self.updater._last_install_result = "success"
+                self.updater._save_cache()
+            
+            self.updater._notify("Completed", 100.0)
+            
+        except Exception as exc:
+            self.logger.error(f"[Updater] Post-install verification failed: {exc}", exc=exc)
+            with self.updater._lock:
+                self.updater._installation_in_progress = False
+                self.updater._pending_install = False
+                self.updater._installer_state = "Failed"
+                self.updater._last_install_result = "failed"
+                self.updater._last_install_error = str(exc)
+                self.updater._save_cache()
+            self.updater._notify("Failed", 0.0, str(exc))
 
     # ------------------------------------------------------------------
     # Backend lifecycle button hooks

@@ -741,61 +741,9 @@ class UpdateManager:
             self._installation_in_progress = bool(data.get("installation_in_progress") or False)
 
             if self._installation_in_progress:
-                self.logger.info("[Updater] Companion started with an installation in progress. Running recovery checks...")
-                self._startup_recovery_events.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Recovery Executed")
-                if self._installer_path and os.path.exists(self._installer_path):
-                    # File exists on disk. Verify size and version to determine health.
-                    stale = False
-                    reason = ""
-                    try:
-                        sz = os.path.getsize(self._installer_path)
-                        if sz <= 0:
-                            stale = True
-                            reason = "installer size is zero"
-                        elif sz != self._asset_size:
-                            stale = True
-                            reason = f"size mismatch (disk={sz}, expected={self._asset_size})"
-                    except OSError as exc:
-                        stale = True
-                        reason = f"unreadable file: {exc}"
-
-                    if not stale and self._installer_version != self._latest_version:
-                        stale = True
-                        reason = f"version mismatch (installer={self._installer_version}, latest={self._latest_version})"
-
-                    if stale:
-                        self.logger.warning(f"[Updater] Installer validation failed on recovery: {reason}. Restoring state to Failed.")
-                        self._installer_state = "Failed"
-                        self._last_install_result = "failed"
-                        self._last_install_error = f"Recovery failed: {reason}"
-                        self._installation_in_progress = False
-                    else:
-                        self.logger.info("[Updater] Installer file is valid. Restoring state to Pending Install.")
-                        self._pending_install = True
-                        self._installer_state = "Idle"
-                        self._installation_in_progress = False
-                else:
-                    # Installer file does not exist
-                    if self._installer_version == COMPANION_VERSION:
-                        self.logger.info("[Updater] Installation completed successfully (version matches COMPANION_VERSION). Restoring state to Completed.")
-                        self._installer_state = "Completed"
-                        self._last_install_result = "success"
-                        self._pending_install = False
-                        self._installer_path = ""
-                        self._installer_version = ""
-                        self._download_completed_at = 0.0
-                        self._installer_sha256 = ""
-                    else:
-                        self.logger.warning("[Updater] Installer file no longer exists and version not updated. Restoring state to Failed.")
-                        self._installer_state = "Failed"
-                        self._last_install_result = "failed"
-                        self._last_install_error = "Recovery failed: installer file no longer exists"
-                        self._pending_install = False
-                        self._installer_path = ""
-                        self._installer_version = ""
-                        self._download_completed_at = 0.0
-                        self._installer_sha256 = ""
-                    self._installation_in_progress = False
+                self.logger.info("[Updater] Companion started with an installation in progress. Deferring verification until backend startup...")
+                self._startup_recovery_events.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Deferred Verification Started")
+                self._recovery_completed = True
                 
                 self._recovery_completed = True
                 try:
@@ -806,7 +754,7 @@ class UpdateManager:
                 self._recovery_completed = True
 
             # Verify installer files (Component 5 / Refinements)
-            if self._pending_install:
+            if self._pending_install and not self._installation_in_progress:
                 stale = False
                 reason = ""
                 if not self._installer_path or not os.path.isabs(self._installer_path):
