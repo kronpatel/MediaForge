@@ -9,6 +9,7 @@ on:
 jobs:
   test:
     runs-on: windows-latest
+    timeout-minutes: 10
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
@@ -54,3 +55,8 @@ jobs:
         run: |
           cd companion
           python -m unittest discover -p "test_*.py" -v
+
+      - name: Cleanup leaked backend processes
+        if: always()
+        run: |
+          Get-Process -Name "python" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*app.py*" } | Stop-Process -Force -ErrorAction SilentlyContinue

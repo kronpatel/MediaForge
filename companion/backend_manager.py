@@ -849,6 +849,7 @@ class BackendManager:
             cwd=BACKEND_DIR,
             creationflags=creation_flags,
             env=env,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
