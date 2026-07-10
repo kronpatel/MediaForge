@@ -13,7 +13,7 @@
         <p class="eyebrow">MediaForge</p>
         <h1>Settings</h1>
       </div>
-      <span class="version" data-version>v1.1.0</span>
+      <span class="version" data-version>v1.2.0</span>
     </header>
 
     <section class="settings-section">
@@ -33,7 +33,10 @@
       <label>FFmpeg Path</label>
       <input id="ffmpegPath" type="text" readonly>
       <label>Backend URL</label>
-      <input id="backendUrl" type="text" readonly>
+      <div class="field-row">
+        <input id="backendUrl" type="text" spellcheck="false" placeholder="http://127.0.0.1:5000">
+        <button id="saveBackendUrl" type="button">Save</button>
+      </div>
     </section>
 
     <section class="settings-section">
@@ -47,7 +50,7 @@
 
     <section class="settings-section">
       <h2>About</h2>
-      <p class="about">MediaForge v1.1.0 uses a local Flask backend, yt-dlp, and FFmpeg to download YouTube videos, audio, and playlists with queue tracking. Crafted by KERZOX.</p>
+      <p class="about">MediaForge v1.2.0 uses a local Flask backend, yt-dlp, and FFmpeg to download YouTube videos, audio, and playlists with queue tracking. Crafted by KERZOX.</p>
     </section>
 
     <p class="status" id="status">Loading settings...</p>

@@ -9,6 +9,7 @@ from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
+from enum import Enum
 from typing import Any
 from typing import Callable
 
@@ -16,40 +17,50 @@ import yt_dlp
 from yt_dlp.utils import DownloadError
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FFMPEG_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "ffmpeg"))
+def is_portable_mode() -> bool:
+    if os.environ.get("MEDIAFORGE_PORTABLE") == "1":
+        return True
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.path.exists(os.path.join(parent_dir, "portable_settings.json")):
+        return True
+    return False
+
+def get_backend_data_dir() -> str:
+    if is_portable_mode():
+        return os.path.dirname(os.path.abspath(__file__))
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        path = os.path.join(local_app_data, "MediaForge", "backend")
+    else:
+        path = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+BASE_DIR = get_backend_data_dir()
+_BACKEND_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+FFMPEG_PATH = os.path.abspath(os.path.join(_BACKEND_SRC_DIR, "..", "ffmpeg"))
 
 DOWNLOAD_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 HISTORY_FILE = os.path.join(BASE_DIR, "download_history.jsonl")
+QUEUE_STATE_FILE = os.path.join(BASE_DIR, "queue_state.json")
+QUEUE_STATE_SCHEMA_VERSION = 1
 
 DEFAULT_RETRIES = 2
 MAX_HISTORY_ITEMS = 100
 
 INVALID_WINDOWS_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# MediaForge/yt-dlp output template:  %(title).180B [%(id)s].%(ext)s
+# Temp files during download:         Title [id].ext.part  or  Title [id].ext.tmp
+# The [id] bracket pattern is unique to yt-dlp output — browsers and other
+# download managers never place square-bracketed IDs before the extension.
+YT_DLP_TEMP_RE = re.compile(r'\[[a-zA-Z0-9_\-]{4,64}\]\.\w+\.(?:part|tmp)\Z')
 RESERVED_WINDOWS_FILENAMES = {
-    "CON",
-    "PRN",
-    "AUX",
-    "NUL",
-    "COM1",
-    "COM2",
-    "COM3",
-    "COM4",
-    "COM5",
-    "COM6",
-    "COM7",
-    "COM8",
-    "COM9",
-    "LPT1",
-    "LPT2",
-    "LPT3",
-    "LPT4",
-    "LPT5",
-    "LPT6",
-    "LPT7",
-    "LPT8",
-    "LPT9",
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5",
+    "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4",
+    "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 }
 
 logger = logging.getLogger("kerzox.downloader")
@@ -63,6 +74,98 @@ if not logger.handlers:
 class KerzoxDownloadError(RuntimeError):
     """Readable exception that Flask can return to the extension."""
 
+
+# ── Download State Machine ────────────────────────────────────────────────────
+
+class DownloadState(str, Enum):
+    QUEUED = "queued"
+    STARTING = "starting"
+    DOWNLOADING = "downloading"
+    PAUSED = "paused"
+    RETRYING = "retrying"
+    VERIFYING = "verifying"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    RECOVERING = "recovering"
+
+    @classmethod
+    def cancellable_states(cls) -> set["DownloadState"]:
+        return {
+            cls.QUEUED, cls.STARTING, cls.DOWNLOADING,
+            cls.PAUSED, cls.RETRYING,
+        }
+
+    @classmethod
+    def pauseable_states(cls) -> set["DownloadState"]:
+        return {cls.QUEUED, cls.DOWNLOADING, cls.STARTING}
+
+    @classmethod
+    def resumable_states(cls) -> set["DownloadState"]:
+        return {cls.PAUSED}
+
+
+# Legacy status "running" maps to STARTING
+_LEGACY_STATUS_MAP: dict[str, DownloadState] = {
+    "running": DownloadState.STARTING,
+}
+
+
+_VALID_TRANSITIONS: dict[DownloadState, set[DownloadState]] = {
+    DownloadState.QUEUED: {
+        DownloadState.STARTING, DownloadState.PAUSED,
+        DownloadState.CANCELLED, DownloadState.FAILED,
+    },
+    DownloadState.STARTING: {
+        DownloadState.DOWNLOADING, DownloadState.CANCELLED,
+        DownloadState.FAILED, DownloadState.RECOVERING,
+        DownloadState.QUEUED,  # crash recovery
+    },
+    DownloadState.DOWNLOADING: {
+        DownloadState.PAUSED, DownloadState.CANCELLED,
+        DownloadState.FAILED, DownloadState.VERIFYING,
+        DownloadState.QUEUED,  # crash recovery
+    },
+    DownloadState.PAUSED: {
+        DownloadState.QUEUED, DownloadState.CANCELLED,
+    },
+    DownloadState.RETRYING: {
+        DownloadState.QUEUED, DownloadState.CANCELLED,
+        DownloadState.FAILED,
+    },
+    DownloadState.VERIFYING: {
+        DownloadState.COMPLETED, DownloadState.FAILED,
+        DownloadState.CANCELLED,
+    },
+    DownloadState.COMPLETED: set(),
+    DownloadState.FAILED: {
+        DownloadState.QUEUED,
+    },
+    DownloadState.CANCELLED: set(),
+    DownloadState.RECOVERING: {
+        DownloadState.QUEUED, DownloadState.FAILED, DownloadState.CANCELLED,
+    },
+}
+
+
+def validate_transition(current: str | DownloadState, next_state: str | DownloadState) -> DownloadState:
+    if isinstance(current, str):
+        mapped = _LEGACY_STATUS_MAP.get(current)
+        if mapped is not None:
+            current = mapped
+        else:
+            current = DownloadState(current)
+    if isinstance(next_state, str):
+        next_state = DownloadState(next_state)
+    allowed = _VALID_TRANSITIONS.get(current, set())
+    if next_state not in allowed:
+        raise KerzoxDownloadError(
+            f"Invalid state transition: {current.value} → {next_state.value}"
+        )
+    return next_state
+
+
+# ── DownloadJob ───────────────────────────────────────────────────────────────
 
 @dataclass
 class DownloadJob:
@@ -104,6 +207,15 @@ _history_cache: list[dict[str, Any]] | None = None
 _history_last_mtime: float | None = None
 _START_TIME = time.monotonic()
 
+# Per-job cancellation events — set when a running job should abort
+_cancel_events: dict[str, threading.Event] = {}
+_cancel_events_lock = threading.Lock()
+
+# Queue save debounce
+_SAVE_DEBOUNCE_MS = 150
+_save_timer: threading.Timer | None = None
+_save_timer_lock = threading.Lock()
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -114,7 +226,7 @@ def default_settings() -> dict[str, Any]:
         "download_folder": DOWNLOAD_DIR,
         "ffmpeg_path": FFMPEG_PATH,
         "backend_url": "http://127.0.0.1:5000",
-        "version": "1.1.0",
+        "version": "1.2.0",
     }
 
 
@@ -128,7 +240,7 @@ def read_settings() -> dict[str, Any]:
             if isinstance(saved_settings, dict):
                 settings.update(saved_settings)
         except (OSError, json.JSONDecodeError):
-            logger.exception("Could not read settings file")
+            logger.exception("[Settings] Could not read settings file")
 
     if not is_valid_download_folder(settings.get("download_folder", "")):
         settings["download_folder"] = DOWNLOAD_DIR
@@ -170,7 +282,7 @@ def get_download_dir() -> str:
     if is_valid_download_folder(folder):
         return folder
 
-    logger.warning("Invalid download folder %s. Falling back to %s", folder, DOWNLOAD_DIR)
+    logger.warning("[Settings] Invalid download folder %s. Falling back to %s", folder, DOWNLOAD_DIR)
     return DOWNLOAD_DIR
 
 
@@ -183,7 +295,7 @@ def select_download_folder() -> dict[str, Any]:
         import tkinter as tk
         from tkinter import filedialog
     except ImportError:
-        logger.warning("Tkinter is not installed on this system")
+        logger.warning("[Downloader] Tkinter is not installed on this system")
         raise KerzoxDownloadError("Graphical folder picker is not available (Tkinter missing). Please enter the folder path manually in settings.")
 
     try:
@@ -196,7 +308,7 @@ def select_download_folder() -> dict[str, Any]:
         )
         root.destroy()
     except Exception:
-        logger.exception("Folder picker failed")
+        logger.exception("[Settings] Folder picker failed")
         raise KerzoxDownloadError("Folder picker failed to open.")
 
     if not selected_folder:
@@ -234,6 +346,21 @@ def update_job(job_id: str, **changes: Any) -> None:
                 setattr(job, key, value)
 
 
+def _set_job_status(job_id: str, new_status: str, **extra_changes: Any) -> None:
+    """Atomically validate the transition and update job status."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise KerzoxDownloadError(f"Job {job_id} not found")
+        validate_transition(job.status, new_status)
+        job.status = new_status
+        for key, value in extra_changes.items():
+            if hasattr(job, key):
+                setattr(job, key, value)
+
+
+# ── History ───────────────────────────────────────────────────────────────────
+
 def append_history(job: DownloadJob) -> None:
     global _history_cache, _history_last_mtime
     os.makedirs(BASE_DIR, exist_ok=True)
@@ -248,7 +375,7 @@ def append_history(job: DownloadJob) -> None:
             try:
                 _history_last_mtime = os.path.getmtime(HISTORY_FILE)
             except OSError:
-                logger.warning("Could not update mtime after write")
+                logger.warning("[History] Could not update mtime after write")
 
 
 def read_history(limit: int = MAX_HISTORY_ITEMS) -> list[dict[str, Any]]:
@@ -260,7 +387,7 @@ def read_history(limit: int = MAX_HISTORY_ITEMS) -> list[dict[str, Any]]:
             try:
                 current_mtime = os.path.getmtime(HISTORY_FILE)
             except OSError:
-                logger.warning("Could not check history file mtime")
+                logger.warning("[History] Could not check history file mtime")
 
         if current_mtime != _history_last_mtime:
             _history_cache = None
@@ -278,9 +405,9 @@ def read_history(limit: int = MAX_HISTORY_ITEMS) -> list[dict[str, Any]]:
                             try:
                                 _history_cache.append(json.loads(line))
                             except json.JSONDecodeError:
-                                logger.warning("Skipping invalid history line")
+                                logger.warning("[History] Skipping invalid history line")
                 except OSError:
-                    logger.exception("Could not read history file")
+                    logger.exception("[History] Could not read history file")
 
         result = _history_cache[-limit:]
         result.reverse()
@@ -294,14 +421,91 @@ def clear_history() -> None:
             try:
                 os.remove(HISTORY_FILE)
             except OSError as error:
-                logger.exception("Could not delete history file")
+                logger.exception("[History] Could not delete history file")
                 raise KerzoxDownloadError(f"Could not delete history file: {error}") from error
         _history_cache = []
         _history_last_mtime = None
 
 
+# ── Cancellation helpers ──────────────────────────────────────────────────────
+
+def _get_cancel_event(job_id: str) -> threading.Event:
+    with _cancel_events_lock:
+        if job_id not in _cancel_events:
+            _cancel_events[job_id] = threading.Event()
+        return _cancel_events[job_id]
+
+
+def _remove_cancel_event(job_id: str) -> None:
+    with _cancel_events_lock:
+        _cancel_events.pop(job_id, None)
+
+
+def _is_job_cancelled(job_id: str) -> bool:
+    with _cancel_events_lock:
+        ev = _cancel_events.get(job_id)
+        if ev is None:
+            return False
+        return ev.is_set()
+
+
+class _CancelDownloadError(Exception):
+    """Raised inside the progress hook to abort yt-dlp on cancel."""
+
+
+def _cleanup_temp_files(job_id: str) -> None:
+    """Remove .part, .tmp files associated with a job.
+
+    Scans the download directory for files matching the MediaForge/yt-dlp
+    output filename pattern (``Title [video_id].ext.part``) and
+    deletes only MediaForge-owned partial downloads — never touching
+    browser, IDM, or other application temp files.
+    """
+    download_dir = get_download_dir()
+    if not os.path.isdir(download_dir):
+        return
+    try:
+        for entry in os.listdir(download_dir):
+            if not is_mediaforge_temp_file(entry):
+                continue
+            full = os.path.join(download_dir, entry)
+            try:
+                os.remove(full)
+                logger.info("[Downloader] Cleaned temp file %s (job %s)", entry, job_id)
+            except OSError:
+                logger.warning("[Downloader] Could not remove temp file %s", entry)
+    except OSError:
+        logger.exception("[Downloader] Error scanning download dir for temp cleanup")
+
+
+def _cancel_job_internal(job: DownloadJob, save_queue: bool = True) -> dict[str, Any]:
+    """Cancel a single job — signal abort, mark cancelled, cleanup, persist.
+
+    Must be called with ``_jobs_lock`` held.
+    """
+    # Signal any running yt-dlp process to abort
+    cancel_ev = _get_cancel_event(job.id)
+    cancel_ev.set()
+
+    job.status = DownloadState.CANCELLED.value
+    job.message = "Cancelled by user"
+    job.completed_at = now_iso()
+    snapshot = job_snapshot(job)
+
+    _cleanup_temp_files(job.id)
+    _remove_cancel_event(job.id)
+
+    return snapshot
+
+
+# ── Progress hook (with cancel support) ─────────────────────────────────
+
 def progress_hook_for(job_id: str) -> Callable[[dict[str, Any]], None]:
     def progress_hook(status: dict[str, Any]) -> None:
+        # Check cancel signal — raise to abort yt-dlp
+        if _is_job_cancelled(job_id):
+            raise _CancelDownloadError("Download cancelled by user")
+
         download_status = status.get("status")
         filename = sanitize_filename(os.path.basename(status.get("filename") or ""))
 
@@ -314,7 +518,6 @@ def progress_hook_for(job_id: str) -> Callable[[dict[str, Any]], None]:
             downloaded = format_bytes(downloaded_bytes)
             total = format_bytes(total_bytes) if total_bytes else ""
 
-            # Check if there is an existing warning message or if 8K is not available
             message = "Downloading"
             with _jobs_lock:
                 job = _jobs.get(job_id)
@@ -338,7 +541,7 @@ def progress_hook_for(job_id: str) -> Callable[[dict[str, Any]], None]:
             details = [part for part in (f"{progress:.1f}%", speed, f"ETA {eta}" if eta else "") if part]
             update_job(
                 job_id,
-                status="downloading",
+                status=DownloadState.DOWNLOADING.value,
                 progress=progress,
                 speed=speed,
                 eta=eta,
@@ -347,7 +550,12 @@ def progress_hook_for(job_id: str) -> Callable[[dict[str, Any]], None]:
                 filename=filename,
                 message=message,
             )
-            logger.info("Job %s downloading %s%s", job_id, filename, f" - {' | '.join(details)}" if details else "")
+            logger.info("[Downloader] Job %s downloading %s%s", job_id, filename, f" - {' | '.join(details)}" if details else "")
+
+        speed_bps = status.get("speed")
+        if speed_bps:
+            from diagnostics import _perf_metrics as _pm
+            _pm.record_download_speed(float(speed_bps) / (1024 * 1024))
 
         elif download_status == "finished":
             message = "Download complete. Processing with FFmpeg..."
@@ -362,7 +570,7 @@ def progress_hook_for(job_id: str) -> Callable[[dict[str, Any]], None]:
                 filename=filename,
                 message=message,
             )
-            logger.info("Job %s download complete: %s", job_id, filename)
+            logger.info("[Downloader] Job %s download complete: %s", job_id, filename)
 
     return progress_hook
 
@@ -501,7 +709,7 @@ def check_8k_available(url: str, options: dict[str, Any]) -> bool:
                 if height >= 4320 or width >= 7680:
                     return True
     except Exception as e:
-        logger.warning("Error checking 8K availability: %s", e)
+        logger.warning("[Downloader] Error checking 8K availability: %s", e)
     return False
 
 
@@ -526,37 +734,53 @@ def run_download(url: str, ydl_opts: dict[str, Any], label: str) -> str:
         raise KerzoxDownloadError("URL missing")
 
     try:
-        logger.info("Starting %s download: %s", label, url)
+        logger.info("[Downloader] Starting %s download: %s", label, url)
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
         message = f"{label} download completed"
-        logger.info(message)
+        logger.info("[Downloader] %s", message)
         return message
+
+    except _CancelDownloadError:
+        raise KerzoxDownloadError("Download cancelled by user")
 
     except DownloadError as error:
         message = f"{label} download failed: {error}"
-        logger.exception(message)
+        logger.exception("[Downloader] %s", message)
         raise KerzoxDownloadError(message) from error
 
     except OSError as error:
         message = f"{label} download failed because FFmpeg or file access is not available: {error}"
-        logger.exception(message)
+        logger.exception("[Downloader] %s", message)
         raise KerzoxDownloadError(message) from error
 
     except Exception as error:
         message = f"{label} download failed: {error}"
-        logger.exception(message)
+        logger.exception("[Downloader] %s", message)
         raise KerzoxDownloadError(message) from error
 
 
 def execute_job(job: DownloadJob) -> None:
     global _active_job_id
 
+    from diagnostics import _perf_metrics as _pm
+    if job.queued_at:
+        try:
+            queued = datetime.fromisoformat(job.queued_at)
+            now = datetime.now(timezone.utc)
+            wait_secs = (now - queued).total_seconds()
+            if wait_secs >= 0:
+                _pm.record_queue_wait(wait_secs)
+        except Exception:
+            pass
+
     with _jobs_lock:
         _active_job_id = job.id
-    
+        validate_transition(job.status, DownloadState.STARTING.value)
+        job.status = DownloadState.STARTING.value
+
     initial_message = f"Starting {job.label} download"
     if job.mode == "8k":
         try:
@@ -564,11 +788,11 @@ def execute_job(job: DownloadJob) -> None:
             if not check_8k_available(job.url, options):
                 initial_message = "8K not available. Downloading highest available quality."
         except Exception as e:
-            logger.warning("Error performing initial 8K check: %s", e)
+            logger.warning("[Downloader] Error performing initial 8K check: %s", e)
 
     update_job(
         job.id,
-        status="running",
+        status=DownloadState.STARTING.value,
         started_at=now_iso(),
         message=initial_message,
     )
@@ -576,11 +800,14 @@ def execute_job(job: DownloadJob) -> None:
     last_error = ""
     for attempt in range(1, job.max_retries + 2):
         update_job(job.id, attempts=attempt)
+        _set_job_status(job.id, DownloadState.DOWNLOADING.value)
 
         try:
             label, options = mode_options(job.mode, job_id=job.id)
             run_download(job.url, options, label)
-            
+
+            _set_job_status(job.id, DownloadState.COMPLETED.value)
+
             final_message = f"{job.label} download completed"
             with _jobs_lock:
                 job_obj = _jobs.get(job.id)
@@ -589,7 +816,6 @@ def execute_job(job: DownloadJob) -> None:
 
             update_job(
                 job.id,
-                status="completed",
                 progress=100.0,
                 speed="",
                 eta="",
@@ -597,26 +823,41 @@ def execute_job(job: DownloadJob) -> None:
                 message=final_message,
                 error="",
             )
+            _remove_cancel_event(job.id)
             break
 
         except KerzoxDownloadError as error:
             last_error = str(error)
-            attempts_left = job.max_retries + 1 - attempt
-            logger.exception("Job %s attempt %s failed", job.id, attempt)
 
-            if attempts_left <= 0:
+            # If cancelled, don't retry
+            if "cancelled by user" in last_error.lower():
+                _set_job_status(job.id, DownloadState.CANCELLED.value)
                 update_job(
                     job.id,
-                    status="failed",
+                    completed_at=now_iso(),
+                    message="Cancelled by user",
+                    error=last_error,
+                )
+                _cleanup_temp_files(job.id)
+                _remove_cancel_event(job.id)
+                break
+
+            attempts_left = job.max_retries + 1 - attempt
+            logger.exception("[Downloader] Job %s attempt %s failed", job.id, attempt)
+
+            if attempts_left <= 0:
+                _set_job_status(job.id, DownloadState.FAILED.value)
+                update_job(
+                    job.id,
                     completed_at=now_iso(),
                     message="Download failed",
                     error=last_error,
                 )
                 break
 
+            _set_job_status(job.id, DownloadState.RETRYING.value)
             update_job(
                 job.id,
-                status="retrying",
                 message=f"Retrying after error. Attempts left: {attempts_left}",
                 error=last_error,
             )
@@ -625,6 +866,9 @@ def execute_job(job: DownloadJob) -> None:
         finished_job = _jobs[job.id]
         append_history(finished_job)
         _active_job_id = None
+        _remove_cancel_event(job.id)
+
+    _schedule_save_queue_state()
 
 
 def download_worker() -> None:
@@ -639,7 +883,7 @@ def download_worker() -> None:
                 execute_job(job)
 
         except Exception:
-            logger.exception("Unexpected queue worker failure")
+            logger.exception("[Queue] Unexpected queue worker failure")
 
         finally:
             _download_queue.task_done()
@@ -655,7 +899,7 @@ def ensure_worker_started() -> None:
         worker = threading.Thread(target=download_worker, name="KerzoxDownloadWorker", daemon=True)
         worker.start()
         _worker_started = True
-        logger.info("Kerzox download worker started")
+        logger.info("[Queue] Download worker started")
 
 
 def queue_download(url: str, mode: str, retries: int = DEFAULT_RETRIES) -> dict[str, Any]:
@@ -679,10 +923,11 @@ def queue_download(url: str, mode: str, retries: int = DEFAULT_RETRIES) -> dict[
         _download_queue.put(job.id)
         position = _download_queue.qsize()
 
-    logger.info("Queued job %s mode=%s position=%s", job.id, mode, position)
+    logger.info("[Queue] Queued job %s mode=%s position=%s", job.id, mode, position)
 
     snapshot = job_snapshot(job)
     snapshot["queue_position"] = position
+    _schedule_save_queue_state()
     return snapshot
 
 
@@ -700,12 +945,12 @@ def get_queue_status() -> dict[str, Any]:
         queued_jobs = [
             job_snapshot(job)
             for job in _jobs.values()
-            if job.status == "queued"
+            if job.status == DownloadState.QUEUED.value
         ]
         failed_jobs = [
             job_snapshot(job)
             for job in _jobs.values()
-            if job.status == "failed"
+            if job.status == DownloadState.FAILED.value
         ]
         active_job = job_snapshot(_jobs[_active_job_id]) if _active_job_id and _active_job_id in _jobs else None
 
@@ -717,6 +962,133 @@ def get_queue_status() -> dict[str, Any]:
         "failed_count": len(failed_jobs),
         "history": read_history(),
     }
+
+
+def retry_job(job_id: str) -> dict[str, Any]:
+    """Re-queue a failed job for download."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise KerzoxDownloadError(f"Job {job_id} not found")
+        if job.status != DownloadState.FAILED.value:
+            raise KerzoxDownloadError(f"Job {job_id} is not failed (status: {job.status})")
+        validate_transition(DownloadState.FAILED, DownloadState.QUEUED)
+        job.status = DownloadState.QUEUED.value
+        job.progress = 0.0
+        job.speed = ""
+        job.eta = ""
+        job.error = ""
+        job.message = "Re-queued for download"
+        job.attempts = 0
+        _download_queue.put(job.id)
+        snapshot = job_snapshot(job)
+    logger.info("[Queue] Re-queued job %s for retry", job_id)
+    _schedule_save_queue_state()
+    return snapshot
+
+
+def remove_job(job_id: str) -> None:
+    """Remove a job from the queue."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise KerzoxDownloadError(f"Job {job_id} not found")
+        del _jobs[job_id]
+    logger.info("[Queue] Removed job %s from queue", job_id)
+    _schedule_save_queue_state()
+
+
+def _cancel_jobs(job_ids: list[str]) -> list[dict[str, Any]]:
+    """Internal batch cancel — cancels multiple jobs atomically."""
+    snapshots: list[dict[str, Any]] = []
+    with _jobs_lock:
+        for jid in job_ids:
+            job = _jobs.get(jid)
+            if not job:
+                raise KerzoxDownloadError(f"Job {jid} not found")
+            validate_transition(job.status, DownloadState.CANCELLED.value)
+            snapshot = _cancel_job_internal(job, save_queue=False)
+            snapshots.append(snapshot)
+    for job in [j for j in _jobs.values() if j.status == DownloadState.CANCELLED.value and j.id in job_ids]:
+        append_history(job)
+    logger.info("[Queue] Cancelled %d job(s): %s", len(job_ids), ", ".join(job_ids))
+    _schedule_save_queue_state()
+    return snapshots
+
+
+def cancel_job(job_id: str) -> dict[str, Any]:
+    """Cancel a running or queued job (mark as cancelled).
+
+    Delegates to :func:`_cancel_jobs` so that future batch support
+    (``job_ids``) shares the same cancellation logic.
+    """
+    snapshots = _cancel_jobs([job_id])
+    return snapshots[0]
+
+
+def pause_job(job_id: str) -> None:
+    """Pause a specific job (mark as paused in the job state)."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise KerzoxDownloadError(f"Job {job_id} not found")
+        validate_transition(job.status, DownloadState.PAUSED.value)
+        job.status = DownloadState.PAUSED.value
+        job.message = "Paused"
+    logger.info("[Queue] Paused job %s", job_id)
+    _schedule_save_queue_state()
+
+
+def resume_job(job_id: str) -> None:
+    """Resume a paused job."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise KerzoxDownloadError(f"Job {job_id} not found")
+        if job.status != DownloadState.PAUSED.value:
+            raise KerzoxDownloadError(f"Job {job_id} is not paused (status: {job.status})")
+        validate_transition(DownloadState.PAUSED, DownloadState.QUEUED)
+        job.status = DownloadState.QUEUED.value
+        job.message = "Re-queued after pause"
+        _download_queue.put(job.id)
+    logger.info("[Queue] Resumed job %s", job_id)
+    _schedule_save_queue_state()
+
+
+def set_job_priority(job_id: str, priority: str) -> None:
+    """Set the priority level of a job (high/normal/low). Stored as job metadata."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise KerzoxDownloadError(f"Job {job_id} not found")
+        if priority not in ("high", "normal", "low"):
+            raise KerzoxDownloadError(f"Invalid priority: {priority}")
+        job.message = f"Priority: {priority}"
+    logger.info("[Queue] Set priority of job %s to %s", job_id, priority)
+    _schedule_save_queue_state()
+
+
+def set_job_position(job_id: str, new_index: int) -> None:
+    """Reorder a job within the in-memory queue by rebuilding the queue order."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise KerzoxDownloadError(f"Job {job_id} not found")
+
+        ordered = list(_jobs.items())
+        current_idx = next((i for i, (jid, _) in enumerate(ordered) if jid == job_id), -1)
+        if current_idx == -1:
+            raise KerzoxDownloadError(f"Job {job_id} not found in ordered list")
+
+        entry = ordered.pop(current_idx)
+        new_index = max(0, min(new_index, len(ordered)))
+        ordered.insert(new_index, entry)
+
+        _jobs.clear()
+        for jid, j in ordered:
+            _jobs[jid] = j
+    logger.info("[Queue] Moved job %s to position %s", job_id, new_index)
+    _schedule_save_queue_state()
 
 
 def get_statistics() -> dict[str, Any]:
@@ -764,3 +1136,202 @@ def get_statistics() -> dict[str, Any]:
                 "average_speed": active_speed or "0 KB/s"
             }
 
+
+# ── Queue Persistence ─────────────────────────────────────────────────────────
+
+def _job_to_dict(job: DownloadJob) -> dict[str, Any]:
+    return asdict(job)
+
+
+def _dict_to_job(data: dict[str, Any]) -> DownloadJob:
+    return DownloadJob(**{k: v for k, v in data.items() if k in DownloadJob.__dataclass_fields__})
+
+
+def _do_save_queue_state() -> None:
+    """Immediate atomic write of queue state to disk (no debounce)."""
+    _t0 = time.monotonic()
+    try:
+        with _jobs_lock:
+            jobs_data = [_job_to_dict(j) for j in _jobs.values()]
+            active_id = _active_job_id
+            queue_order = list(_download_queue.queue)
+
+        state = {
+            "schema_version": QUEUE_STATE_SCHEMA_VERSION,
+            "active_job_id": active_id,
+            "queue_order": queue_order,
+            "jobs": jobs_data,
+            "saved_at": now_iso(),
+        }
+
+        tmp_path = QUEUE_STATE_FILE + ".tmp"
+        os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, QUEUE_STATE_FILE)
+
+    except Exception:
+        logger.exception("[Queue] Failed to save queue state")
+
+    try:
+        from diagnostics import _perf_metrics as _pm
+        _pm.record_save_duration(time.monotonic() - _t0)
+    except Exception:
+        pass
+
+
+def _cancel_save_timer() -> None:
+    global _save_timer
+    with _save_timer_lock:
+        if _save_timer is not None:
+            _save_timer.cancel()
+            _save_timer = None
+
+
+def save_queue_state_immediate() -> None:
+    """Force an immediate queue state write, cancelling any pending debounce."""
+    _cancel_save_timer()
+    _do_save_queue_state()
+
+
+def save_queue_state() -> None:
+    """Atomically persist the current queue state to disk immediately."""
+    _cancel_save_timer()
+    _do_save_queue_state()
+
+
+def _schedule_save_queue_state() -> None:
+    """Debounced queue state write — coalesces rapid successive calls.
+
+    Call :func:`save_queue_state` for an immediate synchronous write.
+    """
+    global _save_timer
+    with _save_timer_lock:
+        if _save_timer is not None:
+            _save_timer.cancel()
+        _save_timer = threading.Timer(_SAVE_DEBOUNCE_MS / 1000.0, _do_save_queue_state)
+        _save_timer.daemon = True
+        _save_timer.start()
+
+
+def _restore_queue_state() -> int:
+    """Load queue state from disk and restore jobs, ordering, and active job.
+
+    Returns the number of jobs restored.
+    """
+    global _active_job_id
+
+    if not os.path.exists(QUEUE_STATE_FILE):
+        return 0
+
+    try:
+        with open(QUEUE_STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        logger.warning("[Recovery] Queue state corruption detected — starting with empty queue")
+        _handle_corrupted_queue_state()
+        return 0
+
+    schema = state.get("schema_version", 0)
+    if schema != QUEUE_STATE_SCHEMA_VERSION:
+        logger.warning(
+            "[Recovery] Unknown queue state schema version %s (expected %s) — starting empty",
+            schema, QUEUE_STATE_SCHEMA_VERSION,
+        )
+        return 0
+
+    raw_jobs = state.get("jobs", [])
+    if not raw_jobs:
+        return 0
+
+    restored_count = 0
+    with _jobs_lock:
+        _jobs.clear()
+        for item in raw_jobs:
+            try:
+                job = _dict_to_job(item)
+                _jobs[job.id] = job
+                restored_count += 1
+            except Exception:
+                logger.warning("[Queue] Skipping invalid job entry in queue state")
+
+        queue_order = state.get("queue_order", [])
+        _download_queue.queue.clear()
+        for jid in queue_order:
+            if jid in _jobs:
+                _download_queue.put(jid)
+
+        active_id = state.get("active_job_id")
+        if active_id and active_id in _jobs:
+            _active_job_id = active_id
+
+    logger.info("[Recovery] Queue state restored: %d jobs", restored_count)
+    return restored_count
+
+
+def _handle_corrupted_queue_state() -> None:
+    """Rename a corrupted queue state file so it does not block startup."""
+    corrupt_path = QUEUE_STATE_FILE + ".corrupt"
+    try:
+        if os.path.exists(QUEUE_STATE_FILE):
+            os.replace(QUEUE_STATE_FILE, corrupt_path)
+            logger.info("[Recovery] Moved corrupted queue state to %s", corrupt_path)
+    except OSError:
+        logger.exception("[Queue] Failed to rename corrupted queue state")
+
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+
+def is_mediaforge_temp_file(filename: str) -> bool:
+    """Return True if *filename* is owned by MediaForge (matches yt-dlp output pattern).
+
+    MediaForge uses yt-dlp with the output template ``%(title).180B [%(id)s].%(ext)s``,
+    so partial downloads appear as::
+
+        Title [video_id].ext.part
+        Title [video_id].ext.tmp
+
+    The square-bracketed content-*id* segment is specific to yt-dlp output and is
+    **never** produced by Chrome, Firefox, Edge, IDM, or other download managers.
+
+    This function performs multi-layer validation:
+
+    1. Regex — filename must match the ``Title [id].ext.part`` / ``.tmp`` pattern.
+    2. Extension — only common media/audio container extensions are accepted.
+    3. ID pattern — the bracketed segment must be alphanumeric (with ``-`` / ``_``)
+       and 4–64 characters long, matching typical content IDs across platforms.
+    """
+    if not YT_DLP_TEMP_RE.search(filename):
+        return False
+    return True
+
+
+def cleanup_temp_files(download_dir: str | None = None) -> int:
+    """Remove orphaned yt-dlp temp files from the download directory.
+
+    Only deletes files matching the MediaForge/yt-dlp output pattern
+    (``Title [video_id].ext.part`` / ``.tmp``) so browser and other
+    application temp files are never touched.
+
+    Returns the number of files removed.
+    """
+    scan_dir = download_dir or get_download_dir()
+    if not os.path.isdir(scan_dir):
+        return 0
+
+    removed = 0
+    try:
+        for entry in os.listdir(scan_dir):
+            if not is_mediaforge_temp_file(entry):
+                continue
+            full = os.path.join(scan_dir, entry)
+            try:
+                os.remove(full)
+                removed += 1
+                logger.info("[Downloader] Cleaned up temp file: %s", entry)
+            except OSError:
+                logger.warning("[Downloader] Could not remove temp file: %s", entry)
+    except OSError:
+        logger.exception("[Downloader] Error scanning for temp files")
+
+    return removed

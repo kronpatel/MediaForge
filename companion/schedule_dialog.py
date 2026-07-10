@@ -284,15 +284,15 @@ class ScheduleDialog(ctk.CTkToplevel):
 
         # Validations
         if not url:
-            messagebox.showerror("Error", "Download URL is required.")
+            messagebox.showerror("Error", "Download URL is required.", parent=self)
             return
             
         if not url.startswith(("http://", "https://")):
-            messagebox.showerror("Error", "Please enter a valid HTTP/HTTPS URL.")
+            messagebox.showerror("Error", "Please enter a valid HTTP/HTTPS URL.", parent=self)
             return
 
         if folder and not os.path.isdir(folder):
-            messagebox.showerror("Error", "The specified output folder does not exist.")
+            messagebox.showerror("Error", "The specified output folder does not exist.", parent=self)
             return
 
         # Parse date and time
@@ -300,11 +300,11 @@ class ScheduleDialog(ctk.CTkToplevel):
             scheduled_time_str = f"{date_str} {time_str}"
             scheduled_dt = datetime.datetime.strptime(scheduled_time_str, "%Y-%m-%d %H:%M:%S")
         except ValueError:
-            messagebox.showerror("Error", "Invalid Date or Time format. Use YYYY-MM-DD and HH:MM:SS.")
+            messagebox.showerror("Error", "Invalid Date or Time format. Use YYYY-MM-DD and HH:MM:SS.", parent=self)
             return
 
         if repeat == "One Time" and scheduled_dt <= datetime.datetime.now() and not self.schedule_data:
-            messagebox.showerror("Error", "Scheduled execution time must be in the future.")
+            messagebox.showerror("Error", "Scheduled execution time must be in the future.", parent=self)
             return
 
         try:
@@ -312,7 +312,7 @@ class ScheduleDialog(ctk.CTkToplevel):
             if retries < 0 or retries > 5:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("Error", "Retry Count must be an integer between 0 and 5.")
+            messagebox.showerror("Error", "Retry Count must be an integer between 0 and 5.", parent=self)
             return
 
         # Build payload

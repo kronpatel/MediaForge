@@ -385,7 +385,7 @@ class SchedulerPage(BasePage):
     def _delete_schedule_click(self) -> None:
         if not self._selected_uuid or not self.scheduler:
             return
-        ans = messagebox.askyesno("Delete Schedule", "Are you sure you want to delete the selected schedule?")
+        ans = messagebox.askyesno("Delete Schedule", "Are you sure you want to delete the selected schedule?", parent=self)
         if ans:
             self.scheduler.delete_schedule(self._selected_uuid)
             self._selected_uuid = None
@@ -399,7 +399,7 @@ class SchedulerPage(BasePage):
             self._selected_uuid = new_uid
             self._refresh_list()
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to duplicate schedule: {e}")
+            messagebox.showerror("Error", f"Failed to duplicate schedule: {e}", parent=self)
 
     def _toggle_schedule_click(self) -> None:
         if not self._selected_uuid or not self.scheduler:
@@ -411,4 +411,4 @@ class SchedulerPage(BasePage):
         if not self._selected_uuid or not self.scheduler:
             return
         self.scheduler.run_now(self._selected_uuid)
-        messagebox.showinfo("Scheduler", "Schedule manual execution run triggered.")
+        messagebox.showinfo("Scheduler", "Schedule manual execution run triggered.", parent=self)

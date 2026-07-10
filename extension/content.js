@@ -4,12 +4,32 @@
     if (window.__kerzox_mediaforge_initialized) return;
     window.__kerzox_mediaforge_initialized = true;
 
-    const API_BASE_URL = "http://127.0.0.1:5000";
-    const VERSION = "1.1.0";
+    const DEFAULT_BACKEND_URL = "http://127.0.0.1:5000";
+    let API_BASE_URL = DEFAULT_BACKEND_URL;
+    const VERSION = "1.2.0";
     const BUTTON_ID = "kerzox-download-button";
     const MENU_ID = "kerzox-download-menu";
     const STYLE_ID = "kerzox-download-style";
     const TITLE_SLOT_ID = "kerzox-title-download-slot";
+
+    (function initBackendUrl() {
+        try {
+            chrome.storage.local.get(["kerzoxBackendUrl"]).then((stored) => {
+                if (stored.kerzoxBackendUrl) {
+                    API_BASE_URL = stored.kerzoxBackendUrl;
+                }
+            }).catch(() => {});
+        } catch (e) {
+        }
+        try {
+            chrome.storage.onChanged.addListener((changes) => {
+                if (changes.kerzoxBackendUrl) {
+                    API_BASE_URL = changes.kerzoxBackendUrl.newValue || DEFAULT_BACKEND_URL;
+                }
+            });
+        } catch (e) {
+        }
+    })();
 
     const DOWNLOAD_OPTIONS = [
         { mode: "mp3", label: "MP3", detail: "Audio, 320 kbps", icon: "music" },
@@ -1107,7 +1127,7 @@
             pollStatus();
         } catch (error) {
             console.error("Kerzox backend error:", error);
-            setStatus("Backend not running at http://127.0.0.1:5000");
+            setStatus(`Backend not running at ${API_BASE_URL}`);
         }
     }
 
@@ -1317,7 +1337,7 @@
             await refreshPanels();
         } catch (error) {
             console.error("Kerzox clear history error:", error);
-            setStatus("Backend not running at http://127.0.0.1:5000");
+            setStatus(`Backend not running at ${API_BASE_URL}`);
             const list = document.querySelector(`#${MENU_ID} [data-history-list]`);
             if (list) {
                 list.innerHTML = '<div class="kerzox-empty" style="color: #ff4d4d;">Backend not running. Could not clear history.</div>';

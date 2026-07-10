@@ -1,4 +1,5 @@
-const API_BASE_URL = "http://127.0.0.1:5000";
+const DEFAULT_BACKEND_URL = "http://127.0.0.1:5000";
+let API_BASE_URL = DEFAULT_BACKEND_URL;
 
 const downloadFolder = document.getElementById("downloadFolder");
 const ffmpegPath = document.getElementById("ffmpegPath");
@@ -10,9 +11,26 @@ const versionNode = document.querySelector("[data-version]");
 document.getElementById("saveFolder").addEventListener("click", saveFolder);
 document.getElementById("resetFolder").addEventListener("click", resetFolder);
 document.getElementById("chooseFolder").addEventListener("click", chooseFolder);
+document.getElementById("saveBackendUrl").addEventListener("click", saveBackendUrl);
 theme.addEventListener("change", saveTheme);
 
-loadSettings();
+init();
+
+async function init() {
+    await loadStoredBackendUrl();
+    loadSettings();
+}
+
+async function loadStoredBackendUrl() {
+    try {
+        const stored = await chrome.storage.local.get(["kerzoxBackendUrl"]);
+        if (stored.kerzoxBackendUrl) {
+            API_BASE_URL = stored.kerzoxBackendUrl;
+        }
+    } catch {
+        // chrome.storage unavailable; keep default
+    }
+}
 
 async function loadSettings() {
     setStatus("Loading settings...");
@@ -34,7 +52,7 @@ async function loadSettings() {
         setStatus("Settings loaded.");
     } catch (error) {
         console.error(error);
-        setStatus("Backend not running at http://127.0.0.1:5000");
+        setStatus(`Backend not running at ${API_BASE_URL}`);
         await loadLocalFolder();
         await loadLocalTheme();
     }
@@ -44,7 +62,24 @@ function applySettings(settings) {
     downloadFolder.value = settings.download_folder || "";
     ffmpegPath.value = settings.ffmpeg_path || "";
     backendUrl.value = settings.backend_url || API_BASE_URL;
-    versionNode.textContent = `v${settings.version || "1.1.0"}`;
+    versionNode.textContent = `v${settings.version || "1.2.0"}`;
+}
+
+async function saveBackendUrl() {
+    const newUrl = backendUrl.value.trim();
+    if (!newUrl) {
+        setStatus("Backend URL cannot be empty.");
+        return;
+    }
+    try {
+        await chrome.storage.local.set({ kerzoxBackendUrl: newUrl });
+        API_BASE_URL = newUrl;
+        setStatus(`Backend URL saved to ${newUrl}. Reconnecting...`);
+        await loadSettings();
+    } catch (error) {
+        console.error(error);
+        setStatus("Could not save Backend URL.");
+    }
 }
 
 async function saveFolder() {
@@ -72,7 +107,7 @@ async function saveFolder() {
         setStatus("Download folder saved.");
     } catch (error) {
         console.error(error);
-        setStatus("Backend not running. Folder was not saved.");
+        setStatus(`Backend not running at ${API_BASE_URL}. Folder was not saved.`);
     }
 }
 
@@ -93,7 +128,7 @@ async function resetFolder() {
         setStatus("Download folder reset.");
     } catch (error) {
         console.error(error);
-        setStatus("Backend not running. Folder was not reset.");
+        setStatus(`Backend not running at ${API_BASE_URL}. Folder was not reset.`);
     }
 }
 
@@ -142,7 +177,6 @@ async function saveTheme() {
             body: JSON.stringify({ theme: theme.value })
         });
     } catch {
-        // Theme remains saved locally even if the backend is offline.
     }
 
     setStatus("Theme saved.");

@@ -350,7 +350,7 @@ class HistoryPage(BasePage):
         try:
             self.clipboard_clear()
             self.clipboard_append(text)
-            self.logger.info("Copied historical download URL to clipboard.")
+            self.logger.info("[History] Copied historical download URL to clipboard.")
         except Exception:
             pass
 
@@ -359,16 +359,16 @@ class HistoryPage(BasePage):
             try:
                 subprocess.Popen(["explorer", os.path.abspath(self._download_folder)])
             except Exception as exc:
-                self.logger.error(f"Failed to open download folder: {exc}")
+                self.logger.error(f"[History] Failed to open download folder: {exc}")
         else:
-            self.logger.warning("Download folder is not set or does not exist.")
+            self.logger.warning("[History] Download folder is not set or does not exist.")
 
     def _clear_history_click(self) -> None:
         # Prompt for confirmation
         dialog = ctk.CTkFrame(self) # simple visual blocker/prompt
         if self.manager.clear_history_api():
-            self.logger.info("Download history cleared successfully.")
+            self.logger.info("[History] Download history cleared successfully.")
             self._full_history = []
             self._apply_filters()
         else:
-            self.logger.error("Failed to clear download history.")
+            self.logger.error("[History] Failed to clear download history.")

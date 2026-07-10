@@ -17,6 +17,20 @@ from PIL import Image
 import pystray
 
 from backend_manager import BackendStatus
+from notifications import (
+    CATEGORY_BACKEND_STARTED,
+    CATEGORY_BACKEND_STOPPED,
+    CATEGORY_BACKEND_CRASHED,
+    CATEGORY_INFO,
+    CATEGORY_SCHEDULE_STARTED,
+    CATEGORY_SCHEDULE_COMPLETED,
+    CATEGORY_SCHEDULE_FAILED,
+    CATEGORY_WARNING,
+    PRIORITY_HIGH,
+    SOURCE_BACKEND,
+    SOURCE_SCHEDULER,
+    get_notification_manager,
+)
 
 if TYPE_CHECKING:
     from backend_manager import BackendManager
@@ -189,10 +203,15 @@ class TrayManager:
             if self._manager.status == BackendStatus.RUNNING and self._manager._ping():
                 webbrowser.open(self._manager.base_url)
             else:
-                self.notify(
-                    "MediaForge Companion",
-                    "Backend is not running. Please start the backend first."
-                )
+                try:
+                    get_notification_manager().publish(
+                        category=CATEGORY_WARNING,
+                        title="MediaForge Companion",
+                        message="Backend is not running. Please start the backend first.",
+                        source=SOURCE_BACKEND,
+                    )
+                except Exception:
+                    pass
         self._marshal(_check_and_open)
 
     def _on_start_backend(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
@@ -218,14 +237,30 @@ class TrayManager:
         def _do_pause():
             if hasattr(self._window, "scheduler") and self._window.scheduler:
                 self._window.scheduler.pause_scheduler()
-                self.notify("MediaForge Companion", "Scheduler Paused")
+                try:
+                    get_notification_manager().publish(
+                        category=CATEGORY_INFO,
+                        title="MediaForge Companion",
+                        message="Scheduler Paused",
+                        source=SOURCE_SCHEDULER,
+                    )
+                except Exception:
+                    pass
         self._marshal(_do_pause)
 
     def _on_resume_scheduler(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
         def _do_resume():
             if hasattr(self._window, "scheduler") and self._window.scheduler:
                 self._window.scheduler.resume_scheduler()
-                self.notify("MediaForge Companion", "Scheduler Resumed")
+                try:
+                    get_notification_manager().publish(
+                        category=CATEGORY_INFO,
+                        title="MediaForge Companion",
+                        message="Scheduler Resumed",
+                        source=SOURCE_SCHEDULER,
+                    )
+                except Exception:
+                    pass
         self._marshal(_do_resume)
 
     def _on_open_scheduler(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
@@ -235,14 +270,32 @@ class TrayManager:
         self._marshal(_do_open)
 
     def _on_scheduler_event(self, name: str, payload: dict) -> None:
-        # Schedule Started, Completed, Failed notifications (Component 6)
-        if name == "Schedule Started":
-            self.notify("MediaForge Schedule Started", f"Download started: {payload.get('url')}")
-        elif name == "Schedule Completed":
-            self.notify("MediaForge Schedule Completed", f"Completed: {payload.get('url')}")
-        elif name == "Schedule Failed":
-            self.notify("MediaForge Schedule Failed", f"Failed: {payload.get('error_message') or 'Network error'}")
-        
+        try:
+            notif = get_notification_manager()
+        except Exception:
+            notif = None
+        if notif:
+            if name == "Schedule Started":
+                notif.publish(
+                    category=CATEGORY_SCHEDULE_STARTED,
+                    title="MediaForge Schedule Started",
+                    message=f"Download started: {payload.get('url')}",
+                    source=SOURCE_SCHEDULER,
+                )
+            elif name == "Schedule Completed":
+                notif.publish(
+                    category=CATEGORY_SCHEDULE_COMPLETED,
+                    title="MediaForge Schedule Completed",
+                    message=f"Completed: {payload.get('url')}",
+                    source=SOURCE_SCHEDULER,
+                )
+            elif name == "Schedule Failed":
+                notif.publish(
+                    category=CATEGORY_SCHEDULE_FAILED,
+                    title="MediaForge Schedule Failed",
+                    message=f"Failed: {payload.get('error_message') or 'Network error'}",
+                    source=SOURCE_SCHEDULER,
+                )
         self.refresh_menu()
 
     def refresh_menu(self) -> None:
@@ -281,17 +334,43 @@ class TrayManager:
 
         # 3. Trigger Notification based on state transition
         if self._previous_status is not None and self._previous_status != status:
-            if status == BackendStatus.RUNNING:
-                if self._is_restarting:
-                    self.notify("MediaForge Companion", "Backend Restarted")
-                    self._is_restarting = False
-                elif self._previous_status == BackendStatus.STARTING:
-                    self.notify("MediaForge Companion", "Backend Started")
-            elif status == BackendStatus.STOPPED:
-                if not self._is_restarting and self._previous_status in (BackendStatus.RUNNING, BackendStatus.STARTING):
-                    self.notify("MediaForge Companion", "Backend Stopped")
-            elif status == BackendStatus.CRASHED:
-                self.notify("MediaForge Companion", "Backend Stopped Unexpectedly (Crashed)")
+            try:
+                notif = get_notification_manager()
+            except Exception:
+                notif = None
+            if notif:
+                if status == BackendStatus.RUNNING:
+                    if self._is_restarting:
+                        notif.publish(
+                            category=CATEGORY_BACKEND_STARTED,
+                            title="MediaForge Companion",
+                            message="Backend Restarted",
+                            source=SOURCE_BACKEND,
+                        )
+                        self._is_restarting = False
+                    elif self._previous_status == BackendStatus.STARTING:
+                        notif.publish(
+                            category=CATEGORY_BACKEND_STARTED,
+                            title="MediaForge Companion",
+                            message="Backend Started",
+                            source=SOURCE_BACKEND,
+                        )
+                elif status == BackendStatus.STOPPED:
+                    if not self._is_restarting and self._previous_status in (BackendStatus.RUNNING, BackendStatus.STARTING):
+                        notif.publish(
+                            category=CATEGORY_BACKEND_STOPPED,
+                            title="MediaForge Companion",
+                            message="Backend Stopped",
+                            source=SOURCE_BACKEND,
+                        )
+                elif status == BackendStatus.CRASHED:
+                    notif.publish(
+                        category=CATEGORY_BACKEND_CRASHED,
+                        title="MediaForge Companion",
+                        message="Backend Stopped Unexpectedly (Crashed)",
+                        source=SOURCE_BACKEND,
+                        priority=PRIORITY_HIGH,
+                    )
 
         self._previous_status = status
 

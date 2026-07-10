@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Install companion dependencies
+        run: |
+          pip install customtkinter pystray requests Pillow psutil
+
+      - name: Compile check
+        run: |
+          python -m py_compile companion\updater.py
+          python -m py_compile companion\installer.py
+          python -m py_compile companion\scheduler.py
+          python -m py_compile companion\notifications.py
+          python -m py_compile companion\queue_panel.py
+          python -m py_compile companion\settings_panel.py
+          python -m py_compile companion\dashboard.py
+          python -m py_compile companion\scheduler_panel.py
+          python -m py_compile companion\schedule_dialog.py
+          python -m py_compile companion\stats_panel.py
+          python -m py_compile companion\history_panel.py
+          python -m py_compile companion\tray.py
+          python -m py_compile companion\backend_manager.py
+          python -m py_compile companion\logger.py
+          python -m py_compile companion\base_page.py
+          python -m py_compile companion\ui.py
+          python -m py_compile companion\main.py
+
+      - name: Run tests
+        run: |
+          cd companion
+          python -m unittest discover -p "test_*.py" -v

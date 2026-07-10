@@ -9,6 +9,7 @@ session reuse/recovery, and background daemon polling thread.
 from __future__ import annotations
 
 import os
+import sys
 import json
 import time
 import hashlib
@@ -21,16 +22,49 @@ import requests
 if TYPE_CHECKING:
     from logger import AppLogger
 
-COMPANION_VERSION = "1.1.0"
+COMPANION_VERSION = "1.2.0"
 OWNER = "kronpatel"
 REPO = "MediaForge"
 GITHUB_API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_FILE = os.path.join(_DIR, "cache", "update_cache.json")
-UPDATES_DIR = os.path.join(_DIR, "updates")
+
+def is_portable_mode() -> bool:
+    if os.environ.get("MEDIAFORGE_PORTABLE") == "1":
+        return True
+    if not getattr(sys, "frozen", False):
+        return True
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    if os.path.exists(os.path.join(exe_dir, "portable_settings.json")):
+        return True
+    return False
+
+def get_companion_cache_dir() -> str:
+    if is_portable_mode():
+        return os.path.join(_DIR, "cache")
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        path = os.path.join(local_app_data, "MediaForge", "cache")
+    else:
+        path = os.path.join(_DIR, "cache")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def get_companion_updates_dir() -> str:
+    if is_portable_mode():
+        return os.path.join(_DIR, "updates")
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        path = os.path.join(local_app_data, "MediaForge", "updates")
+    else:
+        path = os.path.join(_DIR, "updates")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+CACHE_FILE = os.path.join(get_companion_cache_dir(), "update_cache.json")
+UPDATES_DIR = get_companion_updates_dir()
 TEMP_DOWNLOAD_FILE = os.path.join(UPDATES_DIR, "update.tmp")
-FINAL_DOWNLOAD_FILE = os.path.join(UPDATES_DIR, "MediaForge-Setup.exe")
+FINAL_DOWNLOAD_FILE = os.path.join(UPDATES_DIR, "MediaForge_Portable.zip")
 
 # Ensure necessary directories exist
 os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
@@ -66,6 +100,7 @@ class UpdateManager:
         self._asset_size = 0
         self._last_checked = 0.0
         self._rate_limit_reset_until = 0.0
+        self._html_url = ""
 
         # Pending Install State Metadata (Pending Install Refinement)
         self._pending_install = False
@@ -156,7 +191,7 @@ class UpdateManager:
                 daemon=True,
             )
             self._thread.start()
-            self.logger.info("Auto updater background thread started.")
+            self.logger.info("[Updater] Auto updater background thread started.")
 
     def shutdown(self) -> None:
         """Shut down poller threads and close the shared HTTP session cleanly."""
@@ -175,7 +210,7 @@ class UpdateManager:
 
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
-        self.logger.info("Auto updater thread stopped cleanly.")
+        self.logger.info("[Updater] Auto updater thread stopped cleanly.")
 
     def check_for_updates(self, force: bool = False) -> None:
         """
@@ -185,13 +220,13 @@ class UpdateManager:
         # Verify shutdown state (Task 2)
         with self._lock:
             if self._shutdown:
-                self.logger.warning("Update check rejected: updater is shutting down.")
+                self.logger.warning("[Updater] Update check rejected: updater is shutting down.")
                 return
 
         # Check and set checking flag under check lock (Task 1)
         with self._check_lock:
             if self._checking:
-                self.logger.info("Update check already running. Request ignored.")
+                self.logger.info("[Updater] Update check already running. Request ignored.")
                 return
             self._checking = True
 
@@ -202,7 +237,7 @@ class UpdateManager:
                 is_rate_limited = True
 
         if not force and is_rate_limited:
-            self.logger.warning("Update check skipped: GitHub API is currently rate limited.")
+            self.logger.warning("[Updater] Update check skipped: GitHub API is currently rate limited.")
             self._notify("Rate Limited", 0.0)
             with self._check_lock:
                 self._checking = False
@@ -219,16 +254,16 @@ class UpdateManager:
                     has_cache = self._latest_version != "v—"
 
                 if not force and has_cache and cache_age < 3600.0:
-                    self.logger.info("Using cached update metadata (less than 1 hour old).")
+                    self.logger.info("[Updater] Using cached update metadata (less than 1 hour old).")
                     self._notify_current_state()
                     return
 
                 # Fetch fresh from GitHub Releases API
-                self.logger.info(f"Checking for updates from {GITHUB_API_URL}...")
+                self.logger.info(f"[Updater] Checking for updates from {GITHUB_API_URL}...")
                 release = self._fetch_with_retries(GITHUB_API_URL)
                 
                 if not release:
-                    self.logger.warning("GitHub Releases API check failed. Offline or API limit reached.")
+                    self.logger.warning("[Updater] GitHub Releases API check failed. Offline or API limit reached.")
                     self._notify("Offline", 0.0)
                     return
 
@@ -244,7 +279,7 @@ class UpdateManager:
                     name = asset.get("name", "")
                     
                     # Reject non-matching patterns (archives, source code, etc.)
-                    if not (name.endswith(".exe") and "MediaForge-Setup" in name):
+                    if not (name.endswith(".zip") and "MediaForge_Portable" in name):
                         continue
                         
                     # Integrity validation
@@ -277,7 +312,7 @@ class UpdateManager:
                     asset_url = best_asset.get("browser_download_url", "")
                     asset_size = int(best_asset.get("size") or 0)
                 else:
-                    self.logger.warning("No compatible installer asset found in the latest release.")
+                    self.logger.warning("[Updater] No compatible installer asset found in the latest release.")
                     asset_url = ""
                     asset_size = 0
 
@@ -304,7 +339,7 @@ class UpdateManager:
                 self._notify_current_state()
 
             except Exception as exc:
-                self.logger.warning(f"Error checking for updates: {exc}")
+                self.logger.warning(f"[Updater] Error checking for updates: {exc}")
                 self._notify("Failed", 0.0, str(exc))
             finally:
                 with self._check_lock:
@@ -322,13 +357,13 @@ class UpdateManager:
         # Verify shutdown state (Task 2)
         with self._lock:
             if self._shutdown:
-                self.logger.warning("Download rejected: updater is shutting down.")
+                self.logger.warning("[Updater] Download rejected: updater is shutting down.")
                 return
 
         # Check and set downloading flag under download lock (Task 1)
         with self._download_lock:
             if self._downloading:
-                self.logger.warning("Download already in progress. Request ignored.")
+                self.logger.warning("[Updater] Download already in progress. Request ignored.")
                 return
             self._downloading = True
             self._download_stop_event.clear()
@@ -338,7 +373,7 @@ class UpdateManager:
             expected_size = self._asset_size
 
         if not asset_url:
-            self.logger.error("No update asset download URL available.")
+            self.logger.error("[Updater] No update asset download URL available.")
             self._notify("Failed", 0.0, "No asset URL found.")
             with self._download_lock:
                 self._downloading = False
@@ -347,10 +382,10 @@ class UpdateManager:
         def _downloader():
             try:
                 self._notify("Downloading", 0.0)
-                self.logger.info(f"Downloading update asset from {asset_url}...")
+                self.logger.info(f"[Updater] Downloading update asset from {asset_url}...")
                 
                 # Delete any stale temp downloads and .new files (Task 5)
-                new_file = os.path.join(UPDATES_DIR, "MediaForge-Setup.new")
+                new_file = os.path.join(UPDATES_DIR, "MediaForge_Portable.zip.new")
                 for f in (TEMP_DOWNLOAD_FILE, new_file):
                     if os.path.exists(f):
                         try:
@@ -372,7 +407,7 @@ class UpdateManager:
                 with open(TEMP_DOWNLOAD_FILE, "wb") as fh:
                     for chunk in resp.iter_content(chunk_size=65536):
                         if self._download_stop_event.is_set():
-                            self.logger.info("Download cancelled by user.")
+                            self.logger.info("[Updater] Download cancelled by user.")
                             fh.close()
                             self._cleanup_temp_file()
                             self._notify("Idle", 0.0)
@@ -385,7 +420,7 @@ class UpdateManager:
                                 self._notify("Downloading", progress)
 
                 self._notify("Verifying", 100.0)
-                self.logger.info("Verifying download size and integrity...")
+                self.logger.info("[Updater] Verifying download size and integrity...")
                 
                 # Verify size match
                 actual_size = os.path.getsize(TEMP_DOWNLOAD_FILE)
@@ -398,10 +433,10 @@ class UpdateManager:
                     while chunk := fh.read(65536):
                         hasher.update(chunk)
                 sha256_hash = hasher.hexdigest()
-                self.logger.info(f"Verification success. SHA-256: {sha256_hash}")
+                self.logger.info(f"[Updater] Verification success. SHA-256: {sha256_hash}")
 
                 # Safely replace existing file with backup/restore logic and lock detection (Task 1 & Task 5)
-                bak_file = os.path.join(UPDATES_DIR, "MediaForge-Setup.bak")
+                bak_file = os.path.join(UPDATES_DIR, "MediaForge_Portable.zip.bak")
                 has_backup = False
                 is_locked = False
 
@@ -415,11 +450,11 @@ class UpdateManager:
                         os.rename(FINAL_DOWNLOAD_FILE, bak_file)
                         has_backup = True
                     except (OSError, PermissionError) as exc:
-                        self.logger.warning(f"Existing installer is locked/in-use: {exc}")
+                        self.logger.warning(f"[Updater] Existing installer is locked/in-use: {exc}")
                         is_locked = True
 
                 if is_locked:
-                    # Keep the newly downloaded installer as MediaForge-Setup.new (Task 5)
+                    # Keep the newly downloaded installer as MediaForge_Portable.zip.new (Task 5)
                     if os.path.exists(new_file):
                         try:
                             os.remove(new_file)
@@ -456,10 +491,10 @@ class UpdateManager:
                     self._save_cache()
 
                 self._notify("Pending Install", 100.0)
-                self.logger.info(f"Update download completed successfully. Ready to install: {FINAL_DOWNLOAD_FILE}")
+                self.logger.info(f"[Updater] Update download completed successfully. Ready to install: {FINAL_DOWNLOAD_FILE}")
 
             except Exception as exc:
-                self.logger.error(f"Download failed: {exc}")
+                self.logger.error(f"[Updater] Download failed: {exc}")
                 self._cleanup_temp_file()
                 self._notify("Failed", 0.0, str(exc))
             finally:
@@ -486,7 +521,7 @@ class UpdateManager:
         try:
             webbrowser.open(url)
         except Exception as exc:
-            self.logger.warning(f"Failed to open release notes: {exc}")
+            self.logger.warning(f"[Updater] Failed to open release notes: {exc}")
 
     # ------------------------------------------------------------------
     # Helper Utilities
@@ -494,7 +529,7 @@ class UpdateManager:
 
     @staticmethod
     def is_newer_version(current: str, latest: str) -> bool:
-        """Semantic version parser and comparator (v1.0.9 < v1.1.0)."""
+        """Semantic version parser and comparator (v1.0.9 < v1.2.0)."""
         def parse(v: str) -> list[int]:
             cleaned = v.strip().lower().lstrip('v')
             parts = []
@@ -586,7 +621,7 @@ class UpdateManager:
                     with self._lock:
                         self._rate_limit_reset_until = reset_time
 
-                    self.logger.warning(f"GitHub API rate limit exceeded. Suspending checks until timestamp {reset_time}.")
+                    self.logger.warning(f"[Updater] GitHub API rate limit exceeded. Suspending checks until timestamp {reset_time}.")
                     self._notify("Rate Limited", 0.0)
                     self._save_cache()
                     return None
@@ -594,7 +629,7 @@ class UpdateManager:
                 resp.raise_for_status()
                 return resp.json()
             except requests.RequestException as exc:
-                self.logger.warning(f"GitHub fetch attempt {i+1} failed: {exc}")
+                self.logger.warning(f"[Updater] GitHub fetch attempt {i+1} failed: {exc}")
                 
                 # Re-establish fresh Session
                 with self._lock:
@@ -646,14 +681,14 @@ class UpdateManager:
             if not isinstance(data, dict):
                 return
         except (json.JSONDecodeError, KeyError, OSError, TypeError) as exc:
-            self.logger.warning(f"Corrupted cache file found. Regenerating defaults. Error: {exc}")
+            self.logger.warning(f"[Updater] Corrupted cache file found. Regenerating defaults. Error: {exc}")
             try:
                 corrupt_path = CACHE_FILE.replace(".json", ".corrupt.json")
                 if os.path.exists(corrupt_path):
                     os.remove(corrupt_path)
                 os.rename(CACHE_FILE, corrupt_path)
             except Exception as e:
-                self.logger.error(f"Failed to rename corrupted cache file: {e}")
+                self.logger.error(f"[Updater] Failed to rename corrupted cache file: {e}")
             
             # Reset parameters to default
             self._latest_version = "v—"
@@ -706,7 +741,7 @@ class UpdateManager:
             self._installation_in_progress = bool(data.get("installation_in_progress") or False)
 
             if self._installation_in_progress:
-                self.logger.info("Companion started with an installation in progress. Running recovery checks...")
+                self.logger.info("[Updater] Companion started with an installation in progress. Running recovery checks...")
                 self._startup_recovery_events.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Recovery Executed")
                 if self._installer_path and os.path.exists(self._installer_path):
                     # File exists on disk. Verify size and version to determine health.
@@ -729,20 +764,20 @@ class UpdateManager:
                         reason = f"version mismatch (installer={self._installer_version}, latest={self._latest_version})"
 
                     if stale:
-                        self.logger.warning(f"Installer validation failed on recovery: {reason}. Restoring state to Failed.")
+                        self.logger.warning(f"[Updater] Installer validation failed on recovery: {reason}. Restoring state to Failed.")
                         self._installer_state = "Failed"
                         self._last_install_result = "failed"
                         self._last_install_error = f"Recovery failed: {reason}"
                         self._installation_in_progress = False
                     else:
-                        self.logger.info("Installer file is valid. Restoring state to Pending Install.")
+                        self.logger.info("[Updater] Installer file is valid. Restoring state to Pending Install.")
                         self._pending_install = True
                         self._installer_state = "Idle"
                         self._installation_in_progress = False
                 else:
                     # Installer file does not exist
                     if self._installer_version == COMPANION_VERSION:
-                        self.logger.info("Installation completed successfully (version matches COMPANION_VERSION). Restoring state to Completed.")
+                        self.logger.info("[Updater] Installation completed successfully (version matches COMPANION_VERSION). Restoring state to Completed.")
                         self._installer_state = "Completed"
                         self._last_install_result = "success"
                         self._pending_install = False
@@ -751,7 +786,7 @@ class UpdateManager:
                         self._download_completed_at = 0.0
                         self._installer_sha256 = ""
                     else:
-                        self.logger.warning("Installer file no longer exists and version not updated. Restoring state to Failed.")
+                        self.logger.warning("[Updater] Installer file no longer exists and version not updated. Restoring state to Failed.")
                         self._installer_state = "Failed"
                         self._last_install_result = "failed"
                         self._last_install_error = "Recovery failed: installer file no longer exists"
@@ -798,7 +833,7 @@ class UpdateManager:
                     reason = f"installer version differs (installer={self._installer_version}, latest={self._latest_version})"
                 
                 if stale:
-                    self.logger.warning(f"Stale Pending Install detected on startup: {reason}. Clearing state.")
+                    self.logger.warning(f"[Updater] Stale Pending Install detected on startup: {reason}. Clearing state.")
                     self._pending_install = False
                     self._installer_path = ""
                     self._installer_version = ""
@@ -865,7 +900,7 @@ class UpdateManager:
                 os.fsync(fh.fileno())
             os.replace(tmp_file, CACHE_FILE)
         except Exception as exc:
-            self.logger.error(f"Failed to save cache file: {exc}")
+            self.logger.error(f"[Updater] Failed to save cache file: {exc}")
             tmp_file = CACHE_FILE + ".tmp"
             if os.path.exists(tmp_file):
                 try:

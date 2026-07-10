@@ -25,6 +25,17 @@ import customtkinter as ctk
 
 from backend_manager import BackendManager, BackendStatus
 from logger import AppLogger, LogEntry
+from notifications import (
+    CATEGORY_INFO,
+    CATEGORY_UPDATE_AVAILABLE,
+    CATEGORY_UPDATE_CANCELLED,
+    CATEGORY_UPDATE_DOWNLOADED,
+    CATEGORY_UPDATE_FAILED,
+    CATEGORY_UPDATE_INSTALLED,
+    SOURCE_UI,
+    SOURCE_UPDATER,
+    get_notification_manager,
+)
 from updater import UpdateManager
 from installer import InstallerManager
 
@@ -207,6 +218,7 @@ class CompanionWindow(ctk.CTk):
         self.logger = logger
         self.tray_active: bool = False
         self._tray_manager: Any = None
+        self._notif_manager: Any = None
         self._current_page_name: str = ""
 
         # Default theme — saved preference is loaded in start_background_services
@@ -230,6 +242,7 @@ class CompanionWindow(ctk.CTk):
 
         # Build Sidebar & Pages
         self._build_ui()
+        self._register_queue_shortcuts()
 
         # Pre-create managers (no blocking I/O here)
         self.scheduler: SchedulerManager | None = None
@@ -489,8 +502,8 @@ class CompanionWindow(ctk.CTk):
                     "You have unsaved changes in Settings.\nDo you want to save them before leaving?"
                 )
                 if ans is True:  # Save
-                    settings_page._save_click()
-                    if settings_page.is_dirty():
+                    if not settings_page.save_settings():
+                        self.logger.info("[Settings] Navigation cancelled because validation failed.")
                         return  # Validation failed, stop transition
                 elif ans is False:  # Discard
                     settings_page._cancel_click()
@@ -520,6 +533,103 @@ class CompanionWindow(ctk.CTk):
         # Provide immediate refresh with cached data
         if hasattr(self, "_dashboard_controller") and self._dashboard_controller:
             new_page.refresh(self._dashboard_controller.get_cached_data())
+
+    # ------------------------------------------------------------------
+    # Keyboard Shortcuts (Queue page only)
+    # ------------------------------------------------------------------
+
+    def _register_queue_shortcuts(self) -> None:
+        """Bind global keyboard shortcuts that only fire when Queue page is active."""
+        self.bind("<Control-r>", self._shortcut_retry)
+        self.bind("<Control-Shift-r>", self._shortcut_cancel)
+        self.bind("<Delete>", self._shortcut_remove)
+        self.bind("<Control-a>", self._shortcut_select_all)
+        self.bind("<Control-c>", self._shortcut_copy_url)
+        self.bind("<F5>", self._shortcut_refresh)
+        self.bind("<Control-p>", self._shortcut_pause_resume)
+        self.bind("<Control-Shift-p>", self._shortcut_pause_selected)
+        self.bind("<Escape>", self._shortcut_clear_selection)
+
+    def _active_queue_page(self):
+        if self._current_page_name != "Queue":
+            return None
+        queue = self._pages.get("Queue")
+        if queue is None:
+            return None
+        try:
+            if not queue.winfo_exists() or not queue.winfo_ismapped():
+                return None
+        except Exception:
+            return None
+        return queue
+
+    def _shortcut_retry(self, event=None) -> str | None:
+        queue = self._active_queue_page()
+        if queue is None:
+            return None
+        queue.retry_all_failed()
+        return "break"
+
+    def _shortcut_remove(self, event=None) -> str | None:
+        queue = self._active_queue_page()
+        if queue is None:
+            return None
+        queue.remove_selected()
+        return "break"
+
+    def _shortcut_select_all(self, event=None) -> str | None:
+        queue = self._active_queue_page()
+        if queue is None:
+            return None
+        queue.select_all()
+        return "break"
+
+    def _shortcut_copy_url(self, event=None) -> str | None:
+        queue = self._active_queue_page()
+        if queue is None:
+            return None
+        ids = queue.get_selected_job_ids()
+        if ids:
+            url = queue.get_job_url(ids[0])
+            if url:
+                queue._copy_to_clipboard(url)
+        return "break"
+
+    def _shortcut_refresh(self, event=None) -> str | None:
+        queue = self._active_queue_page()
+        if queue is None:
+            return None
+        if hasattr(self, "_dashboard_controller"):
+            self._dashboard_controller.trigger_poll()
+        return "break"
+
+    def _shortcut_pause_resume(self, event=None) -> str | None:
+        queue = self._active_queue_page()
+        if queue is None:
+            return None
+        queue.toggle_pause()
+        return "break"
+
+    def _shortcut_cancel(self, event=None) -> str | None:
+        queue = self._active_queue_page()
+        if queue is None:
+            return None
+        queue.cancel_selected()
+        return "break"
+
+    def _shortcut_pause_selected(self, event=None) -> str | None:
+        queue = self._active_queue_page()
+        if queue is None:
+            return None
+        queue.pause_selected()
+        return "break"
+
+    def _shortcut_clear_selection(self, event=None) -> str | None:
+        queue = self._active_queue_page()
+        if queue is None:
+            return None
+        queue.clear_selection()
+        return "break"
 
     # ------------------------------------------------------------------
     # Unified status callback
@@ -582,7 +692,13 @@ class CompanionWindow(ctk.CTk):
     def _action_start(self) -> None:
         if self._lifecycle_busy:
             return
-        self._manager.start()
+        self._lifecycle_busy = True
+        def _run():
+            try:
+                self._manager.start()
+            finally:
+                self._lifecycle_busy = False
+        threading.Thread(target=_run, daemon=True).start()
 
     def _action_stop(self) -> None:
         if self._lifecycle_busy:
@@ -609,6 +725,9 @@ class CompanionWindow(ctk.CTk):
     def set_tray_manager(self, tray_manager: Any) -> None:
         self._tray_manager = tray_manager
         self.tray_active = True
+
+    def set_notification_manager(self, notif_manager: Any) -> None:
+        self._notif_manager = notif_manager
 
     def restore_window(self) -> None:
         """Restore window to normal size and lift to topmost."""
@@ -641,8 +760,15 @@ class CompanionWindow(ctk.CTk):
         # Intercept iconic minimisation
         if event.widget == self and self.state() == "iconic" and self.tray_active:
             self.withdraw()
-            if self._tray_manager:
-                self._tray_manager.notify_background()
+            try:
+                get_notification_manager().publish(
+                    category=CATEGORY_INFO,
+                    title="MediaForge Companion",
+                    message="Running in the background.\nDouble-click the tray icon to restore.",
+                    source=SOURCE_UI,
+                )
+            except Exception:
+                pass
 
     def _on_close_request(self) -> None:
         # Check active installer protection (Component 5 / Refinements)
@@ -666,8 +792,11 @@ class CompanionWindow(ctk.CTk):
                     "You have unsaved changes in Settings.\nDo you want to save them before exiting?"
                 )
                 if ans is True:
-                    settings_page._save_click()
-                    if settings_page.is_dirty():
+                    if not settings_page.save_settings():
+                        self.logger.info("[Settings] Exit cancelled because validation failed.")
+                        if self._current_page_name != "Settings":
+                            self.show_page("Settings")
+                            self.after(50, lambda: settings_page._rehighlight_last_failed())
                         return  # Validation failed, stop exit
                 elif ans is False:
                     pass  # proceed without saving
@@ -677,8 +806,15 @@ class CompanionWindow(ctk.CTk):
         # 2. Shutdown sequence: minimize to tray or show exit dialog
         if self.tray_active:
             self.withdraw()
-            if self._tray_manager:
-                self._tray_manager.notify_background()
+            try:
+                get_notification_manager().publish(
+                    category=CATEGORY_INFO,
+                    title="MediaForge Companion",
+                    message="Running in the background.\nDouble-click the tray icon to restore.",
+                    source=SOURCE_UI,
+                )
+            except Exception:
+                pass
         else:
             self._show_shutdown_dialog()
 
@@ -802,62 +938,68 @@ class CompanionWindow(ctk.CTk):
             pass
 
     def _on_updater_event(self, status: str, progress: float, error_msg: str | None = None) -> None:
-        """Handle updater events, displaying tray notification bubbles once per release version."""
-        if self.tray_active and self._tray_manager:
-            self._tray_manager.refresh_menu()
+        """Handle updater events, publishing through NotificationManager."""
+        try:
+            notif = get_notification_manager()
+        except Exception:
+            notif = None
 
-        if status == "Update Available" and self.tray_active and self._tray_manager:
-            latest = self.updater.get_latest_version()
-            
-            # Retrieve cache to see if we already notified for this version
-            from updater import CACHE_FILE
-            import json
-            last_notified = ""
-            if os.path.exists(CACHE_FILE):
-                try:
-                    with open(CACHE_FILE, "r", encoding="utf-8") as fh:
-                        data = json.load(fh)
-                        last_notified = data.get("last_notified_version", "")
-                except Exception:
-                    pass
-            
-            if latest != last_notified:
-                # Update last notified version in cache
+        if notif:
+            if status == "Update Available":
+                latest = self.updater.get_latest_version()
+                from updater import CACHE_FILE
+                import json
+                last_notified = ""
                 if os.path.exists(CACHE_FILE):
                     try:
                         with open(CACHE_FILE, "r", encoding="utf-8") as fh:
                             data = json.load(fh)
-                        data["last_notified_version"] = latest
-                        with open(CACHE_FILE, "w", encoding="utf-8") as fh:
-                            json.dump(data, fh, indent=2)
+                            last_notified = data.get("last_notified_version", "")
                     except Exception:
                         pass
-                
-                # Trigger tray notification bubble
-                self._tray_manager.notify(
-                    "MediaForge Update Available",
-                    f"Version {latest} is ready."
-                )
-        elif self.tray_active and self._tray_manager:
-            if status == "Pending Install":
-                self._tray_manager.notify(
-                    "MediaForge Companion",
-                    "Update downloaded. Ready to install!"
+                if latest != last_notified:
+                    if os.path.exists(CACHE_FILE):
+                        try:
+                            with open(CACHE_FILE, "r", encoding="utf-8") as fh:
+                                data = json.load(fh)
+                            data["last_notified_version"] = latest
+                            with open(CACHE_FILE, "w", encoding="utf-8") as fh:
+                                json.dump(data, fh, indent=2)
+                        except Exception:
+                            pass
+                    notif.publish(
+                        category=CATEGORY_UPDATE_AVAILABLE,
+                        title="MediaForge Update Available",
+                        message=f"Version {latest} is ready.",
+                        source=SOURCE_UPDATER,
+                    )
+            elif status == "Pending Install":
+                notif.publish(
+                    category=CATEGORY_UPDATE_DOWNLOADED,
+                    title="MediaForge Companion",
+                    message="Update downloaded. Ready to install!",
+                    source=SOURCE_UPDATER,
                 )
             elif status == "Completed":
-                self._tray_manager.notify(
-                    "MediaForge Companion",
-                    "Installation completed successfully!"
+                notif.publish(
+                    category=CATEGORY_UPDATE_INSTALLED,
+                    title="MediaForge Companion",
+                    message="Installation completed successfully!",
+                    source=SOURCE_UPDATER,
                 )
             elif status == "Failed":
-                self._tray_manager.notify(
-                    "MediaForge Companion",
-                    f"Installation failed: {error_msg or 'Verification error'}"
+                notif.publish(
+                    category=CATEGORY_UPDATE_FAILED,
+                    title="MediaForge Companion",
+                    message=f"Installation failed: {error_msg or 'Verification error'}",
+                    source=SOURCE_UPDATER,
                 )
             elif status == "Cancelled":
-                self._tray_manager.notify(
-                    "MediaForge Companion",
-                    "Installation cancelled."
+                notif.publish(
+                    category=CATEGORY_UPDATE_CANCELLED,
+                    title="MediaForge Companion",
+                    message="Installation cancelled.",
+                    source=SOURCE_UPDATER,
                 )
 
     def prepare_for_installation(self) -> None:

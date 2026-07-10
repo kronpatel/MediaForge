@@ -17,6 +17,7 @@ import customtkinter as ctk
 
 from base_page import BasePage
 from backend_manager import BackendStatus
+from notifications import CATEGORY_BACKEND_CRASHED, PRIORITY_HIGH, SOURCE_DASHBOARD, get_notification_manager
 
 if TYPE_CHECKING:
     from backend_manager import BackendManager
@@ -70,14 +71,14 @@ class DashboardController:
                 daemon=True,
             )
             self._thread.start()
-            self._logger.info("Unified background polling thread started.")
+            self._logger.info("[Dashboard] Unified background polling thread started.")
 
     def shutdown(self) -> None:
         self._stop_event.set()
         self._poll_event.set()  # wake up poller if waiting
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
-            self._logger.info("Unified background polling thread stopped.")
+            self._logger.info("[Dashboard] Unified background polling thread stopped.")
 
     def get_cached_data(self) -> dict[str, Any]:
         with self._lock:
@@ -109,7 +110,7 @@ class DashboardController:
                     self._notification_sent = False
                     self._broadcast(data)
                 except Exception as exc:
-                    self._logger.debug_log(f"Unified poll fetch failed: {exc}")
+                    self._logger.debug_log(f"[Dashboard] Unified poll fetch failed: {exc}")
                     self._handle_offline()
             else:
                 self._handle_offline()
@@ -130,18 +131,16 @@ class DashboardController:
         }
         self._broadcast(data)
         
-        # Single tray warning notification if we just lost connection
+        # Single notification if we just lost connection
         if not self._notification_sent and self._manager.status == BackendStatus.CRASHED:
-            # We will trigger tray notification safely through window
             try:
-                # We can marshal the tray notification
-                def _trigger_tray_notify():
-                    if getattr(self._window_ref, "tray_active", False) and self._window_ref._tray_manager:
-                        self._window_ref._tray_manager.notify(
-                            "MediaForge Companion",
-                            "Backend offline. Companion has switched to offline mode."
-                        )
-                self._window_ref.after(0, _trigger_tray_notify)
+                get_notification_manager().publish(
+                    category=CATEGORY_BACKEND_CRASHED,
+                    title="MediaForge Companion",
+                    message="Backend offline. Companion has switched to offline mode.",
+                    source=SOURCE_DASHBOARD,
+                    priority=PRIORITY_HIGH,
+                )
             except Exception:
                 pass
             self._notification_sent = True
@@ -189,6 +188,7 @@ class DashboardPage(BasePage):
         self._cached_hash = None
         self._cached_version: str | None = None  # avoid per-poll HTTP round trip
         self._log_count: int = 0               # for incremental log appending
+        self._cached_dl: dict[str, Any] = {}   # cached active download values
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -334,7 +334,7 @@ class DashboardPage(BasePage):
         ).pack(pady=(4, 2))
         ctk.CTkLabel(
             self._empty_dl_frame,
-            text="Downloads will appear here automatically.",
+            text="Downloads will appear here once started.",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color="#5a6072",
         ).pack()
@@ -665,7 +665,7 @@ class DashboardPage(BasePage):
         queue = data.get("queue", [])
         self._queue_card["lbl"].configure(text=str(len(queue)))
 
-        # 5. Active download block
+        # 5. Active download block (with value caching)
         active_job = next(
             (job for job in queue if job.get("status") == "downloading"),
             None
@@ -676,23 +676,52 @@ class DashboardPage(BasePage):
                 self._empty_dl_frame.pack_forget()
                 self._active_dl_frame.pack(fill="x", pady=(8, 0))
                 self._dl_state_active = True
+                self._cached_dl.clear()
             mode = active_job.get("mode", "video")
             mode_icons = {"video": "\U0001f3ac Video", "audio": "\U0001f3b5 Audio"}
-            self._title_lbl.configure(
-                text=active_job.get("label") or active_job.get("filename") or "Downloading\u2026"
-            )
-            self._mode_lbl.configure(text=mode_icons.get(mode, mode.capitalize()))
-            self._progress_bar.set(float(active_job.get("progress") or 0.0) / 100.0)
-            self._speed_lbl.configure(text=f"Speed: {active_job.get('speed') or '\u2014'}")
-            self._eta_lbl.configure(text=f"ETA: {active_job.get('eta') or '\u2014'}")
+            new_title = active_job.get("label") or active_job.get("filename") or "Downloading\u2026"
+            if self._cached_dl.get("title") != new_title:
+                self._title_lbl.configure(text=new_title)
+                self._cached_dl["title"] = new_title
+            new_mode = mode_icons.get(mode, mode.capitalize())
+            if self._cached_dl.get("mode") != new_mode:
+                self._mode_lbl.configure(text=new_mode)
+                self._cached_dl["mode"] = new_mode
+            new_progress = float(active_job.get("progress") or 0.0) / 100.0
+            if self._cached_dl.get("progress") != new_progress:
+                self._progress_bar.set(new_progress)
+                self._cached_dl["progress"] = new_progress
+            raw_speed = active_job.get("speed") or ""
+            speed_badge = f"Speed: \u2b07 {raw_speed}" if raw_speed and raw_speed != "\u2014" else f"Speed: \u2014"
+            if self._cached_dl.get("speed") != speed_badge:
+                self._speed_lbl.configure(text=speed_badge)
+                self._cached_dl["speed"] = speed_badge
+            new_eta = f"ETA: {active_job.get('eta') or '\u2014'}"
+            if self._cached_dl.get("eta") != new_eta:
+                self._eta_lbl.configure(text=new_eta)
+                self._cached_dl["eta"] = new_eta
+
+            # Queue overall progress info
+            completed = sum(1 for j in queue if j.get("status") == "completed")
+            total = len(queue)
+            self._queue_card["lbl"].configure(text=f"{completed}/{total}")
         else:
             if self._dl_state_active:
                 self._active_dl_frame.pack_forget()
                 self._empty_dl_frame.pack(fill="x", pady=(8, 0))
                 self._dl_state_active = False
-            self._progress_bar.set(0.0)
-            self._speed_lbl.configure(text="Speed: \u2014")
-            self._eta_lbl.configure(text="ETA: \u2014")
+                self._cached_dl.clear()
+            if self._cached_dl.get("progress") != 0.0:
+                self._progress_bar.set(0.0)
+                self._cached_dl["progress"] = 0.0
+            new_speed = "Speed: \u2014"
+            if self._cached_dl.get("speed") != new_speed:
+                self._speed_lbl.configure(text=new_speed)
+                self._cached_dl["speed"] = new_speed
+            new_eta = "ETA: \u2014"
+            if self._cached_dl.get("eta") != new_eta:
+                self._eta_lbl.configure(text=new_eta)
+                self._cached_dl["eta"] = new_eta
 
         # 6. Incremental log append
         self._append_new_logs()

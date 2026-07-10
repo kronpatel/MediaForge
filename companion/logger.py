@@ -1,13 +1,28 @@
 """
 logger.py – AppLogger
 
-Thread-safe, in-memory log store for MediaForge Companion.
+Thread-safe, in-memory log store for MediaForge Companion, with optional
+production-level file logging via Python's RotatingFileHandler.
+
+In-memory mode
+--------------
 Caps entries at MAX_LOG_ENTRIES (500) and notifies registered UI callbacks
 whenever a new line is appended.
+
+File-logging mode (production)
+-------------------------------
+When enable_file_logging() is called, writes to companion/logs/ with:
+  - RotatingFileHandler, 5 MB max size, 3 backup files
+  - UTF-8 encoding, same format as in-memory entries
+  - Thread-safe via the existing _lock
+  - Logs directory auto-created on first write
 """
 
 from __future__ import annotations
 
+import logging as _logging
+from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+import os as _os
 import time as _time
 import threading
 import traceback
@@ -18,6 +33,33 @@ from typing import Callable, Literal, NamedTuple
 LogLevel = Literal["INFO", "WARNING", "ERROR", "DEBUG"]
 
 MAX_LOG_ENTRIES: int = 500
+
+def is_portable_mode() -> bool:
+    import sys
+    if _os.environ.get("MEDIAFORGE_PORTABLE") == "1":
+        return True
+    if not getattr(sys, "frozen", False):
+        return True
+    exe_dir = _os.path.dirname(_os.path.abspath(sys.executable))
+    if _os.path.exists(_os.path.join(exe_dir, "portable_settings.json")):
+        return True
+    return False
+
+def get_companion_logs_dir() -> str:
+    src_logs_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "logs")
+    if is_portable_mode():
+        return src_logs_dir
+    local_app_data = _os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        path = _os.path.join(local_app_data, "MediaForge", "logs")
+        _os.makedirs(path, exist_ok=True)
+        return path
+    return src_logs_dir
+
+_LOG_DIR = get_companion_logs_dir()
+_LOG_FILE = _os.path.join(_LOG_DIR, "companion.log")
+_MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+_BACKUP_COUNT = 3
 
 
 class LogEntry(NamedTuple):
@@ -51,6 +93,8 @@ class AppLogger:
         self.max_entries: int = MAX_LOG_ENTRIES
         self._timings: dict[str, float] = {}
         self._t0 = _time.monotonic()
+        self._file_logger: _logging.Logger | None = None
+        self._file_enabled: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,6 +158,7 @@ class AppLogger:
             if len(self._entries) > self.max_entries:
                 self._entries = self._entries[-self.max_entries:]
             callbacks = list(self._callbacks)
+            self._write_to_file(entry)
 
         # Fire callbacks outside the lock to avoid deadlocks
         for cb in callbacks:
@@ -145,6 +190,58 @@ class AppLogger:
         """Discard all stored entries."""
         with self._lock:
             self._entries.clear()
+
+    # ------------------------------------------------------------------
+    # Production file logging
+    # ------------------------------------------------------------------
+
+    def enable_file_logging(self) -> None:
+        """Enable production-grade file logging with rotation.
+
+        Creates companion/logs/ directory if missing and configures a
+        RotatingFileHandler (5 MB max, 3 backups, UTF-8).
+        Safe to call multiple times — subsequent calls are no-ops.
+        """
+        if self._file_enabled:
+            return
+        _os.makedirs(_LOG_DIR, exist_ok=True)
+        handler = _RotatingFileHandler(
+            _LOG_FILE,
+            maxBytes=_MAX_FILE_SIZE,
+            backupCount=_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        handler.setFormatter(_logging.Formatter(
+            "[%(asctime)s] [%(levelname)-7s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        handler.setLevel(_logging.DEBUG)
+        logger = _logging.getLogger("MediaForge")
+        logger.setLevel(_logging.DEBUG)
+        logger.addHandler(handler)
+        logger.propagate = False
+        self._file_logger = logger
+        self._file_enabled = True
+        self.info(f"[Logger] File logging enabled: {_LOG_FILE}")
+
+    @property
+    def file_logging_enabled(self) -> bool:
+        return self._file_enabled
+
+    def get_log_file_path(self) -> str:
+        return _LOG_FILE
+
+    def _write_to_file(self, entry: LogEntry) -> None:
+        if not self._file_enabled or self._file_logger is None:
+            return
+        level_map = {
+            "DEBUG": _logging.DEBUG,
+            "INFO": _logging.INFO,
+            "WARNING": _logging.WARNING,
+            "ERROR": _logging.ERROR,
+        }
+        self._file_logger.log(level_map.get(entry.level, _logging.INFO),
+                              "%s", entry.message)
 
     # ------------------------------------------------------------------
     # Startup timing helpers

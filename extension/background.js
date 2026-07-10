@@ -1,5 +1,5 @@
 chrome.runtime.onInstalled.addListener(() => {
-    console.log("MediaForge v1.0 installed");
+    console.log("MediaForge v1.2.0 installed");
 });
 
 chrome.runtime.onMessage.addListener((message) => {

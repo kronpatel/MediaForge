@@ -5,7 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0] - 2026-06-27
+## [1.2.0] - 2026-06-27
+
+### Added
+- **Auto Updater**: Background updates manager with releases checks, version comparison, download cancellation, integrity checks, and update notifications.
+- **Installer Engine**: Robust setup installer execution with automatic recovery, admin privileges elevation, process locks checks, and diagnostic reporting.
+- **Scheduler**: Full-featured task scheduler engine supporting job CRUD operations, next-run calculations, event notifications, database persistence, clock jump recovery, and schema migrations.
+- **Dashboard Improvements**: Polished widescreen tray options interface, integrated with system tray icon, tabbed pages, and live indicators.
+- **Startup Optimization**: Background services launch sequence refinement with optimized resource allocations.
+- **Notification Manager**: Priority-based notifications scheduler with quiet hours support, singleton daemon thread, history storage, and toast notifications.
+- **Queue UX Improvements**: Re-engineered active downloads layout with smooth transitions, pausing, keyboard hooks, context menus, and scroll position recovery.
+- **Engineering Hardening**: Implemented RLock thread synchronization locks on shared states, atomic file saves, and multi-layer crash handling.
+- **GitHub Actions CI**: Configured automated continuous integration pipeline verifying compile status and running 161 tests on Windows runners under Python 3.10–3.13.
+- **Release Checklist**: Standardized verification guidelines covering tests, manual execution steps, tag rules, and staging deployment.
 
 ### Improved
 - **Backend Stability:** Robust error handling for the Flask backend download processes.

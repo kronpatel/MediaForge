@@ -59,7 +59,7 @@ class SchedulerManager:
         self._load_schedules()
         self._run_startup_recovery()
         self._startup_ready = True
-        self.logger.info("Scheduler startup complete.")
+        self.logger.info("[Scheduler] startup complete.")
 
     def start(self) -> None:
         with self._lock:
@@ -70,13 +70,13 @@ class SchedulerManager:
             self._last_system_time = datetime.datetime.now()
             self._thread = threading.Thread(target=self._scheduler_loop, name="SchedulerThread", daemon=True)
             self._thread.start()
-            self.logger.info("Download Scheduler engine started.")
+            self.logger.info("[Scheduler] Download engine started.")
 
     def shutdown(self) -> None:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
-            self.logger.info("Download Scheduler engine stopped.")
+            self.logger.info("[Scheduler] Download engine stopped.")
 
     # ------------------------------------------------------------------
     # Event Bus (Component 9)
@@ -112,7 +112,7 @@ class SchedulerManager:
             delta = (now_sys - self._last_system_time).total_seconds()
             
             if abs(delta) > 60.0:
-                self.logger.info("Scheduler time change detected. Recalculating schedule execution times.")
+                self.logger.info("[Scheduler] Time change detected. Recalculating schedule execution times.")
                 self._recalculate_all_schedules()
                 self._notify("Time Changed", {})
                 
@@ -600,7 +600,7 @@ class SchedulerManager:
                     version = data.get("schema_version", 1)
                     if "schema_version" not in data:
                         # Legacy format (migration from version 0 to 1)
-                        self.logger.info("Migrating legacy scheduler schema to version 1.")
+                        self.logger.info("[Scheduler] Migrating legacy schema to version 1.")
                         self._schedules = data.get("schedules", {})
                         self._save_schedules()
                     elif version == 1:

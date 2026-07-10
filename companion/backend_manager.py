@@ -32,11 +32,29 @@ from logger import AppLogger
 # Constants
 # ---------------------------------------------------------------------------
 
-# Path to the backend directory (relative to this file's parent)
+def _locate_backend_dir() -> str:
+    """Locate the backend/ directory in source and frozen (EXE) modes."""
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        for candidate in (
+            os.path.join(exe_dir, "backend"),              # portable: sibling of EXE
+            os.path.join(os.path.dirname(exe_dir), "backend"),  # dev dist/: parent sibling
+        ):
+            if os.path.isdir(candidate):
+                return candidate
+        return os.path.join(exe_dir, "backend")  # fallback best guess
+    # Source mode: companion/../backend/
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "backend",
+    )
+
+
+BACKEND_DIR = _locate_backend_dir()
+SETTINGS_FILE = os.path.join(BACKEND_DIR, "settings.json")
+
 _COMPANION_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT_DIR = os.path.dirname(_COMPANION_DIR)
-BACKEND_DIR = os.path.join(_ROOT_DIR, "backend")
-SETTINGS_FILE = os.path.join(BACKEND_DIR, "settings.json")
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
@@ -67,6 +85,24 @@ class BackendStatus(Enum):
 StatusCallback = Callable[[BackendStatus, str], None]
 
 
+class _ProcessHandle:
+    """Lightweight Popen-like wrapper for an already-running process.
+
+    Provides ``.pid`` and ``.poll()`` so it can be used in place of
+    ``subprocess.Popen`` throughout BackendManager.
+    """
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        try:
+            p = psutil.Process(self.pid)
+            return None if p.is_running() else (p.wait() or 0)
+        except psutil.NoSuchProcess:
+            return self.returncode or 0
+
+
 # ---------------------------------------------------------------------------
 # BackendManager
 # ---------------------------------------------------------------------------
@@ -93,7 +129,7 @@ class BackendManager:
         self._lock = threading.Lock()
 
         # Shared HTTP Session & connection states
-        self._session: requests.Session | None = requests.Session()
+        self._session: requests.Session | None = None
         self._has_transport_error: bool = False
         self._logged_after_shutdown: bool = False
 
@@ -118,6 +154,9 @@ class BackendManager:
         self._cached_version: str | None = None
         self._startup_lock = threading.Lock()
         self._startup_done = False
+
+        # PID discovered during adoption (set by deferred_init)
+        self._adopted_pid: int | None = None
 
         self._start_monitor_thread()
 
@@ -171,8 +210,14 @@ class BackendManager:
                     f"Backend already running on port {self._port} "
                     "(started externally). Adopting existing instance."
                 )
+                discovered_pid = self._discover_backend_pid()
                 with self._lock:
-                    self._is_managed = False
+                    if discovered_pid is not None:
+                        self._is_managed = True
+                        self._process = _ProcessHandle(discovered_pid)
+                    else:
+                        self._is_managed = False
+                        self._process = None
                 self._set_status(BackendStatus.RUNNING, "Backend already running.")
                 self._monitor_active.set()
                 return
@@ -259,6 +304,8 @@ class BackendManager:
             self._logger.warning(
                 "Backend process handle is missing; marking as stopped."
             )
+            with self._lock:
+                self._is_managed = False
             self._set_status(BackendStatus.STOPPED, "Backend marked stopped.")
             return
 
@@ -287,6 +334,14 @@ class BackendManager:
             return
         self._logger.info("Restarting backend…")
         self.stop()
+        
+        # Wait up to 4.0 seconds for the port to be released
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline:
+            if not self._is_port_in_use():
+                break
+            time.sleep(0.2)
+
         time.sleep(RESTART_COOLDOWN)
         self.start()
 
@@ -357,40 +412,25 @@ class BackendManager:
 
     def _send_request(self, method: str, path_or_url: str, **kwargs) -> requests.Response | None:
         """
-        Send an HTTP request using the shared requests.Session.
-        Recreates the session on connection failure to recover stale keep-alive sockets.
-        Idempotent post-shutdown check blocks new requests.
+        Send an HTTP request thread-safely.
         """
-        with self._lock:
-            if self._session is None:
-                if not getattr(self, "_logged_after_shutdown", False):
-                    self._logger.warning("Attempted to make HTTP request after backend manager shutdown.")
-                    self._logged_after_shutdown = True
-                return None
-            session = self._session
+        if self._stop_event.is_set():
+            if not getattr(self, "_logged_after_shutdown", False):
+                self._logger.warning("Attempted to make HTTP request after backend manager shutdown.")
+                self._logged_after_shutdown = True
+            return None
 
         try:
             url = path_or_url if path_or_url.startswith("http") else f"{self.base_url}{path_or_url}"
-            resp = session.request(method, url, **kwargs)
+            resp = requests.request(method, url, **kwargs)
             self._has_transport_error = False
             return resp
         except requests.RequestException as exc:
-            # Recreate session on transport failure
-            with self._lock:
-                if self._session is not None:
-                    try:
-                        self._session.close()
-                    except Exception:
-                        pass
-                    self._session = requests.Session()
-
             if not getattr(self, "_has_transport_error", False):
                 self._logger.warning(
-                    f"Backend connection transport error ({exc}). "
-                    "Recreated shared requests.Session to recover on the next polling cycle."
+                    f"Backend connection transport error ({exc})."
                 )
                 self._has_transport_error = True
-
             return None
 
     def _ping(self) -> bool:
@@ -424,13 +464,24 @@ class BackendManager:
         """Check if backend is already running. Runs in a daemon thread — never blocks UI."""
         if self._is_port_in_use():
             if self._ping():
+                # Discover PID of the running backend for lifecycle control
+                discovered_pid = self._discover_backend_pid()
+
                 with self._lock:
-                    self._is_managed = False
+                    if discovered_pid is not None:
+                        self._is_managed = True
+                        self._adopted_pid = discovered_pid
+                        self._process = _ProcessHandle(discovered_pid)
+                    else:
+                        self._is_managed = False
+                        self._adopted_pid = None
+                        self._process = None
+
                 self._set_status(BackendStatus.RUNNING, "Backend already running.")
                 self._monitor_active.set()
                 self._logger.info(
                     f"Startup check: Detected backend already running on port {self._port} "
-                    "(externally managed). Adopting for monitoring."
+                    f"(PID {discovered_pid or 'unknown'}). Taking ownership for lifecycle control."
                 )
                 # Pre-cache version so UI never waits on HTTP during startup
                 resp = self._send_request("GET", self.base_url, timeout=HTTP_TIMEOUT)
@@ -451,11 +502,44 @@ class BackendManager:
         with self._startup_lock:
             self._startup_done = True
 
+    def _discover_backend_pid(self) -> int | None:
+        """Try to discover the PID of the backend process listening on self._port."""
+        # 1. First try net_connections
+        try:
+            for conn in psutil.net_connections():
+                if conn.laddr.port == self._port and conn.pid:
+                    try:
+                        proc = psutil.Process(conn.pid)
+                        if proc.is_running():
+                            return conn.pid
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+        except (psutil.AccessDenied, PermissionError):
+            self._logger.warning("Cannot enumerate network connections — insufficient privileges.")
+        
+        # 2. Fallback: scan running Python processes for backend/app.py
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    name = proc.info['name']
+                    if name and 'python' in name.lower():
+                        cmdline = proc.info['cmdline']
+                        if cmdline:
+                            cmdline_str = " ".join(cmdline).lower()
+                            if "app.py" in cmdline_str:
+                                return proc.info['pid']
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception as exc:
+            self._logger.warning(f"Process list scan fallback failed: {exc}")
+            
+        return None
+
     def fetch_version(self) -> str | None:
         """
         Fetch the backend version string from the root API endpoint.
 
-        Returns the version string (e.g. '1.1.0') or None on failure.
+        Returns the version string (e.g. '1.2.0') or None on failure.
         Uses cached value if available to avoid blocking during startup.
         """
         with self._lock:
@@ -483,12 +567,18 @@ class BackendManager:
             "label": str(raw_job.get("label") or raw_job.get("filename") or "Downloading…"),
             "status": str(raw_job.get("status") or "queued").lower(),
             "progress": float(raw_job.get("progress") or 0.0),
-            "speed": str(raw_job.get("speed") or "—"),
-            "eta": str(raw_job.get("eta") or "—"),
+            "speed": str(raw_job.get("speed") or ""),
+            "eta": str(raw_job.get("eta") or ""),
             "mode": str(raw_job.get("mode") or "video").lower(),
             "queued_at": str(raw_job.get("queued_at") or ""),
             "started_at": str(raw_job.get("started_at") or ""),
             "completed_at": str(raw_job.get("completed_at") or ""),
+            "priority": str(raw_job.get("priority") or "normal").lower(),
+            "downloaded_bytes": float(raw_job.get("downloaded_bytes") or 0.0),
+            "total_bytes": float(raw_job.get("total_bytes") or 0.0),
+            "size": str(raw_job.get("size") or ""),
+            "quality": str(raw_job.get("quality") or ""),
+            "format": str(raw_job.get("format") or ""),
         }
 
     def _normalize_stats(self, raw_stats: dict[str, Any]) -> dict[str, Any]:
@@ -545,6 +635,78 @@ class BackendManager:
             except Exception:
                 pass
         return []
+
+    def retry_download(self, job_id: str) -> bool:
+        """Re-queue a failed download by posting to the download endpoint."""
+        resp = self._send_request("POST", "/queue/retry", json={"job_id": job_id}, timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
+                return resp.json().get("success", False)
+            except Exception:
+                pass
+        return False
+
+    def remove_download(self, job_id: str) -> bool:
+        """Remove a download job from the queue."""
+        resp = self._send_request("POST", "/queue/remove", json={"job_id": job_id}, timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
+                return resp.json().get("success", False)
+            except Exception:
+                pass
+        return False
+
+    def cancel_download(self, job_id: str) -> bool:
+        """Cancel a running or queued download job."""
+        resp = self._send_request("POST", "/queue/cancel", json={"job_id": job_id}, timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
+                return resp.json().get("success", False)
+            except Exception:
+                pass
+        return False
+
+    def pause_download(self, job_id: str) -> bool:
+        """Pause a specific download job."""
+        resp = self._send_request("POST", "/queue/pause", json={"job_id": job_id}, timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
+                return resp.json().get("success", False)
+            except Exception:
+                pass
+        return False
+
+    def resume_download(self, job_id: str) -> bool:
+        """Resume a specific download job."""
+        resp = self._send_request("POST", "/queue/resume", json={"job_id": job_id}, timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
+                return resp.json().get("success", False)
+            except Exception:
+                pass
+        return False
+
+    def change_priority(self, job_id: str, priority: str) -> bool:
+        """Change the priority of a download job (high/normal/low)."""
+        resp = self._send_request("POST", "/queue/priority",
+                                  json={"job_id": job_id, "priority": priority}, timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
+                return resp.json().get("success", False)
+            except Exception:
+                pass
+        return False
+
+    def reorder_job(self, job_id: str, new_index: int) -> bool:
+        """Move a job to a new position in the queue."""
+        resp = self._send_request("POST", "/queue/reorder",
+                                  json={"job_id": job_id, "new_index": new_index}, timeout=HTTP_TIMEOUT)
+        if resp is not None and resp.status_code == 200:
+            try:
+                return resp.json().get("success", False)
+            except Exception:
+                pass
+        return False
 
     def get_history(self) -> list[dict[str, Any]]:
         """Fetch the history list from the backend."""
@@ -610,15 +772,40 @@ class BackendManager:
     # ------------------------------------------------------------------
 
     def _launch_backend(self) -> subprocess.Popen:
-        """Launch the backend process using sys.executable."""
+        """Launch the backend process (handles both source and frozen EXE modes)."""
         creation_flags = 0
         if sys.platform == "win32":
             creation_flags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
 
+        if getattr(sys, "frozen", False):
+            # Frozen EXE: sys.executable is MediaForge.exe, not python.exe.
+            # Use system python from PATH to launch backend/app.py.
+            python_exe = "python"
+        else:
+            python_exe = sys.executable
+
+        env = os.environ.copy()
+        # Propagate portable mode
+        is_portable = False
+        if os.environ.get("MEDIAFORGE_PORTABLE") == "1":
+            is_portable = True
+        elif getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            if os.path.exists(os.path.join(exe_dir, "portable_settings.json")):
+                is_portable = True
+        else:
+            is_portable = True
+
+        if is_portable:
+            env["MEDIAFORGE_PORTABLE"] = "1"
+        else:
+            env["MEDIAFORGE_PORTABLE"] = "0"
+
         return subprocess.Popen(
-            [sys.executable, "app.py"],
+            [python_exe, "app.py"],
             cwd=BACKEND_DIR,
             creationflags=creation_flags,
+            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -740,7 +927,6 @@ class BackendManager:
                 self._monitor_active.clear()
                 with self._lock:
                     self._process = None
-                    self._is_managed = False
                 self._set_status(BackendStatus.CRASHED, "Unable to communicate with backend.")
 
             time.sleep(HEALTH_CHECK_INTERVAL)

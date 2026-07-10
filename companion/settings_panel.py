@@ -20,6 +20,7 @@ import customtkinter as ctk
 
 from backend_manager import BackendStatus
 from base_page import BasePage
+from notifications import get_notification_manager
 
 if sys.platform == "win32":
     import winreg
@@ -29,12 +30,41 @@ if TYPE_CHECKING:
     from logger import AppLogger
 
 
-# Path to local companion settings
 _COMPANION_DIR = os.path.dirname(os.path.abspath(__file__))
-LOCAL_SETTINGS_FILE = os.path.join(_COMPANION_DIR, "settings.json")
+
+def is_portable_mode() -> bool:
+    if os.environ.get("MEDIAFORGE_PORTABLE") == "1":
+        return True
+    if not getattr(sys, "frozen", False):
+        return True
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    if os.path.exists(os.path.join(exe_dir, "portable_settings.json")):
+        return True
+    return False
+
+def get_companion_settings_file() -> str:
+    if is_portable_mode():
+        return os.path.join(_COMPANION_DIR, "settings.json")
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        path = os.path.join(local_app_data, "MediaForge")
+        os.makedirs(path, exist_ok=True)
+        return os.path.join(path, "settings.json")
+    return os.path.join(_COMPANION_DIR, "settings.json")
+
+LOCAL_SETTINGS_FILE = get_companion_settings_file()
 
 
 DEFAULT_BACKEND_URL = "http://127.0.0.1:5000"
+
+# Validation messages
+MSG_INVALID_DOWNLOAD_FOLDER = "The selected Download Folder does not exist.\n\nPlease choose an existing folder before saving."
+MSG_INVALID_FFMPEG = "FFmpeg Path must point to an existing file/directory, or be left empty for system defaults."
+MSG_INVALID_BACKEND_URL = "Backend URL must be a valid HTTP/HTTPS address (e.g. http://127.0.0.1:5000)."
+MSG_INVALID_POLL = "Backend Poll Interval must be an integer between 1 and 60 seconds."
+MSG_INVALID_UPDATE_POLL = "Update Poll Interval must be an integer between 1 and 168 hours."
+MSG_INVALID_SCHEDULER_POLL = "Scheduler Poll Interval must be an integer between 1 and 60 seconds."
+MSG_INVALID_SCHEDULER_RETRIES = "Scheduler Maximum Retry Count must be an integer between 0 and 5."
 
 
 def default_local_settings() -> dict[str, Any]:
@@ -74,7 +104,7 @@ def read_local_settings(logger: AppLogger | None = None) -> dict[str, Any]:
     if theme not in ("Dark", "Light", "System"):
         cfg["theme"] = "Dark"
         if logger:
-            logger.log(f"Invalid theme preference '{theme}' detected. Falling back to 'Dark'.", "WARNING")
+            logger.log(f"[Settings] Invalid theme preference '{theme}' detected. Falling back to 'Dark'.", "WARNING")
 
     # Sync auto_start_companion with Windows Registry state
     cfg["auto_start_companion"] = is_registry_autostart_enabled()
@@ -135,6 +165,7 @@ class SettingsPage(BasePage):
         super().__init__(master, manager, logger)
         self._on_navigate = on_navigate_fn
         self._original_settings: dict[str, Any] = {}
+        self._last_failed_field: str | None = None
         
         self._build_ui()
         self._load_all_settings()
@@ -196,12 +227,12 @@ class SettingsPage(BasePage):
         self._create_section_label(self._form, "Download Management")
         
         self._dir_var = ctk.StringVar()
-        self._create_form_row_picker(
+        self._dir_entry = self._create_form_row_picker(
             self._form, "Download Folder", self._dir_var, "Browse…", self._browse_dir
         )
 
         self._ffmpeg_var = ctk.StringVar()
-        self._create_form_row_picker(
+        self._ffmpeg_entry = self._create_form_row_picker(
             self._form, "FFmpeg Path", self._ffmpeg_var, "Browse…", self._browse_file
         )
 
@@ -209,13 +240,13 @@ class SettingsPage(BasePage):
         self._create_section_label(self._form, "Backend Settings")
         
         self._url_var = ctk.StringVar()
-        self._create_form_row_entry(self._form, "Backend URL", self._url_var, "e.g. http://127.0.0.1:5000")
+        self._url_entry = self._create_form_row_entry(self._form, "Backend URL", self._url_var, "e.g. http://127.0.0.1:5000")
 
         # ── Category: Local General Options ─────────────────────────────
         self._create_section_label(self._form, "Companion Preferences")
         
         self._poll_var = ctk.StringVar()
-        self._create_form_row_entry(self._form, "Poll Interval (sec)", self._poll_var, "Default is 3 seconds")
+        self._poll_entry = self._create_form_row_entry(self._form, "Poll Interval (sec)", self._poll_var, "Default is 3 seconds")
 
         self._auto_start_companion_var = ctk.BooleanVar()
         self._create_form_row_checkbox(self._form, "Auto Start Companion", "Start Companion automatically on Windows launch", self._auto_start_companion_var)
@@ -272,7 +303,7 @@ class SettingsPage(BasePage):
         self._create_form_row_checkbox(self._form, "Check on Startup", "Check for updates when the Companion launches", self._check_startup_var)
 
         self._update_poll_var = ctk.StringVar()
-        self._create_form_row_entry(self._form, "Poll Interval (hours)", self._update_poll_var, "Default is 24 hours")
+        self._update_poll_entry = self._create_form_row_entry(self._form, "Poll Interval (hours)", self._update_poll_var, "Default is 24 hours")
 
         # Info row (Current Version, Latest Version, Last Checked)
         info_row = ctk.CTkFrame(self._form, fg_color="transparent")
@@ -281,7 +312,7 @@ class SettingsPage(BasePage):
 
         self._update_info_lbl = ctk.CTkLabel(
             info_row,
-            text="Current: v1.1.0 | Latest: v—\nLast checked: Never",
+            text="Current: v1.2.0 | Latest: v—\nLast checked: Never",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color="#8b92a8",
             justify="left",
@@ -340,13 +371,13 @@ class SettingsPage(BasePage):
         self._create_form_row_checkbox(self._form, "Enable Scheduler", "Enable background scheduler engine", self._scheduler_enabled_var)
 
         self._scheduler_poll_var = ctk.StringVar()
-        self._create_form_row_entry(self._form, "Poll Interval (sec)", self._scheduler_poll_var, "Scheduler poll sleep interval (default 1)")
+        self._scheduler_poll_entry = self._create_form_row_entry(self._form, "Poll Interval (sec)", self._scheduler_poll_var, "Scheduler poll sleep interval (default 1)")
 
         self._scheduler_auto_retry_var = ctk.BooleanVar()
-        self._create_form_row_checkbox(self._form, "Auto Retry Failed Jobs", "Automatically retry failed scheduled downloads", self._scheduler_auto_retry_var)
+        self._create_form_row_checkbox(self._form, "Auto Retry Failed", "Automatically retry failed scheduled downloads", self._scheduler_auto_retry_var)
 
         self._scheduler_max_retries_var = ctk.StringVar()
-        self._create_form_row_entry(self._form, "Max Retries Count", self._scheduler_max_retries_var, "Max retry attempts per job (0-5, default 3)")
+        self._scheduler_max_retries_entry = self._create_form_row_entry(self._form, "Max Retries Count", self._scheduler_max_retries_var, "Max retry attempts per job (0-5, default 3)")
 
         self._scheduler_run_missed_startup_var = ctk.BooleanVar()
         self._create_form_row_checkbox(self._form, "Run Missed Jobs", "Run missed schedules immediately on Companion startup", self._scheduler_run_missed_startup_var)
@@ -457,20 +488,24 @@ class SettingsPage(BasePage):
             text_color="#4f8ef7",
         ).pack(anchor="w", padx=10, pady=(16, 8))
 
-    def _create_form_row_entry(self, parent: ctk.CTkScrollableFrame, label: str, var: ctk.StringVar, placeholder: str) -> None:
+    def _create_form_row_entry(self, parent: ctk.CTkScrollableFrame, label: str, var: ctk.StringVar, placeholder: str) -> ctk.CTkEntry:
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=4)
         
         ctk.CTkLabel(row, text=label, width=150, anchor="w", text_color="#e8eaf0").pack(side="left")
-        ctk.CTkEntry(row, textvariable=var, placeholder_text=placeholder, height=28, fg_color="#1a1d27", border_color="#2e3347", corner_radius=6).pack(side="left", fill="x", expand=True)
+        entry = ctk.CTkEntry(row, textvariable=var, placeholder_text=placeholder, height=28, fg_color="#1a1d27", border_color="#2e3347", corner_radius=6)
+        entry.pack(side="left", fill="x", expand=True)
+        return entry
 
-    def _create_form_row_picker(self, parent: ctk.CTkScrollableFrame, label: str, var: ctk.StringVar, btn_text: str, command: Callable[[], None]) -> None:
+    def _create_form_row_picker(self, parent: ctk.CTkScrollableFrame, label: str, var: ctk.StringVar, btn_text: str, command: Callable[[], None]) -> ctk.CTkEntry:
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=4)
         
         ctk.CTkLabel(row, text=label, width=150, anchor="w", text_color="#e8eaf0").pack(side="left")
-        ctk.CTkEntry(row, textvariable=var, height=28, fg_color="#1a1d27", border_color="#2e3347", corner_radius=6).pack(side="left", fill="x", expand=True)
+        entry = ctk.CTkEntry(row, textvariable=var, height=28, fg_color="#1a1d27", border_color="#2e3347", corner_radius=6)
+        entry.pack(side="left", fill="x", expand=True)
         ctk.CTkButton(row, text=btn_text, width=80, height=28, fg_color="#20232f", hover_color="#2e3347", text_color="#e8eaf0", command=command, corner_radius=6).pack(side="left", padx=(6, 0))
+        return entry
 
     def _create_form_row_checkbox(self, parent: ctk.CTkScrollableFrame, label: str, desc: str, var: ctk.BooleanVar, command=None) -> None:
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -492,6 +527,7 @@ class SettingsPage(BasePage):
 
     def _load_all_settings(self) -> None:
         """Load backend and local settings and populate all form fields."""
+        self._clear_highlights()
         backend_settings = self.manager.get_settings()
         local_settings = read_local_settings(self.logger)
 
@@ -539,12 +575,20 @@ class SettingsPage(BasePage):
         self._check_startup_var.set(self._original_settings["check_updates_startup"])
         self._update_poll_var.set(str(self._original_settings["update_poll_interval"]))
 
+        # Apply scheduler fields
+        self._scheduler_enabled_var.set(self._original_settings["scheduler_enabled"])
+        self._scheduler_poll_var.set(str(self._original_settings["scheduler_poll_interval"]))
+        self._scheduler_auto_retry_var.set(self._original_settings["scheduler_auto_retry"])
+        self._scheduler_max_retries_var.set(str(self._original_settings["scheduler_max_retries"]))
+        self._scheduler_run_missed_startup_var.set(self._original_settings["scheduler_run_missed_startup"])
+        self._scheduler_notify_before_exec_var.set(self._original_settings["scheduler_notify_before_exec"])
+
         # Update Save changes button state
         self._update_save_btn_state()
 
     def _get_widget_values(self) -> dict[str, Any]:
         return {
-            "download_folder": self._dir_var.get().strip(),
+            "download_folder": self._dir_entry.get().strip(),
             "ffmpeg_path": self._ffmpeg_var.get().strip(),
             "backend_url": self._url_var.get().strip(),
             "theme": self._theme_var.get(),
@@ -584,19 +628,23 @@ class SettingsPage(BasePage):
     # Local Settings Validation
     # ------------------------------------------------------------------
 
-    def _validate_settings(self, vals: dict[str, Any]) -> tuple[bool, str]:
-        """Validate settings values. Only validates Backend URL if it was changed."""
+    def _validate_settings(self, vals: dict[str, Any]) -> tuple[bool, str, str | None]:
+        """Validate settings values. Only validates Backend URL if it was changed.
+        Returns (ok, error_message, field_key)."""
         # Theme validation has been removed from this general workflow (Task 5)
 
         # 1. Download folder must be a valid existing directory
-        folder = vals["download_folder"]
-        if not folder or not os.path.isdir(folder):
-            return False, "Download Folder path must be a valid existing directory."
+        folder_raw = vals["download_folder"]
+        if not folder_raw or not folder_raw.strip():
+            return False, MSG_INVALID_DOWNLOAD_FOLDER, "download_folder"
+        folder = os.path.normpath(os.path.abspath(os.path.expanduser(folder_raw)))
+        if not os.path.isdir(folder):
+            return False, MSG_INVALID_DOWNLOAD_FOLDER, "download_folder"
 
         # 2. FFmpeg path must exist if provided (empty = use system PATH)
         ffmpeg = vals["ffmpeg_path"]
         if ffmpeg and not os.path.exists(ffmpeg):
-            return False, "FFmpeg Path must point to an existing file/directory, or be left empty for system defaults."
+            return False, MSG_INVALID_FFMPEG, "ffmpeg_path"
 
         # 3. Backend URL — only validate if it was changed by the user
         url = vals["backend_url"]
@@ -607,7 +655,7 @@ class SettingsPage(BasePage):
                 if not parsed.scheme or not parsed.netloc:
                     raise ValueError
             except Exception:
-                return False, "Backend URL must be a valid HTTP/HTTPS address (e.g. http://127.0.0.1:5000)."
+                return False, MSG_INVALID_BACKEND_URL, "backend_url"
 
         # 4. Polling rate must be 1–60 seconds
         try:
@@ -615,7 +663,7 @@ class SettingsPage(BasePage):
             if poll < 1 or poll > 60:
                 raise ValueError
         except ValueError:
-            return False, "Backend Poll Interval must be an integer between 1 and 60 seconds."
+            return False, MSG_INVALID_POLL, "backend_poll_interval"
 
         # 5. Update polling rate must be 1–168 hours
         try:
@@ -623,7 +671,7 @@ class SettingsPage(BasePage):
             if upoll < 1 or upoll > 168:
                 raise ValueError
         except ValueError:
-            return False, "Update Poll Interval must be an integer between 1 and 168 hours."
+            return False, MSG_INVALID_UPDATE_POLL, "update_poll_interval"
 
         # 6. Scheduler poll rate must be 1–60 seconds
         try:
@@ -631,7 +679,7 @@ class SettingsPage(BasePage):
             if spoll < 1 or spoll > 60:
                 raise ValueError
         except ValueError:
-            return False, "Scheduler Poll Interval must be an integer between 1 and 60 seconds."
+            return False, MSG_INVALID_SCHEDULER_POLL, "scheduler_poll_interval"
 
         # 7. Scheduler max retries must be 0-5
         try:
@@ -639,25 +687,32 @@ class SettingsPage(BasePage):
             if sret < 0 or sret > 5:
                 raise ValueError
         except ValueError:
-            return False, "Scheduler Maximum Retry Count must be an integer between 0 and 5."
+            return False, MSG_INVALID_SCHEDULER_RETRIES, "scheduler_max_retries"
 
-        return True, ""
+        return True, "", None
 
     # ------------------------------------------------------------------
     # Button Commands
     # ------------------------------------------------------------------
 
-    def _save_click(self) -> None:
+    def _save_click(self) -> bool:
+        self._clear_highlights()
+        self._last_failed_field = None
         try:
             vals = self._get_widget_values()
         except ValueError:
-            self._show_validation_error("Backend Poll Interval must be a number.")
-            return
+            self._show_validation_error(MSG_INVALID_POLL)
+            self._last_failed_field = "backend_poll_interval"
+            self._highlight_field("backend_poll_interval")
+            return False
 
-        ok, err = self._validate_settings(vals)
+        ok, err, field_key = self._validate_settings(vals)
         if not ok:
             self._show_validation_error(err)
-            return
+            if field_key:
+                self._last_failed_field = field_key
+                self._highlight_field(field_key)
+            return False
 
         # 1. Save Backend Settings (theme excluded — it is a local preference)
         backend_changes = {
@@ -694,14 +749,26 @@ class SettingsPage(BasePage):
         except Exception:
             pass
 
-        self.logger.info("Settings saved successfully.")
+        # 4. Wire notification toggle to NotificationManager
+        try:
+            get_notification_manager().set_quiet_hours_enabled(not vals["notification_toggle"])
+        except Exception:
+            pass
+
+        self.logger.info("[Settings] Settings saved successfully.")
         self._load_all_settings()  # reload to refresh originals and update button state
+        return True
+
+    def save_settings(self) -> bool:
+        return self._save_click()
 
     def _cancel_click(self) -> None:
+        self._clear_highlights()
         self._load_all_settings()
-        self.logger.info("Changes discarded.")
+        self.logger.info("[Settings] Changes discarded.")
 
     def _restore_defaults_click(self) -> None:
+        self._clear_highlights()
         self._dir_var.set(os.path.expanduser("~/Downloads"))
         self._ffmpeg_var.set("")
         self._url_var.set(DEFAULT_BACKEND_URL)
@@ -720,7 +787,7 @@ class SettingsPage(BasePage):
         self._scheduler_run_missed_startup_var.set(True)
         self._scheduler_notify_before_exec_var.set(True)
         self._update_save_btn_state()
-        self.logger.info("Restored settings controls to default values (click Save to apply).")
+        self.logger.info("[Settings] Restored settings controls to default values (click Save to apply).")
 
     def _update_save_btn_state(self) -> None:
         """Dynamically enable or disable the Save Changes button based on general settings dirty state."""
@@ -741,6 +808,8 @@ class SettingsPage(BasePage):
             self._save_btn.configure(state="disabled")
         else:
             self._save_btn.configure(state="normal" if general_dirty else "disabled")
+
+        self._cancel_btn.configure(state="disabled" if not general_dirty else "normal")
 
     def _check_now_click(self) -> None:
         if self.updater:
@@ -869,7 +938,8 @@ class SettingsPage(BasePage):
         ans = messagebox.askyesno(
             "Delete Installer",
             "Are you sure you want to delete the downloaded installer?\n\n"
-            "This will reset the update status and you will need to re-download it to install."
+            "This will reset the update status and you will need to re-download it to install.",
+            parent=self,
         )
         if ans:
             if self.updater:
@@ -896,11 +966,12 @@ class SettingsPage(BasePage):
                         self.updater._installer_state = "Idle"
                         self.updater._save_cache()
                     self.updater._notify_current_state()
-                    self.logger.info("Installer file deleted and pending state cleared.")
+                    self.logger.info("[Settings] Installer file deleted and pending state cleared.")
                 else:
                     messagebox.showerror(
                         "Delete Error",
-                        "Unable to delete the installer file because it is locked by another application."
+                        "Unable to delete the installer file because it is locked by another application.",
+                        parent=self,
                     )
 
     def _on_update_status(self, status: str, progress: float, error_msg: str | None = None) -> None:
@@ -930,7 +1001,7 @@ class SettingsPage(BasePage):
             self._original_settings["theme"] = selected_theme
 
             # 4. Success log
-            self.logger.info(f"Theme palette applied and saved: {selected_theme}")
+            self.logger.info(f"[Settings] Theme palette applied and saved: {selected_theme}")
             
             # Recalculate Save Changes button state immediately
             self._update_save_btn_state()
@@ -953,7 +1024,8 @@ class SettingsPage(BasePage):
             messagebox.showerror(
                 "Theme Error",
                 "Unable to apply the selected theme.\n"
-                "Your previous theme has been restored."
+                "Your previous theme has been restored.",
+                parent=self,
             )
 
     # ------------------------------------------------------------------
@@ -978,6 +1050,65 @@ class SettingsPage(BasePage):
         if path:
             self._ffmpeg_var.set(path)
 
+    # ------------------------------------------------------------------
+    # Field highlighting helpers
+    # ------------------------------------------------------------------
+
+    _FIELD_WIDGETS: dict[str, str] = {
+        "download_folder": "_dir_entry",
+        "ffmpeg_path": "_ffmpeg_entry",
+        "backend_url": "_url_entry",
+        "backend_poll_interval": "_poll_entry",
+        "update_poll_interval": "_update_poll_entry",
+        "scheduler_poll_interval": "_scheduler_poll_entry",
+        "scheduler_max_retries": "_scheduler_max_retries_entry",
+    }
+
+    _HIGHLIGHT_BORDER = "#e74c3c"
+    _DEFAULT_BORDER = "#2e3347"
+
+    def _get_field_entry(self, field_key: str) -> ctk.CTkEntry | None:
+        attr = self._FIELD_WIDGETS.get(field_key)
+        if attr and hasattr(self, attr):
+            return getattr(self, attr)
+        return None
+
+    def _clear_highlights(self) -> None:
+        for attr_name in self._FIELD_WIDGETS.values():
+            if hasattr(self, attr_name):
+                entry = getattr(self, attr_name)
+                try:
+                    entry.configure(border_color=self._DEFAULT_BORDER)
+                except Exception:
+                    pass
+
+    def _ensure_entry_visible(self, entry: Any) -> None:
+        try:
+            canvas = self._form._parent_canvas
+            interior = self._form._interior
+            entry_abs = entry.winfo_rooty()
+            interior_abs = interior.winfo_rooty()
+            entry_rel = entry_abs - interior_abs
+            iheight = interior.winfo_height()
+            if iheight > 0:
+                canvas.yview("moveto", max(0, (entry_rel - 20) / iheight))
+        except Exception:
+            pass
+
+    def _highlight_field(self, field_key: str) -> None:
+        entry = self._get_field_entry(field_key)
+        if entry is None:
+            return
+        entry.configure(border_color=self._HIGHLIGHT_BORDER)
+        entry.focus_set()
+        entry.select_range(0, "end")
+        self._ensure_entry_visible(entry)
+
+    def _rehighlight_last_failed(self) -> None:
+        if self._last_failed_field:
+            self._highlight_field(self._last_failed_field)
+            self._last_failed_field = None
+
     def _show_validation_error(self, message: str) -> None:
         from tkinter import messagebox
-        messagebox.showerror("Settings Error", message)
+        messagebox.showerror("Settings Error", message, parent=self)

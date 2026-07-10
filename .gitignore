@@ -18,3 +18,41 @@ ffmpeg/
 companion/settings.json
 companion/cache/
 companion/updates/
+
+# Testing & cache directories
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
+Desktop.ini
+backend/test_err.txt
+backend/test_out.txt
+
+# Build & release artifacts
+dist/
+build/
+release/
+
+# Runtime state & logs
+companion/runtime_err.txt
+companion/runtime_out.txt
+backend/queue_state.json
+
+# Tool configuration (local)
+opencode.json
+
+# Development audit & phase reports
+backend/reports/
+FINAL_*.md
+GIT_RELEASE_PREPARATION.md
+INSTALLER_CHANGELOG.md
+INSTALLER_VERIFICATION.md
+RELEASE_BLOCKER_VERIFICATION.md
+VERSION_UPGRADE_REPORT.md
+
+# Temporary & runtime logs
+build_test.log
+install_debug.log
+install_lowest.log

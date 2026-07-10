@@ -45,6 +45,7 @@ import threading
 
 from logger import AppLogger
 from backend_manager import BackendManager
+from notifications import init_notification_manager, get_notification_manager
 from ui import CompanionWindow
 from tray import TrayManager
 import customtkinter as ctk
@@ -98,7 +99,8 @@ def main() -> None:
     """Create and run the MediaForge Companion application."""
 
     logger = AppLogger(debug=False)
-    logger.info("MediaForge Companion starting…")
+    logger.enable_file_logging()
+    logger.info("[Companion] MediaForge Companion starting…")
 
     # Defer icon generation to background thread — window appears without waiting
     threading.Thread(target=_ensure_icons, args=(logger,), daemon=True,
@@ -138,45 +140,60 @@ def main() -> None:
         tray_ok = tray_manager.start()
         window.tray_active = tray_ok
         if not tray_ok:
-            logger.warning("System tray is disabled; falling back to windowed-only mode.")
+            logger.warning("[Companion] System tray is disabled; falling back to windowed-only mode.")
     except Exception as exc:
         logger.warning(f"Error starting tray manager: {exc}. Running window-only.", exc=exc)
         window.tray_active = False
 
-    logger.info("Companion ready.")
+    # Initialize NotificationManager singleton (after tray is available)
+    notif_manager = init_notification_manager(
+        logger=logger,
+        tray_manager=tray_manager if window.tray_active else None,
+    )
+    window.set_notification_manager(notif_manager)
+
+    logger.info("[Companion] Ready.")
 
     try:
         window.mainloop()
     except KeyboardInterrupt:
         pass
     finally:
-        # Stop updater thread cleanly (Phase 4.1)
+        # Shutdown order:
+        # 1. Updater
         if hasattr(window, "updater") and window.updater:
             try:
                 window.updater.shutdown()
             except Exception:
                 pass
 
-        # Stop unified poller thread
+        # 2. Dashboard Controller (unified poller)
         if hasattr(window, "_dashboard_controller") and window._dashboard_controller:
             try:
                 window._dashboard_controller.shutdown()
             except Exception:
                 pass
 
-        # Clean Tray Thread Shutdown: Stop tray and wait for it to exit
+        # 3. NotificationManager (drain queue, save history)
+        try:
+            notif_manager = get_notification_manager()
+            notif_manager.shutdown()
+        except Exception:
+            pass
+
+        # 4. Tray Manager
         if window.tray_active and tray_manager:
             try:
                 tray_manager.stop()
             except Exception:
                 pass
 
-        # Always signal the monitor thread to exit cleanly
+        # 5. Backend Manager
         manager.shutdown()
         if manager.is_managed():
             manager.stop()
 
-    logger.info("Companion exited.")
+    logger.info("[Companion] Exited.")
 
 
 main()
