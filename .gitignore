@@ -52,7 +52,17 @@ INSTALLER_VERIFICATION.md
 RELEASE_BLOCKER_VERIFICATION.md
 VERSION_UPGRADE_REPORT.md
 
+# Development verification reports
+TAG_VERIFICATION.md
+PRE_COMMIT_VERIFICATION.md
+FINAL_GIT_PREPARATION.md
+
+# Optional: ignore all generated audit reports
+*_VERIFICATION.md
+*_AUDIT.md
+
 # Temporary & runtime logs
 build_test.log
 install_debug.log
 install_lowest.log
+
