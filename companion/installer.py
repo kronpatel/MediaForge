@@ -1,4 +1,4 @@
-"""InstallerManager — portable ZIP update workflow (v1.2.0)."""
+"""InstallerManager — portable ZIP update workflow (v1.2.1)."""
 from __future__ import annotations
 
 import os

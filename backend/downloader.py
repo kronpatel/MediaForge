@@ -125,13 +125,14 @@ _VALID_TRANSITIONS: dict[DownloadState, set[DownloadState]] = {
         DownloadState.PAUSED, DownloadState.CANCELLED,
         DownloadState.FAILED, DownloadState.VERIFYING,
         DownloadState.QUEUED,  # crash recovery
+        DownloadState.COMPLETED, DownloadState.RETRYING,
     },
     DownloadState.PAUSED: {
         DownloadState.QUEUED, DownloadState.CANCELLED,
     },
     DownloadState.RETRYING: {
         DownloadState.QUEUED, DownloadState.CANCELLED,
-        DownloadState.FAILED,
+        DownloadState.FAILED, DownloadState.DOWNLOADING,
     },
     DownloadState.VERIFYING: {
         DownloadState.COMPLETED, DownloadState.FAILED,
@@ -226,7 +227,7 @@ def default_settings() -> dict[str, Any]:
         "download_folder": DOWNLOAD_DIR,
         "ffmpeg_path": FFMPEG_PATH,
         "backend_url": "http://127.0.0.1:5000",
-        "version": "1.2.0",
+        "version": "1.2.1",
     }
 
 

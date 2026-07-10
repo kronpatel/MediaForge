@@ -4,32 +4,26 @@
     if (window.__kerzox_mediaforge_initialized) return;
     window.__kerzox_mediaforge_initialized = true;
 
-    const DEFAULT_BACKEND_URL = "http://127.0.0.1:5000";
-    let API_BASE_URL = DEFAULT_BACKEND_URL;
-    const VERSION = "1.2.0";
+    const VERSION = "1.2.1";
     const BUTTON_ID = "kerzox-download-button";
     const MENU_ID = "kerzox-download-menu";
     const STYLE_ID = "kerzox-download-style";
     const TITLE_SLOT_ID = "kerzox-title-download-slot";
 
-    (function initBackendUrl() {
-        try {
-            chrome.storage.local.get(["kerzoxBackendUrl"]).then((stored) => {
-                if (stored.kerzoxBackendUrl) {
-                    API_BASE_URL = stored.kerzoxBackendUrl;
+    function apiRequest(endpoint, method = "GET", body = null) {
+        return new Promise((resolve) => {
+            chrome.runtime.sendMessage(
+                { type: "KERZOX_API_REQUEST", endpoint, method, body },
+                (response) => {
+                    if (chrome.runtime.lastError) {
+                        resolve({ success: false, error: chrome.runtime.lastError.message });
+                        return;
+                    }
+                    resolve(response || { success: false, error: "No response from background" });
                 }
-            }).catch(() => {});
-        } catch (e) {
-        }
-        try {
-            chrome.storage.onChanged.addListener((changes) => {
-                if (changes.kerzoxBackendUrl) {
-                    API_BASE_URL = changes.kerzoxBackendUrl.newValue || DEFAULT_BACKEND_URL;
-                }
-            });
-        } catch (e) {
-        }
-    })();
+            );
+        });
+    }
 
     const DOWNLOAD_OPTIONS = [
         { mode: "mp3", label: "MP3", detail: "Audio, 320 kbps", icon: "music" },
@@ -1107,27 +1101,22 @@
         setStatus("Adding download to queue...", true);
 
         try {
-            const response = await fetch(`${API_BASE_URL}/download`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ url, mode })
-            });
-            const data = await response.json().catch(() => ({}));
+            const result = await apiRequest("/download", "POST", { url, mode });
 
-            if (!response.ok || !data.success) {
-                setStatus(data.message || "Download request failed.");
+            if (!result.success || !result.data?.success) {
+                setStatus(result.error || result.data?.message || "Download request failed.");
                 return;
             }
 
-            activeJobId = data.job_id;
-            activeJobs.add(data.job_id);
-            updateProgress(data.job);
+            activeJobId = result.data.job_id;
+            activeJobs.add(result.data.job_id);
+            updateProgress(result.data.job);
             setLoading(true);
             refreshPanels();
             pollStatus();
         } catch (error) {
             console.error("Kerzox backend error:", error);
-            setStatus(`Backend not running at ${API_BASE_URL}`);
+            setStatus("Backend not reachable.");
         }
     }
 
@@ -1137,15 +1126,14 @@
         window.clearTimeout(statusTimer);
 
         try {
-            const response = await fetch(`${API_BASE_URL}/status/${activeJobId}`);
-            const data = await response.json().catch(() => ({}));
+            const result = await apiRequest(`/status/${activeJobId}`);
 
-            if (!response.ok || !data.success || !data.job) {
-                throw new Error(data.message || "Invalid status response");
+            if (!result.success || !result.data?.success || !result.data?.job) {
+                throw new Error(result.error || result.data?.message || "Invalid status response");
             }
 
             pollFailureCount = 0;
-            const job = data.job;
+            const job = result.data.job;
             updateProgress(job);
             setLoading(["queued", "running", "downloading", "retrying"].includes(job.status));
 
@@ -1189,9 +1177,8 @@
         if (!menu || menu.hidden) return;
 
         try {
-            const response = await fetch(`${API_BASE_URL}/queue`);
-            const data = await response.json().catch(() => ({}));
-            const queueData = data.queue || {};
+            const result = await apiRequest("/queue");
+            const queueData = result.data?.queue || {};
 
             renderQueue(queueData);
             renderHistory(queueData.history || []);
@@ -1315,16 +1302,14 @@
         if (confirmModal) confirmModal.hidden = true;
 
         try {
-            const response = await fetch(`${API_BASE_URL}/history/clear`, {
-                method: "POST"
-            });
-            const data = await response.json().catch(() => ({}));
+            const result = await apiRequest("/history/clear", "POST");
 
-            if (!response.ok || !data.success) {
-                setStatus(data.message || "Failed to clear history.");
+            if (!result.success || !result.data?.success) {
+                const errorMsg = result.error || result.data?.message || "Failed to clear history.";
+                setStatus(errorMsg);
                 const list = document.querySelector(`#${MENU_ID} [data-history-list]`);
                 if (list) {
-                    list.innerHTML = `<div class="kerzox-empty" style="color: #ff4d4d;">${data.message || "Failed to clear history."}</div>`;
+                    list.innerHTML = `<div class="kerzox-empty" style="color: #ff4d4d;">${errorMsg}</div>`;
                 }
                 return;
             }
@@ -1337,7 +1322,7 @@
             await refreshPanels();
         } catch (error) {
             console.error("Kerzox clear history error:", error);
-            setStatus(`Backend not running at ${API_BASE_URL}`);
+            setStatus("Backend not reachable. Could not clear history.");
             const list = document.querySelector(`#${MENU_ID} [data-history-list]`);
             if (list) {
                 list.innerHTML = '<div class="kerzox-empty" style="color: #ff4d4d;">Backend not running. Could not clear history.</div>';

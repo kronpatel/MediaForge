@@ -1,5 +1,5 @@
 #define MyAppName "MediaForge"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.2.1"
 #define MyAppPublisher "KERZOX"
 #define MyAppPublisherURL "https://github.com/kerzox/MediaForge"
 #define MyAppExeName "MediaForge.exe"

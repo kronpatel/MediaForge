@@ -42,7 +42,7 @@ Get up and running in 3 minutes:
 
 ---
 
-## Recent Improvements (v1.2.0)
+## Recent Improvements (v1.2.1)
 
 *   **Auto Updater**: Background updates manager with releases checks, version comparison, download cancellation, integrity checks, and update notifications.
 *   **Installer Engine**: Robust setup installer execution with automatic recovery, admin privileges elevation, process locks checks, and diagnostic reporting.

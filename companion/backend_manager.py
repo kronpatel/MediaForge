@@ -498,9 +498,52 @@ class BackendManager:
                     f"The service at {self.base_url} is not a valid MediaForge backend. "
                     "Another application may be using this port."
                 )
+        else:
+            # Auto-start backend if port is free and configured to do so
+            try:
+                if self._should_auto_start_backend():
+                    self.start()
+            except Exception as exc:
+                self._logger.error(f"Failed to auto-start backend: {exc}")
 
         with self._startup_lock:
             self._startup_done = True
+
+    def _should_auto_start_backend(self) -> bool:
+        """Read settings to determine if backend should be auto-started."""
+        # 1. Determine if portable mode
+        is_portable = False
+        import sys
+        if os.environ.get("MEDIAFORGE_PORTABLE") == "1":
+            is_portable = True
+        elif getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            if os.path.exists(os.path.join(exe_dir, "portable_settings.json")):
+                is_portable = True
+        else:
+            is_portable = True
+
+        # 2. Get settings file path
+        companion_dir = os.path.dirname(os.path.abspath(__file__))
+        if is_portable:
+            settings_file = os.path.join(companion_dir, "settings.json")
+        else:
+            local_app_data = os.environ.get("LOCALAPPDATA")
+            if local_app_data:
+                settings_file = os.path.join(local_app_data, "MediaForge", "settings.json")
+            else:
+                settings_file = os.path.join(companion_dir, "settings.json")
+
+        # 3. Read auto_start_backend (defaults to True)
+        if os.path.exists(settings_file):
+            try:
+                with open(settings_file, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                    if isinstance(data, dict):
+                        return data.get("auto_start_backend", True)
+            except Exception:
+                pass
+        return True
 
     def _discover_backend_pid(self) -> int | None:
         """Try to discover the PID of the backend process listening on self._port."""

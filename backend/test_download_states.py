@@ -71,8 +71,11 @@ class TestValidTransitions(unittest.TestCase):
     def test_downloading_to_verifying(self):
         self._assert_valid("downloading", "verifying")
 
-    def test_downloading_to_completed_invalid(self):
-        self._assert_invalid("downloading", "completed")
+    def test_downloading_to_completed(self):
+        self._assert_valid("downloading", "completed")
+
+    def test_downloading_to_retrying(self):
+        self._assert_valid("downloading", "retrying")
 
     # PAUSED
     def test_paused_to_queued(self):
@@ -93,6 +96,9 @@ class TestValidTransitions(unittest.TestCase):
 
     def test_retrying_to_failed(self):
         self._assert_valid("retrying", "failed")
+
+    def test_retrying_to_downloading(self):
+        self._assert_valid("retrying", "downloading")
 
     def test_retrying_to_completed_invalid(self):
         self._assert_invalid("retrying", "completed")
