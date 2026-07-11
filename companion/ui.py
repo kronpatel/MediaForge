@@ -337,9 +337,24 @@ class CompanionWindow(ctk.CTk):
             self.updater.start()
             self.logger.mark_timing("Updater Started")
             self.logger.info("Updater started.")
+            # Wire all subscribers on the Tkinter main thread (no polling/timers)
+            self.after(0, self._wire_updater_subscribers)
         threading.Thread(target=_worker, daemon=True,
                          name="UpdaterStartupWorker").start()
         self.after(50, self._stage_installer_startup)
+
+    def _wire_updater_subscribers(self) -> None:
+        """Wire Dashboard and Tray to UpdateManager after creation. Runs on Tkinter thread."""
+        if not self.updater:
+            return
+        # Wire Dashboard update card and bell
+        if "Dashboard" in self._pages:
+            dashboard = self._pages["Dashboard"]
+            if hasattr(dashboard, "wire_updater"):
+                dashboard.wire_updater(self.updater)
+        # Wire Tray menu rebuild on updater state changes
+        if self._tray_manager and hasattr(self._tray_manager, "wire_updater"):
+            self._tray_manager.wire_updater(self.updater)
 
     def _stage_installer_startup(self) -> None:
         def _worker():

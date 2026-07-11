@@ -12,6 +12,7 @@ Builds a one-file EXE at dist/MediaForge.exe containing:
 
 import os
 import sys
+from PyInstaller.utils.hooks import collect_data_files
 
 # Build always runs from project root where MediaForge.spec lives
 ROOT = os.getcwd()
@@ -28,6 +29,7 @@ a = Analysis(
         (os.path.join(RESOURCES, "icon.ico"), "resources"),
         (os.path.join(RESOURCES, "icon.png"), "resources"),
         (os.path.join(RESOURCES, "tray.ico"), "resources"),
+        *collect_data_files("customtkinter"),
     ],
     hiddenimports=[
         "PIL",

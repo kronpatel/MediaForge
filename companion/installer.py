@@ -23,6 +23,7 @@ class InstallerManager:
         self._window = window
         self._install_root = self._resolve_install_root()
         self._events: list[str] = []
+        self._is_portable = self._detect_portable_mode()
 
     def _resolve_install_root(self) -> str:
         """Determine the project root directory where the ZIP should be extracted."""
@@ -30,6 +31,23 @@ class InstallerManager:
         import updater as _upd
         companion_dir = os.path.dirname(os.path.abspath(_upd.__file__))
         return os.path.dirname(companion_dir)
+
+    def _detect_portable_mode(self) -> bool:
+        """Detect if the current installation is running in portable mode.
+
+        Returns True if portable_settings.json already exists at the install root,
+        meaning the application was launched as a portable edition.  Returns False
+        for Inno-Setup (or other) installed copies where the file does not exist
+        *before* the update ZIP is extracted.
+        """
+        marker = os.path.join(self._install_root, "portable_settings.json")
+        exists = os.path.isfile(marker)
+        self.logger.info(
+            f"[Installer] Portable mode detection: "
+            f"portable_settings.json {'exists' if exists else 'not found'} "
+            f"at {self._install_root}"
+        )
+        return exists
 
     def install_update(self) -> None:
         def _worker():
@@ -79,6 +97,22 @@ class InstallerManager:
                     restart_cmd = f'start "" "{sys.executable}" "{main_script}"'
 
                 # Write apply_update.bat
+                # When updating a non-portable (Inno-Setup installed) copy, the
+                # Portable ZIP will drop portable_settings.json into the install
+                # root.  That file forces the companion into portable mode on the
+                # next launch, redirecting logs and config paths.  Inject a
+                # cleanup step to remove it after extraction completes.
+                cleanup_portable_marker = ""
+                if not self._is_portable:
+                    cleanup_portable_marker = (
+                        '\n'
+                        ':: Remove portable_settings.json left by the Portable ZIP.\n'
+                        ':: This is an installed copy — the marker must not remain.\n'
+                        'if exist "%TARGET_DIR%\\portable_settings.json" (\n'
+                        '    del /f /q "%TARGET_DIR%\\portable_settings.json" >> "%LOG_FILE%" 2>&1\n'
+                        '    echo [%DATE% %TIME%] [Updater] Removed portable_settings.json (non-portable installation). >> "%LOG_FILE%"\n'
+                        ')\n'
+                    )
                 batch_content = f"""@echo off
 setlocal enabledelayedexpansion
 
@@ -142,7 +176,7 @@ if %ERRORLEVEL% neq 0 (
 echo [%DATE% %TIME%] [Updater] Installation complete. Cleaning up... >> "%LOG_FILE%"
 rmdir /s /q "%TEMP_DIR%" >> "%LOG_FILE%" 2>&1
 del /f /q "%ZIP_PATH%" >> "%LOG_FILE%" 2>&1
-
+{cleanup_portable_marker}
 :: Clean up stale installation logs older than 7 days
 powershell -Command "Get-ChildItem -Path '%TARGET_DIR%\\updates' -Filter '*.log' | Where-Object {{ $_.LastWriteTime -lt (Get-Date).AddDays(-7) }} | Remove-Item -Force" >> "%LOG_FILE%" 2>&1
 

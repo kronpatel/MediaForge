@@ -74,6 +74,10 @@ class TrayManager:
         if hasattr(self._window, "scheduler") and self._window.scheduler:
             self._window.scheduler.register_listener(self._on_scheduler_event)
 
+        # Updater callback state (wired after UpdateManager is created)
+        self._updater_cb_registered: bool = False
+        self._updater = None
+
     def start(self) -> bool:
         """
         Initialize and run the system tray icon in a background thread.
@@ -123,6 +127,14 @@ class TrayManager:
         # Unregister scheduler listener
         if hasattr(self._window, "scheduler") and self._window.scheduler:
             self._window.scheduler.unregister_listener(self._on_scheduler_event)
+
+        # Unregister updater callback
+        if self._updater_cb_registered and self._updater:
+            try:
+                self._updater.unregister_callback(self._on_updater_event)
+            except Exception:
+                pass
+            self._updater_cb_registered = False
 
         with self._running_lock:
             if not self._is_running or not self._icon:
@@ -296,6 +308,18 @@ class TrayManager:
                     message=f"Failed: {payload.get('error_message') or 'Network error'}",
                     source=SOURCE_SCHEDULER,
                 )
+        self.refresh_menu()
+
+    def wire_updater(self, updater) -> None:
+        """Register updater callback so tray menu rebuilds on state changes. Safe to call multiple times."""
+        if self._updater_cb_registered:
+            return
+        self._updater = updater
+        self._updater.register_callback(self._on_updater_event)
+        self._updater_cb_registered = True
+
+    def _on_updater_event(self, status: str, progress: float, error_msg: str | None = None) -> None:
+        """Rebuild tray menu whenever updater state changes."""
         self.refresh_menu()
 
     def refresh_menu(self) -> None:

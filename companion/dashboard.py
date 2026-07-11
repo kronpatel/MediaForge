@@ -198,6 +198,9 @@ class DashboardPage(BasePage):
 
     def __init__(self, master: ctk.CTk, manager: BackendManager, logger: AppLogger) -> None:
         super().__init__(master, manager, logger)
+        self.updater = None
+        self._updater_cb_registered = False
+        self.scheduler = None
         self._cached_hash = None
         self._cached_version: str | None = None  # avoid per-poll HTTP round trip
         self._log_count: int = 0               # for incremental log appending
@@ -525,31 +528,49 @@ class DashboardPage(BasePage):
     # Updater Callbacks & UI Mapping
     # ------------------------------------------------------------------
 
-    def on_show(self) -> None:
-        main_window = self.master.master
-        self.updater = getattr(main_window, "updater", None)
+    def wire_updater(self, updater) -> None:
+        """Register updater callback and refresh UI. Safe to call multiple times."""
+        if self._updater_cb_registered and self.updater is updater:
+            return
+        if self._updater_cb_registered and self.updater is not None:
+            try:
+                self.updater.unregister_callback(self._on_update_status)
+            except Exception:
+                pass
+            self._updater_cb_registered = False
+        self.updater = updater
         if self.updater:
             self.updater.register_callback(self._on_update_status)
-            # Update initial status display
-            has_up = self.updater.has_update()
-            latest = self.updater.get_latest_version()
-            if has_up:
-                self._update_card_ui("Update Available", 0.0)
-            elif latest != "v—":
-                self._update_card_ui("Up To Date", 0.0)
-            else:
-                self._update_card_ui("Idle", 0.0)
+            self._updater_cb_registered = True
+            self._refresh_updater_ui()
+
+    def _refresh_updater_ui(self) -> None:
+        """Refresh the update card and bell with current updater state."""
+        if not self.updater:
+            return
+        status = self.updater.get_status()
+        self._update_card_ui(status, 100.0 if self.updater._pending_install else 0.0)
+
+    def on_show(self) -> None:
+        main_window = self.master.master
+        updater = getattr(main_window, "updater", None)
+        if updater:
+            self.wire_updater(updater)
 
         self.scheduler = getattr(main_window, "scheduler", None)
         if self.scheduler:
             self.scheduler.register_listener(self._on_scheduler_event)
-            
+
         self._populate_logs()
         self._update_scheduler_countdown()
 
     def on_hide(self) -> None:
-        if self.updater:
-            self.updater.unregister_callback(self._on_update_status)
+        if self._updater_cb_registered and self.updater:
+            try:
+                self.updater.unregister_callback(self._on_update_status)
+            except Exception:
+                pass
+            self._updater_cb_registered = False
         if hasattr(self, "scheduler") and self.scheduler:
             self.scheduler.unregister_listener(self._on_scheduler_event)
 
