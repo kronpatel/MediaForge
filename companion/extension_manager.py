@@ -47,12 +47,29 @@ _REQUIRED_EXTENSION_FILES = (
     "settings.html",
 )
 
-# Common Chrome executable locations on Windows (order = priority)
+# Common Chromium executable locations on Windows (order = priority)
 _CHROME_SEARCH_PATHS = [
     os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"), "Google", "Chrome", "Application", "chrome.exe"),
     os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), "Google", "Chrome", "Application", "chrome.exe"),
     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
 ]
+
+_BRAVE_SEARCH_PATHS = [
+    os.path.join(os.environ.get("LOCALAPPDATA", ""), "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+    os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"), "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+    os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+]
+
+_EDGE_SEARCH_PATHS = [
+    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+    os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"), "Microsoft", "Edge", "Application", "msedge.exe"),
+    os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), "Microsoft", "Edge", "Application", "msedge.exe"),
+]
+
+# User data directories for profile scanning
+_CHROME_USER_DATA = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data")
+_BRAVE_USER_DATA = os.path.join(os.environ.get("LOCALAPPDATA", ""), "BraveSoftware", "Brave-Browser", "User Data")
+_EDGE_USER_DATA = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "User Data")
 
 # Status colors
 _CLR_GREEN = "#22c55e"
@@ -74,6 +91,47 @@ class ChromeInfo:
         self.installed = installed
         self.path = path
         self.version = version
+
+
+class BrowserInfo:
+    """Information about a detected Chromium-based browser installation."""
+
+    __slots__ = ("name", "installed", "path", "version", "user_data_dir")
+
+    def __init__(self, name: str, installed: bool = False, path: str = "",
+                 version: str = "", user_data_dir: str = "") -> None:
+        self.name = name
+        self.installed = installed
+        self.path = path
+        self.version = version
+        self.user_data_dir = user_data_dir
+
+
+class BrowserProfileResult:
+    """Result of checking a single browser profile for the extension."""
+
+    __slots__ = ("profile_name", "preferences_exists", "extension_registered", "error")
+
+    def __init__(self, profile_name: str, preferences_exists: bool = False,
+                 extension_registered: bool = False, error: str = "") -> None:
+        self.profile_name = profile_name
+        self.preferences_exists = preferences_exists
+        self.extension_registered = extension_registered
+        self.error = error
+
+
+class BrowserRegistrationResult:
+    """Combined result for a single browser across all its profiles."""
+
+    __slots__ = ("browser_name", "profiles_scanned", "extension_registered", "profile_results")
+
+    def __init__(self, browser_name: str, profiles_scanned: int = 0,
+                 extension_registered: bool = False,
+                 profile_results: list[BrowserProfileResult] | None = None) -> None:
+        self.browser_name = browser_name
+        self.profiles_scanned = profiles_scanned
+        self.extension_registered = extension_registered
+        self.profile_results = profile_results or []
 
 
 def detect_chrome() -> ChromeInfo:
@@ -140,6 +198,142 @@ def _read_chrome_version(exe_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Multi-Browser Detection
+# ---------------------------------------------------------------------------
+
+def _paths_match(path1: str, path2: str) -> bool:
+    """Case-insensitive, normalized path comparison (Windows-safe)."""
+    return os.path.normpath(path1).lower() == os.path.normpath(path2).lower()
+
+
+def _detect_browser(name: str, search_paths: list[str], user_data_dir: str) -> BrowserInfo:
+    """Detect a single Chromium-based browser by checking executable paths."""
+    if sys.platform != "win32":
+        return BrowserInfo(name, False, "", "", user_data_dir)
+
+    for candidate in search_paths:
+        try:
+            if candidate and os.path.isfile(candidate):
+                version = _read_chrome_version(candidate)
+                return BrowserInfo(name, True, candidate, version, user_data_dir)
+        except Exception:
+            continue
+
+    return BrowserInfo(name, False, "", "", user_data_dir)
+
+
+def detect_all_browsers() -> list[BrowserInfo]:
+    """Detect all supported Chromium browsers (Chrome, Brave, Edge)."""
+    browsers: list[BrowserInfo] = []
+    for name, paths, udata in [
+        ("Chrome", _CHROME_SEARCH_PATHS, _CHROME_USER_DATA),
+        ("Brave", _BRAVE_SEARCH_PATHS, _BRAVE_USER_DATA),
+        ("Edge", _EDGE_SEARCH_PATHS, _EDGE_USER_DATA),
+    ]:
+        try:
+            browsers.append(_detect_browser(name, paths, udata))
+        except Exception:
+            browsers.append(BrowserInfo(name, False, "", "", udata))
+    return browsers
+
+
+def _find_browser_profiles(user_data_dir: str) -> list[str]:
+    """Find all profile directories under a browser's User Data folder.
+
+    A directory is considered a profile if it contains a Preferences file.
+    """
+    profiles: list[str] = []
+    if not os.path.isdir(user_data_dir):
+        return profiles
+    try:
+        for entry in os.scandir(user_data_dir):
+            if entry.is_dir(follow_symlinks=False):
+                prefs_path = os.path.join(entry.path, "Preferences")
+                if os.path.isfile(prefs_path):
+                    profiles.append(entry.name)
+    except OSError:
+        pass
+    return profiles
+
+
+def _check_extension_in_preferences(prefs_path: str) -> tuple[bool, str]:
+    """Check if the MediaForge unpacked extension is registered in a Preferences file.
+
+    Scans ``extensions.settings`` for any entry whose ``path`` field matches
+    the project's extension directory.  Returns ``(found, error_message)``.
+    """
+    try:
+        with open(prefs_path, "r", encoding="utf-8", errors="replace") as fh:
+            data = json.load(fh)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        return False, f"Failed to parse: {exc}"
+
+    if not isinstance(data, dict):
+        return False, "Preferences not a dict"
+
+    ext_settings = data.get("extensions", {})
+    if not isinstance(ext_settings, dict):
+        return False, "No extensions.settings"
+
+    settings = ext_settings.get("settings", {})
+    if not isinstance(settings, dict):
+        return False, "No settings key"
+
+    for _ext_id, entry in settings.items():
+        if not isinstance(entry, dict):
+            continue
+        registered_path = entry.get("path", "")
+        if not registered_path:
+            continue
+        if _paths_match(registered_path, _EXTENSION_DIR):
+            return True, ""
+
+    return False, ""
+
+
+def detect_browser_registration(ext_dir: str) -> tuple[list[BrowserRegistrationResult], bool]:
+    """Check all detected browsers and their profiles for the extension.
+
+    Returns ``(per_browser_results, installed_in_any_browser)``.
+    """
+    browsers = detect_all_browsers()
+    results: list[BrowserRegistrationResult] = []
+    installed_any = False
+
+    for browser in browsers:
+        if not browser.installed:
+            results.append(BrowserRegistrationResult(browser.name, 0, False, []))
+            continue
+
+        profiles = _find_browser_profiles(browser.user_data_dir)
+        profile_results: list[BrowserProfileResult] = []
+        found_in_browser = False
+
+        for profile_name in profiles:
+            prefs_path = os.path.join(browser.user_data_dir, profile_name, "Preferences")
+            found, error = _check_extension_in_preferences(prefs_path)
+            profile_results.append(BrowserProfileResult(
+                profile_name=profile_name,
+                preferences_exists=True,
+                extension_registered=found,
+                error=error,
+            ))
+            if found:
+                found_in_browser = True
+
+        results.append(BrowserRegistrationResult(
+            browser_name=browser.name,
+            profiles_scanned=len(profiles),
+            extension_registered=found_in_browser,
+            profile_results=profile_results,
+        ))
+        if found_in_browser:
+            installed_any = True
+
+    return results, installed_any
+
+
+# ---------------------------------------------------------------------------
 # Extension File Detection
 # ---------------------------------------------------------------------------
 
@@ -196,12 +390,14 @@ class ExtensionStatus:
     __slots__ = (
         "chrome", "file_status", "extension_version", "companion_version",
         "compatibility", "folder_exists",
+        "all_browsers", "browser_registration", "installed_in_browser",
     )
 
     # Compatibility states
     COMPATIBLE = "Compatible"
     MISMATCH = "Version Mismatch"
     MISSING = "Extension Missing"
+    NOT_INSTALLED = "Not Installed"
     UNKNOWN = "Unknown"
 
     def __init__(self) -> None:
@@ -211,6 +407,9 @@ class ExtensionStatus:
         self.companion_version = ""
         self.compatibility = self.UNKNOWN
         self.folder_exists = False
+        self.all_browsers: list[BrowserInfo] = []
+        self.browser_registration: list[BrowserRegistrationResult] = []
+        self.installed_in_browser = False
 
 
 def run_full_detection() -> ExtensionStatus:
@@ -221,38 +420,53 @@ def run_full_detection() -> ExtensionStatus:
     """
     status = ExtensionStatus()
 
-    # 1. Chrome detection
+    # 1. Chrome detection (legacy — kept for backward compatibility)
     try:
         status.chrome = detect_chrome()
     except Exception:
         status.chrome = ChromeInfo(False, "", "")
 
-    # 2. Extension file detection
+    # 2. Multi-browser detection
+    try:
+        status.all_browsers = detect_all_browsers()
+    except Exception:
+        status.all_browsers = []
+
+    # 3. Extension file detection
     try:
         status.file_status = detect_extension_files()
     except Exception:
         status.file_status = ExtensionFileStatus(False, [], {})
 
-    # 3. Folder existence
+    # 4. Folder existence
     try:
         status.folder_exists = os.path.isdir(_EXTENSION_DIR)
     except Exception:
         status.folder_exists = False
 
-    # 4. Extension version from manifest
+    # 5. Extension version from manifest
     try:
         status.extension_version = status.file_status.manifest_data.get("version", "")
     except Exception:
         status.extension_version = ""
 
-    # 5. Companion version
+    # 6. Companion version
     try:
         from updater import COMPANION_VERSION
         status.companion_version = COMPANION_VERSION
     except Exception:
         status.companion_version = ""
 
-    # 6. Compatibility
+    # 7. Browser registration detection
+    try:
+        status.browser_registration, status.installed_in_browser = (
+            detect_browser_registration(_EXTENSION_DIR)
+        )
+    except Exception:
+        status.browser_registration = []
+        status.installed_in_browser = False
+
+    # 8. Compatibility
     status.compatibility = _compute_compatibility(status)
 
     return status
@@ -266,6 +480,8 @@ def _compute_compatibility(status: ExtensionStatus) -> str:
         return ExtensionStatus.MISSING
     if not status.file_status.all_present:
         return ExtensionStatus.MISSING
+    if not status.installed_in_browser:
+        return ExtensionStatus.NOT_INSTALLED
     if not status.companion_version:
         return ExtensionStatus.UNKNOWN
     if status.extension_version == status.companion_version:
@@ -284,24 +500,35 @@ def _compat_color(compat: str) -> str:
         return _CLR_ORANGE
     if compat == ExtensionStatus.MISSING:
         return _CLR_RED
+    if compat == ExtensionStatus.NOT_INSTALLED:
+        return _CLR_ORANGE
     return _CLR_GREY
 
 
-def _chrome_status_text(info: ChromeInfo) -> tuple[str, str]:
-    """Return (label, color) for Chrome detection."""
-    if info.installed:
-        label = info.version if info.version else "Installed"
+def _chrome_status_text(status: ExtensionStatus) -> tuple[str, str]:
+    """Return (label, color) for browser detection — reports any Chromium browser."""
+    for browser in status.all_browsers:
+        if browser.installed:
+            label = f"{browser.name}"
+            if browser.version:
+                label += f" {browser.version}"
+            return label, _CLR_GREEN
+    # Fall back to legacy chrome field
+    if status.chrome.installed:
+        label = status.chrome.version if status.chrome.version else "Chrome"
         return label, _CLR_GREEN
     return "Not Installed", _CLR_RED
 
 
-def _extension_status_text(file_status: ExtensionFileStatus) -> tuple[str, str]:
-    """Return (label, color) for extension file integrity."""
-    if file_status.all_present:
-        return "Healthy", _CLR_GREEN
-    if not file_status.missing_files:
-        return "Unknown", _CLR_GREY
-    return "Damaged", _CLR_RED
+def _extension_status_text(status: ExtensionStatus) -> tuple[str, str]:
+    """Return (label, color) for extension installation status."""
+    if not status.file_status.all_present:
+        if not status.file_status.missing_files:
+            return "Unknown", _CLR_GREY
+        return "Damaged", _CLR_RED
+    if not status.installed_in_browser:
+        return "Files Present", _CLR_ORANGE
+    return "Healthy", _CLR_GREEN
 
 
 # ---------------------------------------------------------------------------
@@ -310,11 +537,13 @@ def _extension_status_text(file_status: ExtensionFileStatus) -> tuple[str, str]:
 
 def _compute_overall_ready(status: ExtensionStatus) -> tuple[str, str]:
     """Return (label, color) for the Overall Ready row."""
-    if not status.chrome.installed:
+    if not any(b.installed for b in status.all_browsers):
         return "No", _CLR_RED
     if not status.folder_exists:
         return "No", _CLR_RED
     if not status.file_status.all_present:
+        return "No", _CLR_RED
+    if not status.installed_in_browser:
         return "No", _CLR_RED
     if status.compatibility == ExtensionStatus.COMPATIBLE:
         return "Yes", _CLR_GREEN
@@ -517,9 +746,9 @@ class ExtensionManagerPage(BasePage):
             text_color="#8b92a8",
         ).pack(anchor="w", padx=16, pady=(12, 0))
 
-        # Chrome Installed
+        # Browser Installed
         self._asst_chrome_row = self._make_status_row(
-            self._assistant_card, "Chrome Installed", "Detecting\u2026", "#f59e0b"
+            self._assistant_card, "Browser Installed", "Detecting\u2026", "#f59e0b"
         )
         self._asst_chrome_lbl = self._asst_chrome_row[1]
 
@@ -537,16 +766,25 @@ class ExtensionManagerPage(BasePage):
 
         # Manifest Valid
         self._asst_manifest_row = self._make_status_row(
-            self._assistant_card, "Manifest Valid", "Detecting\u2026", "#f59e0b"
+            self._assistant_card, "Manifest Valid", "Detecting\u2014", "#f59e0b"
         )
         self._asst_manifest_lbl = self._asst_manifest_row[1]
 
         _sep_a3 = ctk.CTkFrame(self._assistant_card, height=1, fg_color="#2e3347")
         _sep_a3.pack(fill="x", padx=16)
 
+        # Installed in Browser
+        self._asst_browser_row = self._make_status_row(
+            self._assistant_card, "Installed in Browser", "Detecting\u2014", "#f59e0b"
+        )
+        self._asst_browser_lbl = self._asst_browser_row[1]
+
+        _sep_a3b = ctk.CTkFrame(self._assistant_card, height=1, fg_color="#2e3347")
+        _sep_a3b.pack(fill="x", padx=16)
+
         # Compatibility
         self._asst_compat_row = self._make_status_row(
-            self._assistant_card, "Compatibility", "Detecting\u2026", "#f59e0b"
+            self._assistant_card, "Compatibility", "Detecting\u2014", "#f59e0b"
         )
         self._asst_compat_lbl = self._asst_compat_row[1]
 
@@ -780,12 +1018,12 @@ class ExtensionManagerPage(BasePage):
         self._cached_status = status
         self._refresh_btn.configure(state="normal")
 
-        # Chrome status
-        chrome_text, chrome_color = _chrome_status_text(status.chrome)
+        # Chrome / Browser status
+        chrome_text, chrome_color = _chrome_status_text(status)
         self._chrome_lbl.configure(text=chrome_text, text_color=chrome_color)
 
         # Extension status
-        ext_text, ext_color = _extension_status_text(status.file_status)
+        ext_text, ext_color = _extension_status_text(status)
         self._ext_status_lbl.configure(text=ext_text, text_color=ext_color)
 
         # Compatibility
@@ -804,10 +1042,19 @@ class ExtensionManagerPage(BasePage):
             text_color="#e8eaf0" if status.companion_version else "#8b92a8",
         )
 
-        # Chrome path
+        # Chrome path — show first installed browser path
+        any_browser_installed = any(b.installed for b in status.all_browsers)
+        first_browser_path = ""
+        for b in status.all_browsers:
+            if b.installed:
+                first_browser_path = b.path
+                break
+        if not first_browser_path and status.chrome.installed:
+            any_browser_installed = True
+            first_browser_path = status.chrome.path
         self._chrome_path_lbl.configure(
-            text=status.chrome.path if status.chrome.installed else "Not found",
-            text_color="#4f8ef7" if status.chrome.installed else "#ef4444",
+            text=first_browser_path if any_browser_installed else "Not found",
+            text_color="#4f8ef7" if any_browser_installed else "#ef4444",
         )
 
         # Extension folder
@@ -828,8 +1075,8 @@ class ExtensionManagerPage(BasePage):
             )
 
         # ── Installation Assistant rows ───────────────────────────────────
-        # Chrome Installed
-        if status.chrome.installed:
+        # Chrome / Browser Installed
+        if any_browser_installed:
             self._asst_chrome_lbl.configure(text="Yes", text_color=_CLR_GREEN)
         else:
             self._asst_chrome_lbl.configure(text="No", text_color=_CLR_RED)
@@ -843,10 +1090,14 @@ class ExtensionManagerPage(BasePage):
         # Manifest Valid
         if status.file_status.all_present:
             self._asst_manifest_lbl.configure(text="Yes", text_color=_CLR_GREEN)
-        elif status.folder_exists and not status.file_status.missing_files:
-            self._asst_manifest_lbl.configure(text="Yes", text_color=_CLR_GREEN)
         else:
             self._asst_manifest_lbl.configure(text="No", text_color=_CLR_RED)
+
+        # Installed in Browser
+        if status.installed_in_browser:
+            self._asst_browser_lbl.configure(text="Yes", text_color=_CLR_GREEN)
+        else:
+            self._asst_browser_lbl.configure(text="No", text_color=_CLR_RED)
 
         # Compatibility (assistant card)
         self._asst_compat_lbl.configure(
@@ -870,13 +1121,18 @@ class ExtensionManagerPage(BasePage):
             self._fire_compatibility_notification()
 
         # Final message
-        if not status.chrome.installed:
+        if not any_browser_installed and not status.folder_exists:
             self._set_message(
-                "Chrome not detected. Install Chrome to use the extension.", "#f59e0b"
+                "No Chromium browser detected. Install Chrome, Brave, or Edge.", "#f59e0b"
             )
         elif not status.file_status.all_present:
             self._set_message(
                 "Extension files incomplete. Run the project setup to restore them.", "#ef4444"
+            )
+        elif status.compatibility == ExtensionStatus.NOT_INSTALLED:
+            self._set_message(
+                "Extension files are present but not installed in any browser.",
+                "#f59e0b",
             )
         elif status.compatibility == ExtensionStatus.COMPATIBLE:
             self._set_message("Extension is healthy and compatible.", "#22c55e")
@@ -971,6 +1227,8 @@ def _badge_color_for_compat(compat: str) -> str:
         return _CLR_ORANGE
     if compat == ExtensionStatus.MISSING:
         return _CLR_RED
+    if compat == ExtensionStatus.NOT_INSTALLED:
+        return _CLR_ORANGE
     return _CLR_GREY
 
 
@@ -1036,7 +1294,7 @@ class _VerificationDialog:
 
         # Check items
         checks = [
-            ("Chrome Installed", status.chrome.installed),
+            ("Browser Installed", any(b.installed for b in status.all_browsers) or status.chrome.installed),
             ("Extension Folder", status.folder_exists),
             ("All Files Present", status.file_status.all_present),
             ("Manifest Valid", bool(status.file_status.manifest_data)),
