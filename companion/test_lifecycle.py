@@ -168,7 +168,7 @@ class LifecycleCycleTest(unittest.TestCase):
             # --- RESTART (every other cycle) ---
             if cycle % 2 == 0:
                 self.logger.info(f"[Cycle {cycle}] Calling restart()")
-                self.manager.restart()
+                self.manager.restart(timeout=15.0)
                 self._wait_for_status(BackendStatus.RUNNING, timeout=self.STARTUP_WAIT)
                 self._assert_consistent(f"cycle{cycle}-after-restart",
                                         expect_managed=True)

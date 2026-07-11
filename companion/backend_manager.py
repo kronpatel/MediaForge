@@ -186,7 +186,7 @@ class BackendManager:
         with self._lock:
             self._status_callbacks.append(fn)
 
-    def start(self) -> None:
+    def start(self, allow_adopt: bool = True) -> None:
         """
         Start the backend process.
 
@@ -204,7 +204,7 @@ class BackendManager:
         # Reload config in case settings changed since launch
         self._load_config()
 
-        if self._is_port_in_use():
+        if allow_adopt and self._is_port_in_use():
             if self._ping():
                 self._logger.info(
                     f"Backend already running on port {self._port} "
@@ -327,7 +327,7 @@ class BackendManager:
         )
         self._set_status(BackendStatus.STOPPED, "Backend stopped.")
 
-    def restart(self) -> None:
+    def restart(self, timeout: float = 4.0) -> None:
         """Restart the backend process (only if it was launched by the Companion)."""
         if not self.is_managed():
             self._logger.warning("Attempted to restart an externally managed backend. Ignored.")
@@ -335,15 +335,15 @@ class BackendManager:
         self._logger.info("Restarting backend…")
         self.stop()
         
-        # Wait up to 4.0 seconds for the port to be released
-        deadline = time.monotonic() + 4.0
+        # Wait up to timeout seconds for the port to be released
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if not self._is_port_in_use():
                 break
             time.sleep(0.2)
 
         time.sleep(RESTART_COOLDOWN)
-        self.start()
+        self.start(allow_adopt=False)
 
     def is_managed(self) -> bool:
         """Return True if we own (started) the backend process."""
@@ -969,9 +969,16 @@ class BackendManager:
             if not self._check_health():
                 self._logger.warning("Unable to communicate with backend. Identity validation failed or port closed.")
                 self._monitor_active.clear()
+                callbacks: list[StatusCallback] = []
                 with self._lock:
                     self._process = None
-                self._set_status(BackendStatus.CRASHED, "Unable to communicate with backend.")
+                    self._status = BackendStatus.CRASHED
+                    callbacks = list(self._status_callbacks)
+                for cb in callbacks:
+                    try:
+                        cb(BackendStatus.CRASHED, "Unable to communicate with backend.")
+                    except Exception:
+                        pass
 
             time.sleep(HEALTH_CHECK_INTERVAL)
 
