@@ -34,6 +34,8 @@ backend/test_out.txt
 dist/
 build/
 release/
+.env
+coverage/
 
 # Runtime state & logs
 companion/runtime_err.txt
