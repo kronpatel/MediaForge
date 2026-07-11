@@ -38,6 +38,7 @@ from notifications import (
 )
 from updater import UpdateManager
 from installer import InstallerManager
+from extension_manager import register_badge_callback, unregister_badge_callback
 
 if TYPE_CHECKING:
     from tray import TrayManager
@@ -94,6 +95,7 @@ from stats_panel import StatsPage
 from settings_panel import SettingsPage, read_local_settings
 from scheduler import SchedulerManager
 from scheduler_panel import SchedulerPage
+from extension_manager import ExtensionManagerPage
 
 
 class LogsPage(BasePage):
@@ -258,6 +260,7 @@ class CompanionWindow(ctk.CTk):
             "Scheduler": SchedulerPage(self._content_container, self._manager, self.logger),
             "Statistics": StatsPage(self._content_container, self._manager, self.logger),
             "Settings": SettingsPage(self._content_container, self._manager, self.logger),
+            "Extensions": ExtensionManagerPage(self._content_container, self._manager, self.logger),
             "Logs": LogsPage(self._content_container, self._manager, self.logger),
         }
 
@@ -406,10 +409,20 @@ class CompanionWindow(ctk.CTk):
 
         # Sidebar navigation buttons
         self._sidebar_buttons = {}
-        for name in ("Dashboard", "Queue", "History", "Scheduler", "Statistics", "Settings", "Logs"):
+        _nav_icons = {
+            "Dashboard": "",
+            "Queue": "",
+            "History": "",
+            "Scheduler": "",
+            "Statistics": "",
+            "Settings": "",
+            "Extensions": "\U0001f9e9 ",
+            "Logs": "",
+        }
+        for name in ("Dashboard", "Queue", "History", "Scheduler", "Statistics", "Settings", "Extensions", "Logs"):
             btn = ctk.CTkButton(
                 self._sidebar,
-                text=name,
+                text=f"{_nav_icons.get(name, '')}{name}",
                 height=36,
                 fg_color="transparent",
                 hover_color=_CLR_BORDER,
@@ -421,6 +434,21 @@ class CompanionWindow(ctk.CTk):
             )
             btn.pack(fill="x", padx=10, pady=3)
             self._sidebar_buttons[name] = btn
+
+        # Extension badge indicator (hidden by default)
+        self._ext_badge_lbl = ctk.CTkLabel(
+            self._sidebar,
+            text="",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            text_color="#ffffff",
+            width=14,
+            height=14,
+            corner_radius=7,
+            fg_color="transparent",
+        )
+
+        # Register badge callback from extension_manager
+        register_badge_callback(self._on_ext_badge_update)
 
         # Bottom backend control in sidebar
         self._sidebar_bottom = ctk.CTkFrame(self._sidebar, fg_color="transparent")
@@ -791,6 +819,19 @@ class CompanionWindow(ctk.CTk):
     def set_notification_manager(self, notif_manager: Any) -> None:
         self._notif_manager = notif_manager
 
+    def _on_ext_badge_update(self, color: str) -> None:
+        """Update the Extensions sidebar badge color. Marshalled to Tkinter thread."""
+        self.after(0, self._apply_ext_badge, color)
+
+    def _apply_ext_badge(self, color: str) -> None:
+        """Apply badge color to the Extensions navigation button."""
+        try:
+            btn = self._sidebar_buttons.get("Extensions")
+            if btn:
+                btn.configure(text=f"\U0001f9e9 Extensions  \u25cf", text_color=color)
+        except Exception:
+            pass
+
     def restore_window(self) -> None:
         """Restore window to normal size and lift to topmost."""
         self.after(0, self._restore_safe)
@@ -977,7 +1018,13 @@ class CompanionWindow(ctk.CTk):
         if hasattr(self, "_dashboard_controller") and self._dashboard_controller:
             self._dashboard_controller.shutdown()
 
-        # 2. Stop background update checking thread
+        # 2. Unregister extension badge callback
+        try:
+            unregister_badge_callback(self._on_ext_badge_update)
+        except Exception:
+            pass
+
+        # 3. Stop background update checking thread
         if hasattr(self, "updater") and self.updater:
             self.updater.shutdown()
 

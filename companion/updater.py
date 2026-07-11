@@ -22,7 +22,7 @@ import requests
 if TYPE_CHECKING:
     from logger import AppLogger
 
-COMPANION_VERSION = "1.2.1"
+COMPANION_VERSION = "1.2.3"
 OWNER = "kronpatel"
 REPO = "MediaForge"
 GITHUB_API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"

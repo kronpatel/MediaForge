@@ -72,7 +72,7 @@ def home():
     return jsonify({
         "status": "running",
         "name": "MediaForge Backend",
-        "version": "1.2.1",
+        "version": "1.2.3",
     })
 
 

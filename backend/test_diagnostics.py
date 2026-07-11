@@ -98,7 +98,7 @@ class TestDiagnosticsReport(unittest.TestCase):
     def test_diagnostics_application_info(self):
         report = diagnostics_report()
         self.assertEqual(report["application"]["name"], "MediaForge Backend")
-        self.assertEqual(report["application"]["version"], "1.2.1")
+        self.assertEqual(report["application"]["version"], "1.2.3")
         self.assertGreaterEqual(report["application"]["uptime_seconds"], 0)
 
     def test_diagnostics_system_info(self):

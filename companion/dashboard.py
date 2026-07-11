@@ -5,12 +5,14 @@ dashboard.py – DashboardController & DashboardPage
    and broadcasts state updates to subscribed pages.
 2. DashboardPage: Landing panel displaying backend health summary, current active
    download status, progress bar, and recent logs.
+3. UpdateDialog: Modal dialog for viewing and managing companion updates.
 """
 
 from __future__ import annotations
 
 import threading
 import time
+import webbrowser
 from typing import TYPE_CHECKING, Any
 
 import customtkinter as ctk
@@ -22,6 +24,17 @@ from notifications import CATEGORY_BACKEND_CRASHED, PRIORITY_HIGH, SOURCE_DASHBO
 if TYPE_CHECKING:
     from backend_manager import BackendManager
     from logger import AppLogger
+
+
+# ---------------------------------------------------------------------------
+# Update Bell color constants
+# ---------------------------------------------------------------------------
+
+_BELL_COLOR_LATEST = "#22c55e"     # Green  – running latest version
+_BELL_COLOR_UPDATE = "#f59e0b"     # Orange – update available
+_BELL_COLOR_FAILED = "#ef4444"     # Red    – update download failed
+_BELL_COLOR_CHECKING = "#8b92a8"   # Grey   – checking for updates
+_BELL_COLOR_IDLE = "#4f8ef7"       # Blue   – idle / not yet checked
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +215,21 @@ class DashboardPage(BasePage):
             font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
             text_color="#e8eaf0",
         ).pack(side="left", anchor="w")
+
+        # ── Update Bell (top-right corner) ─────────────────────────────────
+        self._bell_btn = ctk.CTkButton(
+            hdr_frame,
+            text="\U0001f514",
+            width=36,
+            height=36,
+            corner_radius=18,
+            fg_color=_BELL_COLOR_CHECKING,
+            hover_color="#2e3347",
+            font=ctk.CTkFont(family="Segoe UI", size=16),
+            text_color="#ffffff",
+            command=self._open_update_dialog,
+        )
+        self._bell_btn.pack(side="right", padx=(8, 0))
 
         ctk.CTkLabel(
             self,
@@ -625,6 +653,49 @@ class DashboardPage(BasePage):
         else:
             self._update_versions_lbl.configure(text=f"v{current} → {latest}")
 
+        # Update the bell icon color to match status
+        self._update_bell_color(status)
+
+    # ------------------------------------------------------------------
+    # Update Bell
+    # ------------------------------------------------------------------
+
+    def _update_bell_color(self, status: str) -> None:
+        """Set the update bell color based on the current updater status."""
+        if not hasattr(self, "_bell_btn"):
+            return
+        color = _BELL_COLOR_CHECKING
+        if status in ("Up To Date", "Completed"):
+            color = _BELL_COLOR_LATEST
+        elif status in ("Update Available", "Downloading", "Verifying", "Pending Install",
+                         "Launching", "Waiting For Exit", "Restarting Companion"):
+            color = _BELL_COLOR_UPDATE
+        elif status in ("Failed", "Cancelled", "Installer Not Found"):
+            color = _BELL_COLOR_FAILED
+        elif status == "Checking":
+            color = _BELL_COLOR_CHECKING
+        elif status in ("Offline", "Rate Limited"):
+            color = _BELL_COLOR_FAILED
+        else:
+            color = _BELL_COLOR_IDLE
+        try:
+            self._bell_btn.configure(fg_color=color)
+        except Exception:
+            pass
+
+    def _open_update_dialog(self) -> None:
+        """Open the Update Dialog modal."""
+        main_window = self.master.master
+        updater = getattr(main_window, "updater", None)
+        if not updater:
+            return
+        # Prevent opening duplicate update dialogs
+        if hasattr(self, "_update_dialog") and self._update_dialog and self._update_dialog._dialog.winfo_exists():
+            self._update_dialog._dialog.lift()
+            self._update_dialog._dialog.focus_force()
+            return
+        self._update_dialog = UpdateDialog(main_window, updater, self.logger)
+
     # ------------------------------------------------------------------
     # Lifecycle refresh
     # ------------------------------------------------------------------
@@ -849,3 +920,297 @@ class DashboardPage(BasePage):
                 self.after(1000, self._update_scheduler_countdown)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Update Dialog
+# ---------------------------------------------------------------------------
+
+class UpdateDialog:
+    """
+    Modal dialog for viewing and managing companion updates.
+    Displays current version, latest version, and action buttons
+    wired directly to the existing UpdateManager backend.
+    """
+
+    def __init__(self, parent: ctk.CTk, updater: Any, logger: Any) -> None:
+        self._parent = parent
+        self._updater = updater
+        self._logger = logger
+
+        self._dialog = ctk.CTkToplevel(parent)
+        self._dialog.title("Companion Update")
+        self._dialog.transient(parent)
+        self._dialog.grab_set()
+        self._dialog.resizable(False, False)
+        self._dialog.configure(fg_color="#0f1117")
+
+        # Center on parent
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        dx, dy = parent.winfo_x(), parent.winfo_y()
+        w, h = 420, 380
+        x = dx + (pw - w) // 2
+        y = dy + (ph - h) // 2
+        self._dialog.geometry(f"{w}x{h}+{x}+{y}")
+
+        self._callback_ref = None
+        self._build_ui()
+        self._refresh_info()
+        self._register_updater_callback()
+
+        self._dialog.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._dialog.focus_set()
+
+    # ── UI Construction ─────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        pad = {"padx": 24, "pady": (0, 0)}
+
+        # Title
+        ctk.CTkLabel(
+            self._dialog,
+            text="Companion Update",
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+            text_color="#e8eaf0",
+        ).pack(anchor="w", **pad, pady=(20, 4))
+
+        ctk.CTkLabel(
+            self._dialog,
+            text="Check, download, and install the latest companion version.",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+        ).pack(anchor="w", **pad, pady=(0, 14))
+
+        # Info card
+        info_card = ctk.CTkFrame(
+            self._dialog,
+            fg_color="#1a1d27",
+            border_color="#2e3347",
+            border_width=1,
+            corner_radius=10,
+        )
+        info_card.pack(fill="x", **pad, pady=(0, 12))
+
+        row_current = ctk.CTkFrame(info_card, fg_color="transparent")
+        row_current.pack(fill="x", padx=16, pady=(12, 2))
+        ctk.CTkLabel(
+            row_current,
+            text="Current Version",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+        ).pack(side="left")
+        self._current_ver_lbl = ctk.CTkLabel(
+            row_current,
+            text="v\u2014",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color="#e8eaf0",
+        )
+        self._current_ver_lbl.pack(side="right")
+
+        sep = ctk.CTkFrame(info_card, height=1, fg_color="#2e3347")
+        sep.pack(fill="x", padx=16, pady=(4, 4))
+
+        row_latest = ctk.CTkFrame(info_card, fg_color="transparent")
+        row_latest.pack(fill="x", padx=16, pady=(2, 12))
+        ctk.CTkLabel(
+            row_latest,
+            text="Latest Version",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+        ).pack(side="left")
+        self._latest_ver_lbl = ctk.CTkLabel(
+            row_latest,
+            text="v\u2014",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color="#e8eaf0",
+        )
+        self._latest_ver_lbl.pack(side="right")
+
+        # Status label
+        self._status_lbl = ctk.CTkLabel(
+            self._dialog,
+            text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+        )
+        self._status_lbl.pack(anchor="w", **pad, pady=(0, 8))
+
+        # Button row: Check + Release Notes
+        btn_row1 = ctk.CTkFrame(self._dialog, fg_color="transparent")
+        btn_row1.pack(fill="x", **pad, pady=(0, 6))
+
+        self._check_btn = ctk.CTkButton(
+            btn_row1,
+            text="Check for Updates",
+            width=160,
+            height=32,
+            corner_radius=8,
+            fg_color="#4f8ef7",
+            hover_color="#3a76e8",
+            text_color="#ffffff",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            command=self._on_check_click,
+        )
+        self._check_btn.pack(side="left")
+
+        self._notes_btn = ctk.CTkButton(
+            btn_row1,
+            text="Release Notes",
+            width=130,
+            height=32,
+            corner_radius=8,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            command=self._on_notes_click,
+        )
+        self._notes_btn.pack(side="right")
+
+        # Button row: Download + Install
+        btn_row2 = ctk.CTkFrame(self._dialog, fg_color="transparent")
+        btn_row2.pack(fill="x", **pad, pady=(0, 6))
+
+        self._download_btn = ctk.CTkButton(
+            btn_row2,
+            text="Download Update",
+            width=160,
+            height=32,
+            corner_radius=8,
+            fg_color="#f59e0b",
+            hover_color="#d97706",
+            text_color="#ffffff",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            command=self._on_download_click,
+        )
+        self._download_btn.pack(side="left")
+
+        self._install_btn = ctk.CTkButton(
+            btn_row2,
+            text="Install Update",
+            width=130,
+            height=32,
+            corner_radius=8,
+            fg_color="#22c55e",
+            hover_color="#16a34a",
+            text_color="#ffffff",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            command=self._on_install_click,
+        )
+        self._install_btn.pack(side="right")
+
+        # Close button
+        ctk.CTkButton(
+            self._dialog,
+            text="Close",
+            width=100,
+            height=30,
+            corner_radius=8,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            command=self._on_close,
+        ).pack(pady=(10, 16))
+
+    # ── Updater Callback ────────────────────────────────────────────────
+
+    def _register_updater_callback(self) -> None:
+        self._callback_ref = self._on_updater_event
+        self._updater.register_callback(self._callback_ref)
+
+    def _unregister_updater_callback(self) -> None:
+        if self._callback_ref:
+            self._updater.unregister_callback(self._callback_ref)
+            self._callback_ref = None
+
+    def _on_updater_event(self, status: str, progress: float, error_msg: str | None = None) -> None:
+        try:
+            self._dialog.after(0, self._handle_updater_event, status, progress, error_msg)
+        except Exception:
+            pass
+
+    def _handle_updater_event(self, status: str, progress: float, error_msg: str | None) -> None:
+        if not self._dialog.winfo_exists():
+            return
+        self._refresh_info()
+        # Update button states based on status
+        is_downloading = status == "Downloading"
+        is_checking = status == "Checking"
+        has_pending = self._updater.get_status() in ("Pending Install", "Completed")
+
+        self._check_btn.configure(state="disabled" if (is_checking or is_downloading) else "normal")
+        self._download_btn.configure(
+            state="disabled" if (is_downloading or is_checking or not self._updater.has_update()) else "normal",
+            text="Downloading\u2026" if is_downloading else "Download Update",
+        )
+        self._install_btn.configure(state="normal" if has_pending else "disabled")
+
+        # Status message
+        if is_downloading:
+            self._status_lbl.configure(text=f"Downloading\u2026 {int(progress)}%", text_color="#f59e0b")
+        elif status == "Verifying":
+            self._status_lbl.configure(text="Verifying download\u2026", text_color="#f59e0b")
+        elif status == "Pending Install":
+            self._status_lbl.configure(text="Download complete. Ready to install.", text_color="#22c55e")
+        elif status == "Completed":
+            self._status_lbl.configure(text="Update installed successfully!", text_color="#22c55e")
+        elif status == "Failed":
+            self._status_lbl.configure(text=f"Failed: {error_msg or 'Unknown error'}", text_color="#ef4444")
+        elif status == "Cancelled":
+            self._status_lbl.configure(text="Download cancelled.", text_color="#ef4444")
+        elif status == "Checking":
+            self._status_lbl.configure(text="Checking for updates\u2026", text_color="#4f8ef7")
+        elif status == "Offline":
+            self._status_lbl.configure(text="Unable to reach GitHub.", text_color="#ef4444")
+        elif status == "Rate Limited":
+            self._status_lbl.configure(text="GitHub API rate limited.", text_color="#f59e0b")
+        else:
+            self._status_lbl.configure(text="", text_color="#8b92a8")
+
+    # ── Refresh Info ────────────────────────────────────────────────────
+
+    def _refresh_info(self) -> None:
+        current = self._updater.get_current_version()
+        latest = self._updater.get_latest_version()
+        self._current_ver_lbl.configure(text=f"v{current}")
+        self._latest_ver_lbl.configure(text=f"v{latest}")
+
+        has_pending = self._updater.get_status() in ("Pending Install", "Completed")
+        self._install_btn.configure(state="normal" if has_pending else "disabled")
+
+        has_update = self._updater.has_update()
+        is_active = self._updater.get_status() in ("Downloading", "Checking")
+        self._download_btn.configure(
+            state="disabled" if (is_active or not has_update) else "normal"
+        )
+
+    # ── Button Handlers ─────────────────────────────────────────────────
+
+    def _on_check_click(self) -> None:
+        self._check_btn.configure(state="disabled")
+        self._status_lbl.configure(text="Checking for updates\u2026", text_color="#4f8ef7")
+        self._updater.check_for_updates(force=True)
+
+    def _on_notes_click(self) -> None:
+        self._updater.open_release_notes()
+
+    def _on_download_click(self) -> None:
+        self._download_btn.configure(state="disabled", text="Downloading\u2026")
+        self._updater.download_update()
+
+    def _on_install_click(self) -> None:
+        from installer import InstallerManager
+        main_window = self._parent
+        installer = getattr(main_window, "installer", None)
+        if installer:
+            self._install_btn.configure(state="disabled")
+            threading.Thread(target=installer.install_update, daemon=True).start()
+
+    def _on_close(self) -> None:
+        self._unregister_updater_callback()
+        try:
+            self._dialog.grab_release()
+        except Exception:
+            pass
+        self._dialog.destroy()

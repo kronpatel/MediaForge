@@ -157,7 +157,7 @@ def health_check() -> dict[str, Any]:
 
     return {
         "status": "ok",
-        "version": "1.2.1",
+        "version": "1.2.3",
         "uptime_seconds": int(time.monotonic() - _START_TIME),
         "queue_size": queue_size,
         "active_download": active is not None,
@@ -241,7 +241,7 @@ def diagnostics_report() -> dict[str, Any]:
     return {
         "generated_at": now_iso(),
         "application": {
-            "version": "1.2.1",
+            "version": "1.2.3",
             "name": "MediaForge Backend",
             "uptime_seconds": int(time.monotonic() - _START_TIME),
         },

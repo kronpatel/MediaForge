@@ -312,7 +312,7 @@ class SettingsPage(BasePage):
 
         self._update_info_lbl = ctk.CTkLabel(
             info_row,
-            text="Current: v1.2.1 | Latest: v—\nLast checked: Never",
+            text="Current: v1.2.3 | Latest: v—\nLast checked: Never",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color="#8b92a8",
             justify="left",
