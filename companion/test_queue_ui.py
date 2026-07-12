@@ -23,7 +23,7 @@ from __future__ import annotations
 import sys
 import types as _types
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # Stub base_page module
 _mock_base = _types.ModuleType("base_page")

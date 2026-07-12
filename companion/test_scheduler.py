@@ -18,7 +18,7 @@ import json
 import datetime
 import threading
 import unittest
-from unittest.mock import MagicMock, patch, mock_open, call
+from unittest.mock import MagicMock, patch, mock_open
 
 # Ensure companion/ is on the path so imports resolve
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

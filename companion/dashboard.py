@@ -11,8 +11,6 @@ dashboard.py – DashboardController & DashboardPage
 from __future__ import annotations
 
 import threading
-import time
-import webbrowser
 from typing import TYPE_CHECKING, Any
 
 import customtkinter as ctk
@@ -1221,7 +1219,6 @@ class UpdateDialog:
         self._updater.download_update()
 
     def _on_install_click(self) -> None:
-        from installer import InstallerManager
         main_window = self._parent
         installer = getattr(main_window, "installer", None)
         if installer:

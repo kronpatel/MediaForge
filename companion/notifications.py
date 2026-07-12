@@ -142,7 +142,6 @@ def _deserialize(data: dict[str, Any]) -> Notification:
 
 try:
     import winrt.windows.ui.notifications as _win_notifications
-    import winrt.windows.data.xml.dom as _win_xml
     _HAS_WINRT = True
 except Exception:
     _HAS_WINRT = False

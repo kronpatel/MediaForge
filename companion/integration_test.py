@@ -10,10 +10,8 @@ import customtkinter as ctk
 import os
 import sys
 import tempfile
-import time
 import unittest
 from unittest.mock import MagicMock, patch
-from tkinter import messagebox
 
 # Ensure companion/ submodules are importable as top-level names
 _companion_dir = os.path.join(os.path.dirname(__file__))

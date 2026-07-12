@@ -18,13 +18,12 @@ from __future__ import annotations
 
 import os
 import threading
-import webbrowser
 from typing import TYPE_CHECKING
 
 import customtkinter as ctk
 
 from backend_manager import BackendManager, BackendStatus
-from logger import AppLogger, LogEntry
+from logger import AppLogger
 from notifications import (
     CATEGORY_INFO,
     CATEGORY_UPDATE_AVAILABLE,
@@ -41,7 +40,7 @@ from installer import InstallerManager
 from extension_manager import register_badge_callback, unregister_badge_callback
 
 if TYPE_CHECKING:
-    from tray import TrayManager
+    pass
 
 
 # ---------------------------------------------------------------------------

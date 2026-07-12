@@ -13,7 +13,6 @@ import os
 import subprocess
 import sys
 import threading
-import webbrowser
 from typing import TYPE_CHECKING, Any, Callable
 
 import customtkinter as ctk
@@ -23,6 +22,19 @@ from notifications import (
     CATEGORY_INFO,
     SOURCE_UI,
     get_notification_manager,
+)
+
+# Browser package integration — replaces legacy detection code
+from browser import (
+    BrowserInfo,
+    BrowserLauncher,
+    BrowserProfileManager,
+    BrowserProfileResult,
+    BrowserRegistrationResult,
+    BrowserSessionManager,
+    ExtensionInstallationEngine,
+    ExtensionLaunchResult,
+    LaunchResult,
 )
 
 if TYPE_CHECKING:
@@ -39,37 +51,7 @@ _PROJECT_ROOT = os.path.dirname(_COMPANION_DIR)
 _EXTENSION_DIR = os.path.join(_PROJECT_ROOT, "extension")
 _MANIFEST_PATH = os.path.join(_EXTENSION_DIR, "manifest.json")
 
-_REQUIRED_EXTENSION_FILES = (
-    "manifest.json",
-    "icon.png",
-    "background.js",
-    "content.js",
-    "settings.html",
-)
-
-# Common Chromium executable locations on Windows (order = priority)
-_CHROME_SEARCH_PATHS = [
-    os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"), "Google", "Chrome", "Application", "chrome.exe"),
-    os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), "Google", "Chrome", "Application", "chrome.exe"),
-    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
-]
-
-_BRAVE_SEARCH_PATHS = [
-    os.path.join(os.environ.get("LOCALAPPDATA", ""), "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
-    os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"), "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
-    os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
-]
-
-_EDGE_SEARCH_PATHS = [
-    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
-    os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"), "Microsoft", "Edge", "Application", "msedge.exe"),
-    os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), "Microsoft", "Edge", "Application", "msedge.exe"),
-]
-
-# User data directories for profile scanning
-_CHROME_USER_DATA = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data")
-_BRAVE_USER_DATA = os.path.join(os.environ.get("LOCALAPPDATA", ""), "BraveSoftware", "Brave-Browser", "User Data")
-_EDGE_USER_DATA = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Edge", "User Data")
+from browser.browser_extension_installer import _REQUIRED_EXTENSION_FILES
 
 # Status colors
 _CLR_GREEN = "#22c55e"
@@ -79,182 +61,8 @@ _CLR_GREY = "#8b92a8"
 
 
 # ---------------------------------------------------------------------------
-# Chrome Detection
+# Extension detection helpers (delegates to browser package)
 # ---------------------------------------------------------------------------
-
-class ChromeInfo:
-    """Immutable snapshot of detected Chrome installation state."""
-
-    __slots__ = ("installed", "path", "version")
-
-    def __init__(self, installed: bool, path: str, version: str) -> None:
-        self.installed = installed
-        self.path = path
-        self.version = version
-
-
-class BrowserInfo:
-    """Information about a detected Chromium-based browser installation."""
-
-    __slots__ = ("name", "installed", "path", "version", "user_data_dir")
-
-    def __init__(self, name: str, installed: bool = False, path: str = "",
-                 version: str = "", user_data_dir: str = "") -> None:
-        self.name = name
-        self.installed = installed
-        self.path = path
-        self.version = version
-        self.user_data_dir = user_data_dir
-
-
-class BrowserProfileResult:
-    """Result of checking a single browser profile for the extension."""
-
-    __slots__ = ("profile_name", "preferences_exists", "extension_registered", "error")
-
-    def __init__(self, profile_name: str, preferences_exists: bool = False,
-                 extension_registered: bool = False, error: str = "") -> None:
-        self.profile_name = profile_name
-        self.preferences_exists = preferences_exists
-        self.extension_registered = extension_registered
-        self.error = error
-
-
-class BrowserRegistrationResult:
-    """Combined result for a single browser across all its profiles."""
-
-    __slots__ = ("browser_name", "profiles_scanned", "extension_registered", "profile_results")
-
-    def __init__(self, browser_name: str, profiles_scanned: int = 0,
-                 extension_registered: bool = False,
-                 profile_results: list[BrowserProfileResult] | None = None) -> None:
-        self.browser_name = browser_name
-        self.profiles_scanned = profiles_scanned
-        self.extension_registered = extension_registered
-        self.profile_results = profile_results or []
-
-
-def detect_chrome() -> ChromeInfo:
-    """Detect Google Chrome installation on the system.
-
-    Returns a ChromeInfo with installed=True if found, along with
-    the executable path and version string when available.
-    Degrades gracefully on any error.
-    """
-    if sys.platform != "win32":
-        return ChromeInfo(False, "", "")
-
-    for candidate in _CHROME_SEARCH_PATHS:
-        try:
-            if candidate and os.path.isfile(candidate):
-                version = _read_chrome_version(candidate)
-                return ChromeInfo(True, candidate, version)
-        except Exception:
-            continue
-
-    return ChromeInfo(False, "", "")
-
-
-def _read_chrome_version(exe_path: str) -> str:
-    """Best-effort Chrome version extraction from the executable.
-
-    Uses Windows file version info when available, falling back to
-    directory inspection. Never raises.
-    """
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        size = ctypes.windll.version.GetFileVersionInfoSizeW(exe_path, None)
-        if not size:
-            return ""
-
-        data = ctypes.create_string_buffer(size)
-        if not ctypes.windll.version.GetFileVersionInfoW(exe_path, 0, size, data):
-            return ""
-
-        p_fixed = ctypes.c_void_p()
-        length = wintypes.UINT()
-        if not ctypes.windll.version.VerQueryValueW(
-            data, "\\", ctypes.byref(p_fixed), ctypes.byref(length)
-        ):
-            return ""
-
-        # Read the file version DWORDs from fixed info block
-        buf = ctypes.cast(p_fixed, ctypes.POINTER(ctypes.c_uint32))
-        file_version_ms = buf[2]
-        file_version_ls = buf[3]
-
-        major = file_version_ms >> 16
-        minor = file_version_ms & 0xFFFF
-        build = file_version_ls >> 16
-        patch = file_version_ls & 0xFFFF
-
-        if major == 0 and minor == 0 and build == 0:
-            return ""
-        return f"{major}.{minor}.{build}.{patch}"
-    except Exception:
-        return ""
-
-
-# ---------------------------------------------------------------------------
-# Multi-Browser Detection
-# ---------------------------------------------------------------------------
-
-def _paths_match(path1: str, path2: str) -> bool:
-    """Case-insensitive, normalized path comparison (Windows-safe)."""
-    return os.path.normpath(path1).lower() == os.path.normpath(path2).lower()
-
-
-def _detect_browser(name: str, search_paths: list[str], user_data_dir: str) -> BrowserInfo:
-    """Detect a single Chromium-based browser by checking executable paths."""
-    if sys.platform != "win32":
-        return BrowserInfo(name, False, "", "", user_data_dir)
-
-    for candidate in search_paths:
-        try:
-            if candidate and os.path.isfile(candidate):
-                version = _read_chrome_version(candidate)
-                return BrowserInfo(name, True, candidate, version, user_data_dir)
-        except Exception:
-            continue
-
-    return BrowserInfo(name, False, "", "", user_data_dir)
-
-
-def detect_all_browsers() -> list[BrowserInfo]:
-    """Detect all supported Chromium browsers (Chrome, Brave, Edge)."""
-    browsers: list[BrowserInfo] = []
-    for name, paths, udata in [
-        ("Chrome", _CHROME_SEARCH_PATHS, _CHROME_USER_DATA),
-        ("Brave", _BRAVE_SEARCH_PATHS, _BRAVE_USER_DATA),
-        ("Edge", _EDGE_SEARCH_PATHS, _EDGE_USER_DATA),
-    ]:
-        try:
-            browsers.append(_detect_browser(name, paths, udata))
-        except Exception:
-            browsers.append(BrowserInfo(name, False, "", "", udata))
-    return browsers
-
-
-def _find_browser_profiles(user_data_dir: str) -> list[str]:
-    """Find all profile directories under a browser's User Data folder.
-
-    A directory is considered a profile if it contains a Preferences file.
-    """
-    profiles: list[str] = []
-    if not os.path.isdir(user_data_dir):
-        return profiles
-    try:
-        for entry in os.scandir(user_data_dir):
-            if entry.is_dir(follow_symlinks=False):
-                prefs_path = os.path.join(entry.path, "Preferences")
-                if os.path.isfile(prefs_path):
-                    profiles.append(entry.name)
-    except OSError:
-        pass
-    return profiles
-
 
 def _check_extension_in_preferences(prefs_path: str) -> tuple[bool, str]:
     """Check if the MediaForge unpacked extension is registered in a Preferences file.
@@ -285,35 +93,45 @@ def _check_extension_in_preferences(prefs_path: str) -> tuple[bool, str]:
         registered_path = entry.get("path", "")
         if not registered_path:
             continue
-        if _paths_match(registered_path, _EXTENSION_DIR):
+        if os.path.normpath(registered_path).lower() == os.path.normpath(_EXTENSION_DIR).lower():
             return True, ""
 
     return False, ""
 
 
-def detect_browser_registration(ext_dir: str) -> tuple[list[BrowserRegistrationResult], bool]:
+def detect_browser_registration(ext_dir: str, detected_browsers: list[BrowserInfo] | None = None) -> tuple[list[BrowserRegistrationResult], bool]:
     """Check all detected browsers and their profiles for the extension.
 
+    Uses BrowserProfileManager for profile discovery and the browser
+    package's BrowserRegistrationResult for results.
     Returns ``(per_browser_results, installed_in_any_browser)``.
     """
-    browsers = detect_all_browsers()
+    browsers = detected_browsers if detected_browsers is not None else BrowserLauncher.detect_all()
     results: list[BrowserRegistrationResult] = []
     installed_any = False
 
-    for browser in browsers:
-        if not browser.installed:
-            results.append(BrowserRegistrationResult(browser.name, 0, False, []))
+    for browser_info in browsers:
+        if not browser_info.installed:
+            results.append(BrowserRegistrationResult(browser_name=browser_info.name))
             continue
 
-        profiles = _find_browser_profiles(browser.user_data_dir)
+        scan_result = BrowserProfileManager.scan(browser_info.name)
         profile_results: list[BrowserProfileResult] = []
         found_in_browser = False
 
-        for profile_name in profiles:
-            prefs_path = os.path.join(browser.user_data_dir, profile_name, "Preferences")
-            found, error = _check_extension_in_preferences(prefs_path)
+        for profile in scan_result.profiles:
+            if not profile.preferences_exists:
+                profile_results.append(BrowserProfileResult(
+                    profile_name=profile.name,
+                    preferences_exists=False,
+                    extension_registered=False,
+                    error=profile.error or "Preferences not found",
+                ))
+                continue
+
+            found, error = _check_extension_in_preferences(profile.preferences_path)
             profile_results.append(BrowserProfileResult(
-                profile_name=profile_name,
+                profile_name=profile.name,
                 preferences_exists=True,
                 extension_registered=found,
                 error=error,
@@ -322,8 +140,8 @@ def detect_browser_registration(ext_dir: str) -> tuple[list[BrowserRegistrationR
                 found_in_browser = True
 
         results.append(BrowserRegistrationResult(
-            browser_name=browser.name,
-            profiles_scanned=len(profiles),
+            browser_name=browser_info.name,
+            profiles_scanned=scan_result.profile_count,
             extension_registered=found_in_browser,
             profile_results=profile_results,
         ))
@@ -351,33 +169,18 @@ class ExtensionFileStatus:
 def detect_extension_files() -> ExtensionFileStatus:
     """Verify that all required extension files exist and manifest is readable.
 
-    Returns an ExtensionFileStatus. Never raises.
+    Delegates to ExtensionInstallationEngine.validate_extension() from
+    the browser package. Returns an ExtensionFileStatus. Never raises.
     """
-    missing: list[str] = []
-    manifest_data: dict[str, Any] = {}
-
-    if not os.path.isdir(_EXTENSION_DIR):
-        return ExtensionFileStatus(False, list(_REQUIRED_EXTENSION_FILES), manifest_data)
-
-    for filename in _REQUIRED_EXTENSION_FILES:
-        filepath = os.path.join(_EXTENSION_DIR, filename)
-        if not os.path.isfile(filepath):
-            missing.append(filename)
-
-    # Attempt to read and parse manifest.json
-    if os.path.isfile(_MANIFEST_PATH):
-        try:
-            with open(_MANIFEST_PATH, "r", encoding="utf-8") as fh:
-                parsed = json.load(fh)
-            if isinstance(parsed, dict):
-                manifest_data = parsed
-            else:
-                missing.append("manifest.json")
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            if "manifest.json" not in missing:
-                missing.append("manifest.json")
-
-    return ExtensionFileStatus(len(missing) == 0, missing, manifest_data)
+    try:
+        result = ExtensionInstallationEngine.validate_extension(_EXTENSION_DIR)
+        return ExtensionFileStatus(
+            all_present=result.valid,
+            missing_files=list(result.missing_files),
+            manifest_data=dict(result.manifest_data),
+        )
+    except Exception:
+        return ExtensionFileStatus(False, list(_REQUIRED_EXTENSION_FILES), {})
 
 
 # ---------------------------------------------------------------------------
@@ -388,9 +191,10 @@ class ExtensionStatus:
     """Aggregated detection result for the entire extension ecosystem."""
 
     __slots__ = (
-        "chrome", "file_status", "extension_version", "companion_version",
+        "file_status", "extension_version", "companion_version",
         "compatibility", "folder_exists",
         "all_browsers", "browser_registration", "installed_in_browser",
+        "browser_running",
     )
 
     # Compatibility states
@@ -401,7 +205,6 @@ class ExtensionStatus:
     UNKNOWN = "Unknown"
 
     def __init__(self) -> None:
-        self.chrome = ChromeInfo(False, "", "")
         self.file_status = ExtensionFileStatus(False, [], {})
         self.extension_version = ""
         self.companion_version = ""
@@ -410,6 +213,19 @@ class ExtensionStatus:
         self.all_browsers: list[BrowserInfo] = []
         self.browser_registration: list[BrowserRegistrationResult] = []
         self.installed_in_browser = False
+        self.browser_running: dict[str, bool] = {}
+
+
+def _detect_browser_running() -> dict[str, bool]:
+    """Detect which supported browsers are currently running.
+
+    Returns ``{browser_name: is_running}`` using BrowserSessionManager.
+    """
+    try:
+        running = BrowserSessionManager.running_all()
+        return {name: len(procs) > 0 for name, procs in running.items()}
+    except Exception:
+        return {}
 
 
 def run_full_detection() -> ExtensionStatus:
@@ -417,57 +233,66 @@ def run_full_detection() -> ExtensionStatus:
 
     Every detection step is independently guarded against exceptions
     to ensure the UI never crashes regardless of system state.
+
+    Uses the browser package for:
+    - Browser detection (BrowserLauncher)
+    - Profile scanning (BrowserProfileManager)
+    - Extension file validation (ExtensionInstallationEngine)
+    - Running browser detection (BrowserSessionManager)
     """
     status = ExtensionStatus()
 
-    # 1. Chrome detection (legacy — kept for backward compatibility)
+    # 1. Multi-browser detection (BrowserLauncher)
     try:
-        status.chrome = detect_chrome()
-    except Exception:
-        status.chrome = ChromeInfo(False, "", "")
-
-    # 2. Multi-browser detection
-    try:
-        status.all_browsers = detect_all_browsers()
+        status.all_browsers = BrowserLauncher.detect_all()
     except Exception:
         status.all_browsers = []
 
-    # 3. Extension file detection
+    # 2. Extension file detection (ExtensionInstallationEngine)
     try:
         status.file_status = detect_extension_files()
     except Exception:
         status.file_status = ExtensionFileStatus(False, [], {})
 
-    # 4. Folder existence
+    # 3. Folder existence
     try:
         status.folder_exists = os.path.isdir(_EXTENSION_DIR)
     except Exception:
         status.folder_exists = False
 
-    # 5. Extension version from manifest
+    # 4. Extension version from manifest
     try:
         status.extension_version = status.file_status.manifest_data.get("version", "")
     except Exception:
         status.extension_version = ""
 
-    # 6. Companion version
+    # 5. Companion version
     try:
         from updater import COMPANION_VERSION
         status.companion_version = COMPANION_VERSION
     except Exception:
         status.companion_version = ""
 
-    # 7. Browser registration detection
+    # 6. Browser registration detection (BrowserProfileManager + extension check)
     try:
-        status.browser_registration, status.installed_in_browser = (
-            detect_browser_registration(_EXTENSION_DIR)
-        )
+         status.browser_registration, status.installed_in_browser = (
+             detect_browser_registration(_EXTENSION_DIR, status.all_browsers)
+         )
     except Exception:
         status.browser_registration = []
         status.installed_in_browser = False
 
+    # 7. Browser running detection (BrowserSessionManager)
+    try:
+        status.browser_running = _detect_browser_running()
+    except Exception:
+        status.browser_running = {}
+
     # 8. Compatibility
-    status.compatibility = _compute_compatibility(status)
+    try:
+        status.compatibility = _compute_compatibility(status)
+    except Exception:
+        status.compatibility = ExtensionStatus.UNKNOWN
 
     return status
 
@@ -505,19 +330,17 @@ def _compat_color(compat: str) -> str:
     return _CLR_GREY
 
 
-def _chrome_status_text(status: ExtensionStatus) -> tuple[str, str]:
-    """Return (label, color) for browser detection — reports any Chromium browser."""
-    for browser in status.all_browsers:
-        if browser.installed:
-            label = f"{browser.name}"
-            if browser.version:
-                label += f" {browser.version}"
-            return label, _CLR_GREEN
-    # Fall back to legacy chrome field
-    if status.chrome.installed:
-        label = status.chrome.version if status.chrome.version else "Chrome"
-        return label, _CLR_GREEN
-    return "Not Installed", _CLR_RED
+def _format_compat_label(compat: str) -> str:
+    """Return a human-readable compatibility label with icon."""
+    if compat == ExtensionStatus.COMPATIBLE:
+        return "\u2714 Compatible"
+    if compat == ExtensionStatus.MISMATCH:
+        return "\u26a0 Version Mismatch"
+    if compat == ExtensionStatus.MISSING:
+        return "\u2716 Extension Missing"
+    if compat == ExtensionStatus.NOT_INSTALLED:
+        return "\u26a0 Not Installed"
+    return "\u26a0 Unknown"
 
 
 def _extension_status_text(status: ExtensionStatus) -> tuple[str, str]:
@@ -561,7 +384,8 @@ _badge_callbacks: list[Callable[[str], None]] = []
 
 def register_badge_callback(fn: Callable[[str], None]) -> None:
     """Register a callback that receives badge color strings."""
-    _badge_callbacks.append(fn)
+    if fn not in _badge_callbacks:
+        _badge_callbacks.append(fn)
 
 
 def unregister_badge_callback(fn: Callable[[str], None]) -> None:
@@ -582,6 +406,425 @@ def _notify_badge(color: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Browser Health
+# ---------------------------------------------------------------------------
+
+_BROWSER_ICONS: dict[str, str] = {
+    "Chrome": "\U0001f310",
+    "Brave": "\U0001f981",
+    "Edge": "\U0001f537",
+}
+
+_HEALTH_LABELS: dict[str, tuple[str, str, str]] = {
+    "Healthy": ("Healthy", "#22c55e", "#0f2a1a"),
+    "Needs Attention": ("Needs Attention", "#f59e0b", "#2a1f0f"),
+    "Extension Missing": ("Extension Missing", "#ef4444", "#2a0f0f"),
+    "Browser Closed": ("Browser Closed", "#8b92a8", "#1a1d27"),
+    "Version Mismatch": ("Version Mismatch", "#f59e0b", "#2a1f0f"),
+    "Unavailable": ("Unavailable", "#8b92a8", "#1a1d27"),
+}
+
+_FILTER_OPTIONS: list[str] = [
+    "Show All",
+    "Installed",
+    "Running",
+    "Needs Action",
+    "Healthy",
+]
+
+
+def _compute_browser_health(
+    browser_info: BrowserInfo,
+    reg_result: BrowserRegistrationResult | None,
+    running: bool,
+    status: ExtensionStatus | None,
+) -> tuple[str, str, str]:
+    """Return (label, text_color, bg_color) for a browser's health badge."""
+    if not browser_info.installed:
+        return _HEALTH_LABELS["Unavailable"]
+    if not running:
+        return _HEALTH_LABELS["Browser Closed"]
+    ext_registered = reg_result.extension_registered if reg_result else False
+    if not ext_registered:
+        return _HEALTH_LABELS["Extension Missing"]
+    if status and status.compatibility == ExtensionStatus.MISMATCH:
+        return _HEALTH_LABELS["Version Mismatch"]
+    if status and status.compatibility == ExtensionStatus.COMPATIBLE:
+        return _HEALTH_LABELS["Healthy"]
+    return _HEALTH_LABELS["Needs Attention"]
+
+
+# ---------------------------------------------------------------------------
+# Browser Card Widget
+# ---------------------------------------------------------------------------
+
+class _BrowserCard:
+    """Modern card widget for a single browser with status, actions, and details."""
+
+    _BTN_HEIGHT: int = 28
+
+    def __init__(
+        self,
+        parent: ctk.CTkFrame,
+        browser_name: str,
+        callbacks: dict[str, Any],
+    ) -> None:
+        self._name = browser_name
+        self._callbacks = callbacks
+        self._expanded = False
+        self._selected = False
+        self._health_label = "Unavailable"
+        self._installed = False
+        self._running = False
+        self._ext_registered = False
+        self._action_backup: tuple[str, str, str] | None = None
+
+        self._card = ctk.CTkFrame(
+            parent,
+            fg_color="#1a1d27",
+            border_color="#2e3347",
+            border_width=1,
+            corner_radius=12,
+        )
+
+        self._build_header()
+        self._build_status_row()
+        self._build_actions()
+        self._build_details_toggle()
+        self._build_details()
+
+    # ── Construction ────────────────────────────────────────────────────
+
+    def _build_header(self) -> None:
+        hdr = ctk.CTkFrame(self._card, fg_color="transparent")
+        hdr.pack(fill="x", padx=16, pady=(12, 2))
+
+        icon = _BROWSER_ICONS.get(self._name, "\U0001f5a5\ufe0f")
+        self._icon_lbl = ctk.CTkLabel(
+            hdr, text=icon, font=ctk.CTkFont(size=28),
+        )
+        self._icon_lbl.pack(side="left", padx=(0, 10))
+
+        left_col = ctk.CTkFrame(hdr, fg_color="transparent")
+        left_col.pack(side="left", fill="x", expand=True)
+
+        self._name_lbl = ctk.CTkLabel(
+            left_col, text=self._name,
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color="#e8eaf0", anchor="w",
+        )
+        self._name_lbl.pack(anchor="w")
+
+        self._version_lbl = ctk.CTkLabel(
+            left_col, text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8", anchor="w",
+        )
+        self._version_lbl.pack(anchor="w")
+
+        self._health_badge = ctk.CTkLabel(
+            hdr, text="", width=120, height=24, corner_radius=6,
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+        )
+        self._health_badge.pack(side="right", padx=(8, 0))
+
+        for widget in (hdr, self._icon_lbl, left_col, self._name_lbl, self._version_lbl, self._health_badge):
+            widget.bind("<Button-1>", lambda _e: self._on_select())
+
+    def _build_status_row(self) -> None:
+        ctk.CTkFrame(self._card, height=1, fg_color="#2e3347").pack(
+            fill="x", padx=16, pady=(4, 4),
+        )
+        row = ctk.CTkFrame(self._card, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 4))
+
+        self._installed_lbl = ctk.CTkLabel(
+            row, text="", font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+        )
+        self._installed_lbl.pack(side="left", padx=(0, 20))
+
+        self._running_lbl = ctk.CTkLabel(
+            row, text="", font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+        )
+        self._running_lbl.pack(side="left", padx=(0, 20))
+
+        self._extension_lbl = ctk.CTkLabel(
+            row, text="", font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+        )
+        self._extension_lbl.pack(side="left")
+
+    def _build_actions(self) -> None:
+        ctk.CTkFrame(self._card, height=1, fg_color="#2e3347").pack(
+            fill="x", padx=16, pady=(4, 4),
+        )
+        row = ctk.CTkFrame(self._card, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(0, 4))
+
+        _btn_font = ctk.CTkFont(family="Segoe UI", size=10, weight="bold")
+        _h = self._BTN_HEIGHT
+
+        self._launch_btn = ctk.CTkButton(
+            row, text="\u25b6 Launch", width=72, height=_h, corner_radius=6,
+            fg_color="#22c55e", hover_color="#16a34a", text_color="#ffffff",
+            font=_btn_font,
+            command=lambda: self._callbacks.get("launch", lambda _: None)(self._name),
+        )
+        self._launch_btn.pack(side="left", padx=(0, 4))
+
+        self._install_btn = ctk.CTkButton(
+            row, text="\U0001f4e6 Install", width=80, height=_h, corner_radius=6,
+            fg_color="#4f8ef7", hover_color="#3a76e8", text_color="#ffffff",
+            font=_btn_font,
+            command=lambda: self._callbacks.get("install", lambda _: None)(self._name),
+        )
+        self._install_btn.pack(side="left", padx=(0, 4))
+
+        self._ext_page_btn = ctk.CTkButton(
+            row, text="\U0001f517 Extensions", width=90, height=_h, corner_radius=6,
+            fg_color="#20232f", hover_color="#2e3347", text_color="#e8eaf0",
+            font=_btn_font,
+            command=lambda: self._callbacks.get("extensions_page", lambda _: None)(self._name),
+        )
+        self._ext_page_btn.pack(side="left", padx=(0, 4))
+
+        self._profile_btn = ctk.CTkButton(
+            row, text="\U0001f4c1 Profile", width=72, height=_h, corner_radius=6,
+            fg_color="#20232f", hover_color="#2e3347", text_color="#e8eaf0",
+            font=_btn_font,
+            command=lambda: self._callbacks.get("profile_folder", lambda _: None)(self._name),
+        )
+        self._profile_btn.pack(side="left", padx=(0, 4))
+
+        self._verify_btn = ctk.CTkButton(
+            row, text="\U0001f50d Verify", width=72, height=_h, corner_radius=6,
+            fg_color="#8b5cf6", hover_color="#7c3aed", text_color="#ffffff",
+            font=_btn_font,
+            command=lambda: self._callbacks.get("verify", lambda _: None)(),
+        )
+        self._verify_btn.pack(side="left")
+
+    def _build_details_toggle(self) -> None:
+        ctk.CTkFrame(self._card, height=1, fg_color="#2e3347").pack(
+            fill="x", padx=16, pady=(4, 0),
+        )
+        self._details_toggle = ctk.CTkButton(
+            self._card, text="\u25b6 Details", height=24, corner_radius=0,
+            fg_color="transparent", hover_color="#242838",
+            text_color="#8b92a8", anchor="w",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            command=self._toggle_details,
+        )
+        self._details_toggle.pack(fill="x", padx=16, pady=(0, 4))
+
+    def _build_details(self) -> None:
+        self._details_frame = ctk.CTkFrame(
+            self._card, fg_color="#0f1117", corner_radius=8,
+        )
+
+        fields = [
+            ("Executable", "exe"),
+            ("Profile Dir", "profile_dir"),
+            ("Profiles", "profiles"),
+            ("Processes", "processes"),
+            ("Ext Folder", "ext_folder"),
+            ("Dev Mode", "dev_mode"),
+        ]
+        self._detail_lbls: dict[str, ctk.CTkLabel] = {}
+        for label, key in fields:
+            row = ctk.CTkFrame(self._details_frame, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=2)
+            ctk.CTkLabel(
+                row, text=f"{label}:",
+                font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+                text_color="#8b92a8", width=80, anchor="w",
+            ).pack(side="left")
+            val = ctk.CTkLabel(
+                row, text="\u2014",
+                font=ctk.CTkFont(family="Consolas", size=10),
+                text_color="#4f8ef7", anchor="w",
+            )
+            val.pack(side="left", fill="x", expand=True)
+            self._detail_lbls[key] = val
+
+    def _toggle_details(self) -> None:
+        self._expanded = not self._expanded
+        if self._expanded:
+            self._details_frame.pack(fill="x", padx=12, pady=(0, 8))
+            self._details_toggle.configure(text="\u25bc Details")
+        else:
+            self._details_frame.pack_forget()
+            self._details_toggle.configure(text="\u25b6 Details")
+
+    # ── Public API ──────────────────────────────────────────────────────
+
+    def update_state(
+        self,
+        browser_info: BrowserInfo,
+        reg_result: BrowserRegistrationResult | None,
+        running: bool,
+        status: ExtensionStatus | None,
+    ) -> None:
+        """Refresh all card widgets from detection data."""
+        health_label, health_fg, health_bg = _compute_browser_health(
+            browser_info, reg_result, running, status,
+        )
+
+        if browser_info.installed:
+            self._name_lbl.configure(text_color="#e8eaf0")
+            ver = f"v{browser_info.version}" if browser_info.version else ""
+            self._version_lbl.configure(text=ver)
+        else:
+            self._name_lbl.configure(text_color="#8b92a8")
+            self._version_lbl.configure(text="Not installed")
+
+        self._health_badge.configure(
+            text=health_label, text_color=health_fg, fg_color=health_bg,
+        )
+
+        inst_ok = browser_info.installed
+        self._installed_lbl.configure(
+            text="\u2714 Installed" if inst_ok else "\u2718 Not Installed",
+            text_color=_CLR_GREEN if inst_ok else _CLR_RED,
+        )
+
+        self._running_lbl.configure(
+            text="\u2714 Running" if running else "\u2718 Not Running",
+            text_color=_CLR_GREEN if running else _CLR_GREY,
+        )
+
+        ext_ok = reg_result.extension_registered if reg_result else False
+        self._extension_lbl.configure(
+            text="\u2714 Extension Installed" if ext_ok else "\u26a0 Extension Not Installed",
+            text_color=_CLR_GREEN if ext_ok else _CLR_ORANGE,
+        )
+
+        state = "normal" if inst_ok else "disabled"
+        for btn in (self._launch_btn, self._install_btn, self._ext_page_btn, self._profile_btn):
+            btn.configure(state=state)
+
+        self._health_label = health_label
+        self._installed = inst_ok
+        self._running = running
+        self._ext_registered = ext_ok
+
+        if self._action_backup is not None:
+            self._action_backup = (health_label, health_fg, health_bg)
+
+        self._update_details(browser_info, reg_result, running)
+
+    def _update_details(
+        self,
+        browser_info: BrowserInfo,
+        reg_result: BrowserRegistrationResult | None,
+        running: bool,
+    ) -> None:
+        self._detail_lbls["exe"].configure(
+            text=browser_info.path or "\u2014",
+            text_color="#4f8ef7" if browser_info.path else "#8b92a8",
+        )
+        self._detail_lbls["profile_dir"].configure(
+            text=browser_info.user_data_dir or "\u2014",
+            text_color="#4f8ef7" if browser_info.user_data_dir else "#8b92a8",
+        )
+
+        if reg_result and reg_result.profile_results:
+            names = [p.profile_name for p in reg_result.profile_results]
+            self._detail_lbls["profiles"].configure(
+                text=", ".join(names) if names else "\u2014",
+            )
+        else:
+            self._detail_lbls["profiles"].configure(text="\u2014")
+
+        if running:
+            try:
+                procs = BrowserSessionManager.running(browser_info.name)
+                if procs:
+                    pids = ", ".join(str(p.pid) for p in procs[:5])
+                    extra = f" (+{len(procs) - 5})" if len(procs) > 5 else ""
+                    self._detail_lbls["processes"].configure(
+                        text=f"{len(procs)} running (PIDs: {pids}{extra})",
+                    )
+                else:
+                    self._detail_lbls["processes"].configure(text="Not running")
+            except Exception:
+                self._detail_lbls["processes"].configure(text="\u2014")
+        else:
+            self._detail_lbls["processes"].configure(text="Not running")
+
+        self._detail_lbls["ext_folder"].configure(text=_EXTENSION_DIR)
+        self._detail_lbls["dev_mode"].configure(
+            text="Supported" if browser_info.installed else "N/A",
+        )
+
+    def matches_filter(self, filter_name: str) -> bool:
+        """Return True if this card should be visible under the given filter."""
+        if filter_name == "Show All":
+            return True
+        if filter_name == "Installed":
+            return self._installed
+        if filter_name == "Running":
+            return self._running
+        if filter_name == "Healthy":
+            return self._health_label == "Healthy"
+        if filter_name == "Needs Action":
+            return self._health_label in (
+                "Extension Missing", "Version Mismatch", "Needs Attention",
+            )
+        return True
+
+    def set_action_state(self, text: str, color: str, bg: str) -> None:
+        """Show temporary action feedback on the health badge."""
+        if self._action_backup is None:
+            self._action_backup = (
+                self._health_badge.cget("text"),
+                self._health_badge.cget("text_color"),
+                self._health_badge.cget("fg_color"),
+            )
+        self._health_badge.configure(text=text, text_color=color, fg_color=bg)
+
+    def clear_action_state(self) -> None:
+        """Restore normal health badge after action completes."""
+        if self._action_backup is not None:
+            text, color, bg = self._action_backup
+            self._health_badge.configure(text=text, text_color=color, fg_color=bg)
+            self._action_backup = None
+
+    def set_selected(self, selected: bool) -> None:
+        """Visually highlight this card as the selected browser."""
+        self._selected = selected
+        if selected:
+            self._card.configure(border_color="#4f8ef7", border_width=2)
+        else:
+            self._card.configure(border_color="#2e3347", border_width=1)
+
+    @property
+    def browser_name(self) -> str:
+        return self._name
+
+    def _on_select(self) -> None:
+        """Handle click on card header — notify the page of selection."""
+        cb = self._callbacks.get("select")
+        if cb:
+            cb(self._name)
+
+    def pack(self, **kwargs: Any) -> None:
+        self._card.pack(**kwargs)
+
+    def pack_forget(self) -> None:
+        self._card.pack_forget()
+
+    def destroy(self) -> None:
+        self._card.destroy()
+
+    @property
+    def frame(self) -> ctk.CTkFrame:
+        return self._card
+
+
+# ---------------------------------------------------------------------------
 # Extension Manager Page
 # ---------------------------------------------------------------------------
 
@@ -595,8 +838,13 @@ class ExtensionManagerPage(BasePage):
     def __init__(self, master: ctk.CTkFrame, manager: BackendManager, logger: AppLogger) -> None:
         super().__init__(master, manager, logger)
         self._cached_status: ExtensionStatus | None = None
-        self._previous_compatibility: str = ""
         self._detecting: bool = False
+        self._verify_dialog: _VerificationDialog | None = None
+        self._wizard_dialog: _InstallationWizard | None = None
+        self._browser_cards: dict[str, _BrowserCard] = {}
+        self._card_callbacks: dict[str, Any] | None = None
+        self._active_filter: str = "Show All"
+        self._selected_browser: str | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -613,289 +861,135 @@ class ExtensionManagerPage(BasePage):
             text="Manage and inspect the MediaForge browser extension.",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color="#8b92a8",
-        ).pack(anchor="w", padx=20, pady=(0, 16))
+        ).pack(anchor="w", padx=20, pady=(0, 12))
 
-        # ── Status Card ────────────────────────────────────────────────────
+        # ── Filter bar ─────────────────────────────────────────────────────
+        filter_frame = ctk.CTkFrame(self, fg_color="transparent")
+        filter_frame.pack(fill="x", padx=20, pady=(0, 8))
+
+        ctk.CTkLabel(
+            filter_frame, text="Filter:",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color="#8b92a8",
+        ).pack(side="left", padx=(0, 8))
+
+        self._filter_btns: dict[str, ctk.CTkButton] = {}
+        for opt in _FILTER_OPTIONS:
+            is_active = opt == self._active_filter
+            btn = ctk.CTkButton(
+                filter_frame, text=opt, height=26, corner_radius=6,
+                width=len(opt) * 8 + 16,
+                fg_color="#4f8ef7" if is_active else "#20232f",
+                hover_color="#3a76e8" if is_active else "#2e3347",
+                text_color="#ffffff" if is_active else "#8b92a8",
+                font=ctk.CTkFont(
+                    family="Segoe UI", size=10,
+                    weight="bold" if is_active else "normal",
+                ),
+                command=lambda o=opt: self._apply_filter(o),
+            )
+            btn.pack(side="left", padx=(0, 4))
+            self._filter_btns[opt] = btn
+
+        # ── Browser Cards Container ────────────────────────────────────────
+        self._browser_cards_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._browser_cards_frame.pack(fill="x", padx=20, pady=(0, 12))
+
+        # ── Status Card (simplified) ──────────────────────────────────────
         self._status_card = ctk.CTkFrame(
-            self,
-            fg_color="#1a1d27",
-            border_color="#2e3347",
-            border_width=1,
-            corner_radius=12,
+            self, fg_color="#1a1d27", border_color="#2e3347",
+            border_width=1, corner_radius=12,
         )
         self._status_card.pack(fill="x", padx=20, pady=(0, 12))
 
-        # Chrome Status
-        self._chrome_row = self._make_status_row(
-            self._status_card, "Chrome Status", "Detecting\u2026", "#f59e0b"
-        )
-        self._chrome_lbl = self._chrome_row[1]
-
-        # Extension Status
         self._ext_status_row = self._make_status_row(
-            self._status_card, "Extension Status", "Detecting\u2026", "#f59e0b"
+            self._status_card, "Extension Status", "Detecting\u2026", "#f59e0b",
         )
         self._ext_status_lbl = self._ext_status_row[1]
 
-        # Compatibility
+        _sep = ctk.CTkFrame(self._status_card, height=1, fg_color="#2e3347")
+        _sep.pack(fill="x", padx=16)
+
         self._compat_row = self._make_status_row(
-            self._status_card, "Compatibility", "Detecting\u2026", "#f59e0b"
+            self._status_card, "Compatibility", "Detecting\u2026", "#f59e0b",
         )
         self._compat_lbl = self._compat_row[1]
 
-        # Extension Version
+        _sep2 = ctk.CTkFrame(self._status_card, height=1, fg_color="#2e3347")
+        _sep2.pack(fill="x", padx=16)
+
         self._ext_ver_row = self._make_status_row(
-            self._status_card, "Extension Version", "v\u2014", "#8b92a8"
+            self._status_card, "Extension Version", "v\u2014", "#8b92a8",
         )
         self._ext_ver_lbl = self._ext_ver_row[1]
 
-        # Companion Version
+        _sep3 = ctk.CTkFrame(self._status_card, height=1, fg_color="#2e3347")
+        _sep3.pack(fill="x", padx=16)
+
         self._comp_ver_row = self._make_status_row(
-            self._status_card, "Companion Version", "v\u2014", "#8b92a8"
+            self._status_card, "Companion Version", "v\u2014", "#8b92a8",
         )
         self._comp_ver_lbl = self._comp_ver_row[1]
 
-        # ── Details card ───────────────────────────────────────────────────
-        details_card = ctk.CTkFrame(
-            self,
-            fg_color="#1a1d27",
-            border_color="#2e3347",
-            border_width=1,
-            corner_radius=12,
+        # ── Recommendation Card ───────────────────────────────────────────
+        self._recommendation_card = ctk.CTkFrame(
+            self, fg_color="#241e12", border_color="#f59e0b",
+            border_width=1, corner_radius=10,
         )
-        details_card.pack(fill="x", padx=20, pady=(0, 12))
 
-        # Chrome Path
-        row_chrome_path = ctk.CTkFrame(details_card, fg_color="transparent")
-        row_chrome_path.pack(fill="x", padx=16, pady=(12, 4))
-        ctk.CTkLabel(
-            row_chrome_path,
-            text="Chrome Path",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#8b92a8",
-        ).pack(side="left")
-        self._chrome_path_lbl = ctk.CTkLabel(
-            row_chrome_path,
-            text="\u2014",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#4f8ef7",
-            wraplength=400,
-            anchor="e",
-            justify="right",
-        )
-        self._chrome_path_lbl.pack(side="right")
-
-        sep1 = ctk.CTkFrame(details_card, height=1, fg_color="#2e3347")
-        sep1.pack(fill="x", padx=16)
-
-        # Extension Folder
-        row_folder = ctk.CTkFrame(details_card, fg_color="transparent")
-        row_folder.pack(fill="x", padx=16, pady=(4, 4))
-        ctk.CTkLabel(
-            row_folder,
-            text="Extension Folder",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#8b92a8",
-        ).pack(side="left")
-        self._folder_lbl = ctk.CTkLabel(
-            row_folder,
-            text=_EXTENSION_DIR,
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#4f8ef7",
-            wraplength=400,
-            anchor="e",
-            justify="right",
-        )
-        self._folder_lbl.pack(side="right")
-
-        sep2 = ctk.CTkFrame(details_card, height=1, fg_color="#2e3347")
-        sep2.pack(fill="x", padx=16)
-
-        # Missing Files
-        row_missing = ctk.CTkFrame(details_card, fg_color="transparent")
-        row_missing.pack(fill="x", padx=16, pady=(4, 12))
-        ctk.CTkLabel(
-            row_missing,
-            text="Missing Files",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#8b92a8",
-        ).pack(side="left")
-        self._missing_lbl = ctk.CTkLabel(
-            row_missing,
-            text="None",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            text_color="#22c55e",
-            anchor="e",
-        )
-        self._missing_lbl.pack(side="right")
-
-        # ── Installation Assistant Card ───────────────────────────────────
-        self._assistant_card = ctk.CTkFrame(
-            self,
-            fg_color="#1a1d27",
-            border_color="#2e3347",
-            border_width=1,
-            corner_radius=12,
-        )
-        self._assistant_card.pack(fill="x", padx=20, pady=(0, 12))
-
-        ctk.CTkLabel(
-            self._assistant_card,
-            text="Installation Assistant",
+        self._recommend_title = ctk.CTkLabel(
+            self._recommendation_card,
+            text="\u26a0 Recommended Action",
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            text_color="#8b92a8",
-        ).pack(anchor="w", padx=16, pady=(12, 0))
-
-        # Browser Installed
-        self._asst_chrome_row = self._make_status_row(
-            self._assistant_card, "Browser Installed", "Detecting\u2026", "#f59e0b"
+            text_color="#f59e0b", anchor="w",
         )
-        self._asst_chrome_lbl = self._asst_chrome_row[1]
+        self._recommend_title.pack(fill="x", padx=16, pady=(10, 2))
 
-        _sep_a1 = ctk.CTkFrame(self._assistant_card, height=1, fg_color="#2e3347")
-        _sep_a1.pack(fill="x", padx=16)
-
-        # Extension Folder Found
-        self._asst_folder_row = self._make_status_row(
-            self._assistant_card, "Extension Folder", "Detecting\u2026", "#f59e0b"
+        self._recommend_msg = ctk.CTkLabel(
+            self._recommendation_card, text="",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color="#e8eaf0", anchor="w", wraplength=520, justify="left",
         )
-        self._asst_folder_lbl = self._asst_folder_row[1]
+        self._recommend_msg.pack(fill="x", padx=16, pady=2)
 
-        _sep_a2 = ctk.CTkFrame(self._assistant_card, height=1, fg_color="#2e3347")
-        _sep_a2.pack(fill="x", padx=16)
-
-        # Manifest Valid
-        self._asst_manifest_row = self._make_status_row(
-            self._assistant_card, "Manifest Valid", "Detecting\u2014", "#f59e0b"
+        self._recommend_desc = ctk.CTkLabel(
+            self._recommendation_card, text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8", anchor="w", wraplength=520, justify="left",
         )
-        self._asst_manifest_lbl = self._asst_manifest_row[1]
+        self._recommend_desc.pack(fill="x", padx=16, pady=(2, 10))
 
-        _sep_a3 = ctk.CTkFrame(self._assistant_card, height=1, fg_color="#2e3347")
-        _sep_a3.pack(fill="x", padx=16)
-
-        # Installed in Browser
-        self._asst_browser_row = self._make_status_row(
-            self._assistant_card, "Installed in Browser", "Detecting\u2014", "#f59e0b"
-        )
-        self._asst_browser_lbl = self._asst_browser_row[1]
-
-        _sep_a3b = ctk.CTkFrame(self._assistant_card, height=1, fg_color="#2e3347")
-        _sep_a3b.pack(fill="x", padx=16)
-
-        # Compatibility
-        self._asst_compat_row = self._make_status_row(
-            self._assistant_card, "Compatibility", "Detecting\u2014", "#f59e0b"
-        )
-        self._asst_compat_lbl = self._asst_compat_row[1]
-
-        _sep_a4 = ctk.CTkFrame(self._assistant_card, height=1, fg_color="#2e3347")
-        _sep_a4.pack(fill="x", padx=16)
-
-        # Overall Ready
-        self._asst_ready_row = self._make_status_row(
-            self._assistant_card, "Overall Ready", "Detecting\u2026", "#f59e0b"
-        )
-        self._asst_ready_lbl = self._asst_ready_row[1]
-
-        # Spacer at bottom of assistant card
-        ctk.CTkFrame(self._assistant_card, height=6, fg_color="transparent").pack()
-
-        # ── Action Buttons (row 1) ────────────────────────────────────────
+        # ── Action Buttons ────────────────────────────────────────────────
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=20, pady=(0, 8))
 
-        self._open_folder_btn = ctk.CTkButton(
-            btn_frame,
-            text="Open Extension Folder",
-            width=170,
-            height=34,
-            corner_radius=8,
-            fg_color="#4f8ef7",
-            hover_color="#3a76e8",
-            text_color="#ffffff",
-            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
-            command=self._on_open_folder,
-        )
-        self._open_folder_btn.pack(side="left", padx=(0, 8))
-
-        self._open_ext_btn = ctk.CTkButton(
-            btn_frame,
-            text="Open Chrome Extensions",
-            width=190,
-            height=34,
-            corner_radius=8,
-            fg_color="#f59e0b",
-            hover_color="#d97706",
-            text_color="#ffffff",
-            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
-            command=self._on_open_extensions_page,
-        )
-        self._open_ext_btn.pack(side="left", padx=(0, 8))
-
-        self._copy_path_btn = ctk.CTkButton(
-            btn_frame,
-            text="Copy Extension Folder",
-            width=160,
-            height=34,
-            corner_radius=8,
-            fg_color="#20232f",
-            hover_color="#2e3347",
-            text_color="#e8eaf0",
-            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
-            command=self._on_copy_path,
-        )
-        self._copy_path_btn.pack(side="left")
-
-        # ── Action Buttons (row 2) ────────────────────────────────────────
-        btn_frame2 = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame2.pack(fill="x", padx=20, pady=(0, 8))
-
         self._refresh_btn = ctk.CTkButton(
-            btn_frame2,
-            text="Refresh Status",
-            width=130,
-            height=34,
-            corner_radius=8,
-            fg_color="#20232f",
-            hover_color="#2e3347",
-            text_color="#e8eaf0",
+            btn_frame, text="Refresh Status", width=130, height=34, corner_radius=8,
+            fg_color="#20232f", hover_color="#2e3347", text_color="#e8eaf0",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             command=self._on_refresh,
         )
         self._refresh_btn.pack(side="left", padx=(0, 8))
 
         self._verify_btn = ctk.CTkButton(
-            btn_frame2,
-            text="Verify Installation",
-            width=150,
-            height=34,
-            corner_radius=8,
-            fg_color="#8b5cf6",
-            hover_color="#7c3aed",
-            text_color="#ffffff",
+            btn_frame, text="Verify Installation", width=150, height=34, corner_radius=8,
+            fg_color="#8b5cf6", hover_color="#7c3aed", text_color="#ffffff",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             command=self._on_verify,
         )
         self._verify_btn.pack(side="left", padx=(0, 8))
 
         self._wizard_btn = ctk.CTkButton(
-            btn_frame2,
-            text="Installation Wizard",
-            width=160,
-            height=34,
-            corner_radius=8,
-            fg_color="#22c55e",
-            hover_color="#16a34a",
-            text_color="#ffffff",
+            btn_frame, text="Installation Wizard", width=160, height=34, corner_radius=8,
+            fg_color="#22c55e", hover_color="#16a34a", text_color="#ffffff",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             command=self._on_show_wizard,
         )
         self._wizard_btn.pack(side="left")
 
-        # ── Status message ─────────────────────────────────────────────────
+        # ── Status message ────────────────────────────────────────────────
         self._msg_lbl = ctk.CTkLabel(
-            self,
-            text="",
+            self, text="",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color="#8b92a8",
         )
@@ -925,13 +1019,400 @@ class ExtensionManagerPage(BasePage):
         val_lbl.pack(side="right")
         return row, val_lbl
 
+    # ── Card Callbacks ──────────────────────────────────────────────────
+
+    def _get_card_callbacks(self) -> dict[str, Any]:
+        """Return the cached callback dict passed to every _BrowserCard."""
+        if self._card_callbacks is None:
+            self._card_callbacks = {
+                "launch": self._on_card_launch,
+                "install": self._on_card_install,
+                "extensions_page": self._on_card_open_ext_page,
+                "profile_folder": self._on_card_open_profile,
+                "verify": lambda: self._on_verify(),
+                "select": self._on_card_select,
+            }
+        return self._card_callbacks
+
+    def _clear_card_action(self, browser_name: str) -> None:
+        """Safely clear action feedback on a card (handles stale references)."""
+        if not self.winfo_exists():
+            return
+        card = self._browser_cards.get(browser_name)
+        if card:
+            card.clear_action_state()
+
+    def _on_card_launch(self, browser_name: str) -> None:
+        """Launch the browser (no extension loading) with action feedback."""
+        card = self._browser_cards.get(browser_name)
+        if card:
+            card.set_action_state("Launching\u2026", "#4f8ef7", "#0f1a2e")
+
+        def _worker():
+            success = False
+            try:
+                BrowserLauncher.launch_browser(browser_name)
+                success = True
+            except Exception:
+                pass
+
+            def _done():
+                if not self.winfo_exists():
+                    return
+                c = self._browser_cards.get(browser_name)
+                if c:
+                    if success:
+                        c.set_action_state("Completed", "#22c55e", "#0f2a1a")
+                    else:
+                        c.set_action_state("Failed", "#ef4444", "#2a0f0f")
+                    self.after(2500, lambda: self._clear_card_action(browser_name))
+                self.after(2000, self._on_refresh)
+
+            try:
+                if self.winfo_exists():
+                    self.after(0, _done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True, name=f"CardLaunch{browser_name}").start()
+
+    def _on_card_install(self, browser_name: str) -> None:
+        """Launch browser with extension loaded, with action feedback."""
+        self._set_message(f"Launching {browser_name} with extension\u2026", "#f59e0b")
+        card = self._browser_cards.get(browser_name)
+        if card:
+            card.set_action_state("Installing\u2026", "#f59e0b", "#2a1f0f")
+
+        def _worker():
+            try:
+                result = ExtensionInstallationEngine.launch(
+                    browser_name=browser_name,
+                    extension_dir=_EXTENSION_DIR,
+                    url="chrome://extensions",
+                )
+            except Exception as exc:
+                result = ExtensionLaunchResult(success=False, error_message=str(exc))
+
+            def _done():
+                if not self.winfo_exists():
+                    return
+                c = self._browser_cards.get(browser_name)
+                if c:
+                    if result.success:
+                        c.set_action_state("Completed", "#22c55e", "#0f2a1a")
+                    else:
+                        c.set_action_state("Failed", "#ef4444", "#2a0f0f")
+                    self.after(2500, lambda: self._clear_card_action(browser_name))
+                if result.success:
+                    self._set_message(
+                        f"Extension loaded in {browser_name}.", "#22c55e",
+                    )
+                else:
+                    err = result.error_message or "Unknown error"
+                    self._set_message(f"Launch failed: {err}", "#ef4444")
+                self.after(2000, self._on_refresh)
+
+            try:
+                if self.winfo_exists():
+                    self.after(0, _done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True, name=f"CardInstall{browser_name}").start()
+
+    def _on_card_open_ext_page(self, browser_name: str) -> None:
+        """Open the extensions management page with action feedback."""
+        card = self._browser_cards.get(browser_name)
+        if card:
+            card.set_action_state("Opening\u2026", "#4f8ef7", "#0f1a2e")
+
+        urls = {
+            "Chrome": "chrome://extensions",
+            "Brave": "brave://extensions",
+            "Edge": "edge://extensions",
+        }
+        url = urls.get(browser_name, "chrome://extensions")
+        try:
+            result = BrowserLauncher.launch_browser(browser_name, url=url)
+            if not result.success:
+                raise RuntimeError(result.error_message or "Failed to launch browser")
+            self._set_message(f"Opened {url}")
+            if card:
+                card.set_action_state("Completed", "#22c55e", "#0f2a1a")
+                self.after(2500, lambda: self._clear_card_action(browser_name))
+        except Exception as exc:
+            self._set_message(f"Failed to open: {exc}", "#ef4444")
+            if card:
+                card.set_action_state("Failed", "#ef4444", "#2a0f0f")
+                self.after(2500, lambda: self._clear_card_action(browser_name))
+
+    def _on_card_open_profile(self, browser_name: str) -> None:
+        """Open the browser profile folder with action feedback."""
+        card = self._browser_cards.get(browser_name)
+        if card:
+            card.set_action_state("Opening\u2026", "#4f8ef7", "#0f1a2e")
+
+        try:
+            info = BrowserLauncher.detect_by_name(browser_name)
+            if info and info.user_data_dir and os.path.isdir(info.user_data_dir):
+                if sys.platform == "win32":
+                    os.startfile(info.user_data_dir)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", info.user_data_dir])
+                else:
+                    subprocess.Popen(["xdg-open", info.user_data_dir])
+                self._set_message(f"Opened {browser_name} profile folder.")
+                if card:
+                    card.set_action_state("Completed", "#22c55e", "#0f2a1a")
+                    self.after(2500, lambda: self._clear_card_action(browser_name))
+            else:
+                self._set_message(f"Profile folder not found for {browser_name}.", "#f59e0b")
+                if card:
+                    card.set_action_state("Not Found", "#f59e0b", "#2a1f0f")
+                    self.after(2500, lambda: self._clear_card_action(browser_name))
+        except Exception as exc:
+            self._set_message(f"Failed to open profile: {exc}", "#ef4444")
+            if card:
+                card.set_action_state("Failed", "#ef4444", "#2a0f0f")
+                self.after(2500, lambda: self._clear_card_action(browser_name))
+
+    def _on_card_select(self, browser_name: str) -> None:
+        """Handle card header click — select browser and update recommendation."""
+        if self._selected_browser == browser_name:
+            self._selected_browser = None
+        else:
+            self._selected_browser = browser_name
+
+        for name, card in self._browser_cards.items():
+            card.set_selected(name == self._selected_browser)
+
+        self._update_recommendation_for_selected()
+
+    def _update_recommendation_for_selected(self) -> None:
+        """Update the Recommendation Card based on the selected browser."""
+        if self._selected_browser is None or self._cached_status is None:
+            self._refresh_recommendation_from_status(self._cached_status)
+            return
+
+        bname = self._selected_browser
+        status = self._cached_status
+        reg_lookup = {r.browser_name: r for r in status.browser_registration}
+        reg = reg_lookup.get(bname)
+
+        browser_info = None
+        for b in status.all_browsers:
+            if b.name == bname:
+                browser_info = b
+                break
+
+        if browser_info is None or not browser_info.installed:
+            self._show_recommendation(
+                "\u26a0 Not Installed",
+                f"{bname} is not installed on this system.",
+                "Install or update the browser, then click Refresh.",
+                "#1a1215", _CLR_RED, _CLR_RED,
+            )
+            return
+
+        running = status.browser_running.get(bname, False)
+        if not running:
+            self._show_recommendation(
+                "\u26a0 Browser Closed",
+                f"{bname} is installed but not running.",
+                f"Click Launch on the {bname} card to start it.",
+                "#241e12", _CLR_ORANGE, _CLR_ORANGE,
+            )
+            return
+
+        ext_ok = reg.extension_registered if reg else False
+        if not ext_ok:
+            self._show_recommendation(
+                "\u26a0 Extension Missing",
+                f"{bname} is running but the extension is not installed.",
+                f"Click Install on the {bname} card to load the extension.",
+                "#241e12", _CLR_ORANGE, _CLR_ORANGE,
+            )
+            return
+
+        if status.compatibility == ExtensionStatus.MISMATCH:
+            self._show_recommendation(
+                "\u26a0 Version Mismatch",
+                f"{bname}: extension and companion versions differ.",
+                "Launch the browser again to update the extension.",
+                "#241e12", _CLR_ORANGE, _CLR_ORANGE,
+            )
+            return
+
+        self._show_recommendation(
+            "\u2714 Healthy",
+            f"{bname}: extension is installed and compatible.",
+            "Everything is ready. No action needed.",
+            "#0f2a1a", "#22c55e", "#22c55e",
+        )
+
+    def _show_recommendation(
+        self, title: str, msg: str, desc: str,
+        bg: str, border: str, title_color: str,
+    ) -> None:
+        """Configure and show the recommendation card with given content."""
+        self._recommendation_card.configure(fg_color=bg, border_color=border)
+        self._recommend_title.configure(text=title, text_color=title_color)
+        self._recommend_msg.configure(text=msg)
+        self._recommend_desc.configure(text=desc)
+        self._recommendation_card.pack(
+            fill="x", padx=20, pady=(0, 12), after=self._status_card,
+        )
+
+    def _refresh_recommendation_from_status(self, status: ExtensionStatus | None) -> None:
+        """Reset recommendation card to the default status-based view."""
+        if status is None:
+            self._recommendation_card.pack_forget()
+            return
+
+        any_browser_installed = any(b.installed for b in status.all_browsers)
+        is_installed_any = status.installed_in_browser
+
+        if not any_browser_installed:
+            self._show_recommendation(
+                "\u26a0 Recommended Action",
+                "No supported browser was found.",
+                "Install Chrome, Brave or Microsoft Edge to continue.",
+                "#1a1215", _CLR_RED, _CLR_RED,
+            )
+        elif status.compatibility == ExtensionStatus.MISMATCH:
+            self._show_recommendation(
+                "\u26a0 Recommended Action",
+                "Extension update required.",
+                "Launch the browser again to update the extension.",
+                "#241e12", _CLR_ORANGE, _CLR_ORANGE,
+            )
+        elif not is_installed_any:
+            self._show_recommendation(
+                "\u26a0 Recommended Action",
+                "MediaForge Extension is not installed in this browser.",
+                "Use the Install button on the browser card to load the extension.",
+                "#241e12", _CLR_ORANGE, _CLR_ORANGE,
+            )
+        else:
+            self._recommendation_card.pack_forget()
+
+    # ── Browser Filters ─────────────────────────────────────────────────
+
+    def _apply_filter(self, filter_name: str) -> None:
+        """Apply the given filter to browser cards without re-detecting."""
+        self._active_filter = filter_name
+        self._update_filter_bar()
+        self._reapply_filter_to_cards()
+
+    def _update_filter_bar(self) -> None:
+        """Refresh filter button active states to match _active_filter."""
+        for opt, btn in self._filter_btns.items():
+            is_active = opt == self._active_filter
+            btn.configure(
+                fg_color="#4f8ef7" if is_active else "#20232f",
+                hover_color="#3a76e8" if is_active else "#2e3347",
+                text_color="#ffffff" if is_active else "#8b92a8",
+                font=ctk.CTkFont(
+                    family="Segoe UI", size=10,
+                    weight="bold" if is_active else "normal",
+                ),
+            )
+
+    def _reapply_filter_to_cards(self) -> None:
+        """Show/hide cards based on the active filter and handle empty state."""
+        any_visible = False
+        for name, card in self._browser_cards.items():
+            visible = card.matches_filter(self._active_filter)
+            if visible:
+                card.frame.pack(fill="x", padx=0, pady=(0, 8))
+                any_visible = True
+            else:
+                card.frame.pack_forget()
+
+        if not any_visible and self._browser_cards:
+            if not hasattr(self, "_empty_filter_lbl"):
+                self._empty_filter_lbl = ctk.CTkLabel(
+                    self._browser_cards_frame,
+                    text="No browsers match the selected filter.",
+                    font=ctk.CTkFont(family="Segoe UI", size=12),
+                    text_color=_CLR_GREY,
+                )
+            self._empty_filter_lbl.pack(pady=8)
+        elif hasattr(self, "_empty_filter_lbl"):
+            self._empty_filter_lbl.pack_forget()
+
+    # ── Browser Card Management ────────────────────────────────────────
+
+    def _update_browser_cards(self, status: ExtensionStatus) -> None:
+        """Create, update, or remove _BrowserCard widgets to match detected browsers."""
+        _ORDER = {"Chrome": 1, "Brave": 2, "Edge": 3}
+        detected = sorted(status.all_browsers, key=lambda x: _ORDER.get(x.name, 99))
+        detected_names = {b.name for b in detected}
+
+        # Clear selection if that browser disappeared
+        if self._selected_browser and self._selected_browser not in detected_names:
+            self._selected_browser = None
+
+        # Remove cards for browsers no longer detected
+        for name in list(self._browser_cards):
+            if name not in detected_names:
+                self._browser_cards[name].destroy()
+                del self._browser_cards[name]
+
+        # Also hide empty-filter message during rebuild
+        if hasattr(self, "_empty_filter_lbl"):
+            self._empty_filter_lbl.pack_forget()
+
+        reg_lookup = {r.browser_name: r for r in status.browser_registration}
+        callbacks = self._get_card_callbacks()
+
+        for b in detected:
+            if b.name not in self._browser_cards:
+                card = _BrowserCard(self._browser_cards_frame, b.name, callbacks)
+                self._browser_cards[b.name] = card
+
+            running = status.browser_running.get(b.name, False)
+            reg_result = reg_lookup.get(b.name)
+            self._browser_cards[b.name].update_state(b, reg_result, running, status)
+            self._browser_cards[b.name].set_selected(b.name == self._selected_browser)
+
+        # Apply filter (handles packing and empty-filter message)
+        self._reapply_filter_to_cards()
+
+        # Show empty message if no browsers detected at all
+        if not detected:
+            if not hasattr(self, "_empty_browsers_lbl"):
+                self._empty_browsers_lbl = ctk.CTkLabel(
+                    self._browser_cards_frame,
+                    text="No supported Chromium browsers detected.",
+                    font=ctk.CTkFont(family="Segoe UI", size=12),
+                    text_color=_CLR_ORANGE,
+                )
+            self._empty_browsers_lbl.pack(pady=8)
+        elif hasattr(self, "_empty_browsers_lbl"):
+            self._empty_browsers_lbl.pack_forget()
+
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     def on_show(self) -> None:
         self._on_refresh()
 
     def on_hide(self) -> None:
-        pass
+        if self._verify_dialog is not None:
+            try:
+                if self._verify_dialog._dialog.winfo_exists():
+                    self._verify_dialog._dialog.destroy()
+            except Exception:
+                pass
+            self._verify_dialog = None
+
+        if self._wizard_dialog is not None:
+            try:
+                if self._wizard_dialog._dialog.winfo_exists():
+                    self._wizard_dialog._dialog.destroy()
+            except Exception:
+                pass
+            self._wizard_dialog = None
 
     def refresh(self, data: dict[str, Any]) -> None:
         pass
@@ -949,167 +1430,137 @@ class ExtensionManagerPage(BasePage):
         def _worker():
             try:
                 status = run_full_detection()
-            except Exception:
+            except Exception as exc:
+                if self.winfo_exists():
+                    self.logger.exception(f"[ExtensionManager] Exception in background detection: {exc}")
                 status = ExtensionStatus()
 
             def _done():
                 self._detecting = False
+                if not self.winfo_exists():
+                    return
                 self._apply_status(status)
 
             try:
-                self.after(0, _done)
+                if self.winfo_exists():
+                    self.after(0, _done)
+                else:
+                    self._detecting = False
             except Exception:
                 self._detecting = False
 
         threading.Thread(target=_worker, daemon=True, name="ExtensionDetectWorker").start()
 
+    def _disable_buttons(self) -> None:
+        """Disable all action buttons during an operation."""
+        if not self.winfo_exists():
+            return
+        self._refresh_btn.configure(state="disabled")
+        self._verify_btn.configure(state="disabled")
+        self._wizard_btn.configure(state="disabled")
+
+    def _enable_buttons(self) -> None:
+        """Re-enable action buttons after operation."""
+        if not self.winfo_exists():
+            return
+        self._refresh_btn.configure(state="normal")
+        self._verify_btn.configure(state="normal")
+        self._wizard_btn.configure(state="normal")
+
     def _on_verify(self) -> None:
         """Run verification and display results in a dedicated dialog."""
         if self._detecting:
             return
-        # Prevent duplicate verification dialogs if one is already active in memory
-        if (
-            hasattr(self, "_verify_dialog")
-            and self._verify_dialog
-            and self._verify_dialog._dialog.winfo_exists()
-        ):
+        if self._verify_dialog is not None and self._verify_dialog._dialog.winfo_exists():
             self._verify_dialog._dialog.lift()
             self._verify_dialog._dialog.focus_force()
             return
 
         self._detecting = True
         self._set_message("Verifying installation\u2026", "#f59e0b")
-        self._verify_btn.configure(state="disabled")
-        self._refresh_btn.configure(state="disabled")
+        self._disable_buttons()
 
         def _worker():
             try:
                 status = run_full_detection()
-            except Exception:
+            except Exception as exc:
+                if self.winfo_exists():
+                    self.logger.exception(f"[ExtensionManager] Exception in background verification: {exc}")
                 status = ExtensionStatus()
 
             def _done():
                 self._detecting = False
-                self._verify_btn.configure(state="normal")
-                self._refresh_btn.configure(state="normal")
+                if not self.winfo_exists():
+                    return
+                self._enable_buttons()
                 self._apply_status(status)
-                
-                # Double-check before creating a new dialog instance
-                if (
-                    hasattr(self, "_verify_dialog")
-                    and self._verify_dialog
-                    and self._verify_dialog._dialog.winfo_exists()
-                ):
+
+                if self._verify_dialog is not None and self._verify_dialog._dialog.winfo_exists():
                     self._verify_dialog._dialog.lift()
                     self._verify_dialog._dialog.focus_force()
                     return
                 self._verify_dialog = _VerificationDialog(self.winfo_toplevel(), status)
 
             try:
-                self.after(0, _done)
+                if self.winfo_exists():
+                    self.after(0, _done)
+                else:
+                    self._detecting = False
             except Exception:
                 self._detecting = False
 
         threading.Thread(target=_worker, daemon=True, name="ExtensionVerifyWorker").start()
 
     def _apply_status(self, status: ExtensionStatus) -> None:
-        """Update all UI labels from a completed detection result."""
+        """Update all UI labels and browser cards from a detection result."""
+        if not self.winfo_exists():
+            return
         old_compat = self._cached_status.compatibility if self._cached_status else ""
         self._cached_status = status
         self._refresh_btn.configure(state="normal")
 
-        # Chrome / Browser status
-        chrome_text, chrome_color = _chrome_status_text(status)
-        self._chrome_lbl.configure(text=chrome_text, text_color=chrome_color)
+        # ── Browser Cards ────────────────────────────────────────────────
+        self._update_browser_cards(status)
 
-        # Extension status
+        # ── Extension status ──────────────────────────────────────────────
         ext_text, ext_color = _extension_status_text(status)
-        self._ext_status_lbl.configure(text=ext_text, text_color=ext_color)
+        if ext_text == "Healthy":
+            ext_display = "\u2714 Healthy"
+        elif ext_text in ("Files Present", "Not Installed"):
+            ext_display = "\u26a0 Not Installed"
+        elif ext_text == "Damaged":
+            ext_display = "\u2716 Damaged"
+        else:
+            ext_display = f"\u26a0 {ext_text}"
+        self._ext_status_lbl.configure(text=ext_display, text_color=ext_color)
 
-        # Compatibility
+        # ── Compatibility ─────────────────────────────────────────────────
         compat_color = _compat_color(status.compatibility)
-        self._compat_lbl.configure(text=status.compatibility, text_color=compat_color)
 
-        # Extension version
+        self._compat_lbl.configure(
+            text=_format_compat_label(status.compatibility), text_color=compat_color,
+        )
+
+        # ── Extension version ─────────────────────────────────────────────
         self._ext_ver_lbl.configure(
             text=f"v{status.extension_version}" if status.extension_version else "v\u2014",
             text_color="#e8eaf0" if status.extension_version else "#8b92a8",
         )
 
-        # Companion version
+        # ── Companion version ─────────────────────────────────────────────
         self._comp_ver_lbl.configure(
             text=f"v{status.companion_version}" if status.companion_version else "v\u2014",
             text_color="#e8eaf0" if status.companion_version else "#8b92a8",
         )
 
-        # Chrome path — show first installed browser path
-        any_browser_installed = any(b.installed for b in status.all_browsers)
-        first_browser_path = ""
-        for b in status.all_browsers:
-            if b.installed:
-                first_browser_path = b.path
-                break
-        if not first_browser_path and status.chrome.installed:
-            any_browser_installed = True
-            first_browser_path = status.chrome.path
-        self._chrome_path_lbl.configure(
-            text=first_browser_path if any_browser_installed else "Not found",
-            text_color="#4f8ef7" if any_browser_installed else "#ef4444",
-        )
-
-        # Extension folder
-        self._folder_lbl.configure(
-            text=_EXTENSION_DIR,
-            text_color="#4f8ef7",
-        )
-
-        # Missing files
-        missing = status.file_status.missing_files
-        if not status.folder_exists:
-            self._missing_lbl.configure(text="Folder missing", text_color="#ef4444")
-        elif not missing:
-            self._missing_lbl.configure(text="None", text_color="#22c55e")
+        # ── Dynamic Recommendation Card Toggle ────────────────────────────
+        if self._selected_browser:
+            self._update_recommendation_for_selected()
         else:
-            self._missing_lbl.configure(
-                text=", ".join(missing), text_color="#ef4444", wraplength=400
-            )
-
-        # ── Installation Assistant rows ───────────────────────────────────
-        # Chrome / Browser Installed
-        if any_browser_installed:
-            self._asst_chrome_lbl.configure(text="Yes", text_color=_CLR_GREEN)
-        else:
-            self._asst_chrome_lbl.configure(text="No", text_color=_CLR_RED)
-
-        # Extension Folder Found
-        if status.folder_exists:
-            self._asst_folder_lbl.configure(text="Yes", text_color=_CLR_GREEN)
-        else:
-            self._asst_folder_lbl.configure(text="No", text_color=_CLR_RED)
-
-        # Manifest Valid
-        if status.file_status.all_present:
-            self._asst_manifest_lbl.configure(text="Yes", text_color=_CLR_GREEN)
-        else:
-            self._asst_manifest_lbl.configure(text="No", text_color=_CLR_RED)
-
-        # Installed in Browser
-        if status.installed_in_browser:
-            self._asst_browser_lbl.configure(text="Yes", text_color=_CLR_GREEN)
-        else:
-            self._asst_browser_lbl.configure(text="No", text_color=_CLR_RED)
-
-        # Compatibility (assistant card)
-        self._asst_compat_lbl.configure(
-            text=status.compatibility, text_color=compat_color
-        )
-
-        # Overall Ready
-        ready_text, ready_color = _compute_overall_ready(status)
-        self._asst_ready_lbl.configure(text=ready_text, text_color=ready_color)
+            self._refresh_recommendation_from_status(status)
 
         # ── Badge notification ────────────────────────────────────────────
-        badge_color = _badge_color_for_compat(status.compatibility)
+        badge_color = _compat_color(status.compatibility)
         _notify_badge(badge_color)
 
         # ── Compatibility change notification ─────────────────────────────
@@ -1121,13 +1572,16 @@ class ExtensionManagerPage(BasePage):
             self._fire_compatibility_notification()
 
         # Final message
+        any_browser_installed = any(b.installed for b in status.all_browsers)
         if not any_browser_installed and not status.folder_exists:
             self._set_message(
-                "No Chromium browser detected. Install Chrome, Brave, or Edge.", "#f59e0b"
+                "No Chromium browser detected. Install Chrome, Brave, or Edge.",
+                "#f59e0b",
             )
         elif not status.file_status.all_present:
             self._set_message(
-                "Extension files incomplete. Run the project setup to restore them.", "#ef4444"
+                "Extension files incomplete. Run the project setup to restore them.",
+                "#ef4444",
             )
         elif status.compatibility == ExtensionStatus.NOT_INSTALLED:
             self._set_message(
@@ -1146,6 +1600,8 @@ class ExtensionManagerPage(BasePage):
             self._set_message("")
 
     def _set_message(self, text: str, color: str = "#8b92a8") -> None:
+        if not self.winfo_exists():
+            return
         self._msg_lbl.configure(text=text, text_color=color)
 
     def _fire_compatibility_notification(self) -> None:
@@ -1161,49 +1617,9 @@ class ExtensionManagerPage(BasePage):
         except Exception:
             pass
 
-    # ── Button Handlers ─────────────────────────────────────────────────
-
-    def _on_open_folder(self) -> None:
-        """Open the extension folder in the system file explorer."""
-        if not os.path.isdir(_EXTENSION_DIR):
-            self._set_message("Extension folder not found.", "#ef4444")
-            return
-        try:
-            if sys.platform == "win32":
-                os.startfile(_EXTENSION_DIR)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", _EXTENSION_DIR])
-            else:
-                subprocess.Popen(["xdg-open", _EXTENSION_DIR])
-            self._set_message("Opened extension folder.")
-        except Exception as exc:
-            self._set_message(f"Failed to open folder: {exc}", "#ef4444")
-
-    def _on_open_extensions_page(self) -> None:
-        """Open chrome://extensions in the default browser."""
-        try:
-            webbrowser.open("chrome://extensions")
-            self._set_message("Opened chrome://extensions in browser.")
-        except Exception as exc:
-            self._set_message(f"Failed to open browser: {exc}", "#ef4444")
-
-    def _on_copy_path(self) -> None:
-        """Copy the extension folder path to the clipboard."""
-        try:
-            self.clipboard_clear()
-            self.clipboard_append(_EXTENSION_DIR)
-            self.update()
-            self._set_message("Extension folder path copied to clipboard.")
-        except Exception as exc:
-            self._set_message(f"Failed to copy path: {exc}", "#ef4444")
-
     def _on_show_wizard(self) -> None:
         """Show the Installation Wizard dialog."""
-        if (
-            hasattr(self, "_wizard_dialog")
-            and self._wizard_dialog
-            and self._wizard_dialog._dialog.winfo_exists()
-        ):
+        if self._wizard_dialog is not None and self._wizard_dialog._dialog.winfo_exists():
             self._wizard_dialog._dialog.lift()
             self._wizard_dialog._dialog.focus_force()
             return
@@ -1213,23 +1629,6 @@ class ExtensionManagerPage(BasePage):
         self._wizard_dialog = _InstallationWizard(
             self.winfo_toplevel(), ext_ver
         )
-
-
-# ---------------------------------------------------------------------------
-# Badge color helper
-# ---------------------------------------------------------------------------
-
-def _badge_color_for_compat(compat: str) -> str:
-    """Map a compatibility string to a sidebar badge color."""
-    if compat == ExtensionStatus.COMPATIBLE:
-        return _CLR_GREEN
-    if compat == ExtensionStatus.MISMATCH:
-        return _CLR_ORANGE
-    if compat == ExtensionStatus.MISSING:
-        return _CLR_RED
-    if compat == ExtensionStatus.NOT_INSTALLED:
-        return _CLR_ORANGE
-    return _CLR_GREY
 
 
 # ---------------------------------------------------------------------------
@@ -1293,8 +1692,12 @@ class _VerificationDialog:
         ).pack(side="left")
 
         # Check items
+        any_running = any(
+            status.browser_running.get(b.name, False) for b in status.all_browsers
+        )
         checks = [
-            ("Browser Installed", any(b.installed for b in status.all_browsers) or status.chrome.installed),
+            ("Browser Installed", any(b.installed for b in status.all_browsers)),
+            ("Browser Running", any_running),
             ("Extension Folder", status.folder_exists),
             ("All Files Present", status.file_status.all_present),
             ("Manifest Valid", bool(status.file_status.manifest_data)),
@@ -1335,322 +1738,868 @@ class _VerificationDialog:
 # ---------------------------------------------------------------------------
 
 class _InstallationWizard:
-    """Step-by-step interactive installation wizard dialog."""
+    """Eight-step guided installation wizard for browser extension setup.
+
+    Steps:
+        0. Welcome — introduction and prerequisites.
+        1. Select Browser — choose Chrome, Brave, or Edge.
+        2. Launch Browser — auto-launch the selected browser.
+        3. Open Extensions Page — navigate to the extensions management page.
+        4. Enable Developer Mode — instructions to toggle Developer mode.
+        5. Load Extension Folder — instructions to load the unpacked folder.
+        6. Verification — auto-verify installation with troubleshooting.
+        7. Finish — confirmation and final status.
+
+    The wizard is modal and runs in the calling thread.  Background work
+    (browser launch, page open, verification) uses daemon threads with
+    results marshalled back to the main thread via ``dialog.after``.
+    """
+
+    _TOTAL_STEPS: int = 8
+
+    _STEP_WELCOME: int = 0
+    _STEP_SELECT_BROWSER: int = 1
+    _STEP_LAUNCH: int = 2
+    _STEP_EXTENSIONS_PAGE: int = 3
+    _STEP_DEV_MODE: int = 4
+    _STEP_LOAD_EXTENSION: int = 5
+    _STEP_VERIFICATION: int = 6
+    _STEP_FINISH: int = 7
+
+    _BROWSER_CONFIG: dict[str, dict[str, str]] = {
+        "Chrome": {
+            "icon": "\U0001f310",
+            "extensions_url": "chrome://extensions",
+        },
+        "Brave": {
+            "icon": "\U0001f981",
+            "extensions_url": "brave://extensions",
+        },
+        "Edge": {
+            "icon": "\U0001f537",
+            "extensions_url": "edge://extensions",
+        },
+    }
+
+    _TROUBLESHOOTING_ITEMS: list[tuple[str, str]] = [
+        (
+            "Developer Mode Disabled",
+            "Go to the extensions page and enable the\n"
+            '"Developer mode" toggle in the top-right corner.',
+        ),
+        (
+            "Wrong Folder Selected",
+            "Make sure to select the 'extension' folder:\n"
+            f"  {_EXTENSION_DIR}",
+        ),
+        (
+            "Browser Was Restarted",
+            "If the browser restarted, navigate back to\n"
+            "the extensions page and re-enable Developer mode.",
+        ),
+        (
+            "Extension Was Removed",
+            "The extension may have been removed.  Re-install\n"
+            'it by clicking "Load unpacked" again.',
+        ),
+        (
+            "Profile Mismatch",
+            "Ensure you are using the same browser profile\n"
+            "where the extension was loaded.",
+        ),
+    ]
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     def __init__(self, parent: ctk.CTk, extension_version: str) -> None:
-        self._dialog = ctk.CTkToplevel(parent)
+        self._parent = parent
+        self._extension_version = extension_version
+        self._selected_browser: str = "Chrome"
+        self._current_step: int = self._STEP_WELCOME
+
+        # Per-session state flags (persist across back/forward)
+        self._launched_browser: str | None = None
+        self._opened_page_browser: str | None = None
+        self._verification_done: bool = False
+
+        # Transient async state
+        self._launching: bool = False
+        self._launch_success: bool | None = None
+        self._launch_error: str = ""
+        self._opening_page: bool = False
+        self._verifying: bool = False
+        self._verification_status: ExtensionStatus | None = None
+
+        self._build_dialog()
+        self._show_step(self._STEP_WELCOME)
+        self._dialog.focus_set()
+
+    # ------------------------------------------------------------------
+    # Dialog shell
+    # ------------------------------------------------------------------
+
+    def _build_dialog(self) -> None:
+        self._dialog = ctk.CTkToplevel(self._parent)
         self._dialog.title("Installation Wizard")
-        self._dialog.transient(parent)
+        self._dialog.transient(self._parent)
         self._dialog.grab_set()
         self._dialog.resizable(False, False)
         self._dialog.configure(fg_color="#0f1117")
 
-        w, h = 500, 560
-        pw, ph = parent.winfo_width(), parent.winfo_height()
-        dx, dy = parent.winfo_x(), parent.winfo_y()
-        x = dx + (pw - w) // 2
-        y = dy + (ph - h) // 2
-        self._dialog.geometry(f"{w}x{h}+{x}+{y}")
+        w, h = 560, 640
+        pw, ph = self._parent.winfo_width(), self._parent.winfo_height()
+        dx, dy = self._parent.winfo_x(), self._parent.winfo_y()
+        self._dialog.geometry(f"{w}x{h}+{dx + (pw - w) // 2}+{dy + (ph - h) // 2}")
 
-        self._current_step = 0
-        self._steps = self._define_steps()
-        self._step_labels: list[ctk.CTkLabel] = []
-        self._step_descs: list[ctk.CTkLabel] = []
-        self._step_checks: list[ctk.CTkLabel] = []
-        self._step_frames: list[ctk.CTkFrame] = []
+        # ── Header ──────────────────────────────────────────────────────
+        hdr = ctk.CTkFrame(self._dialog, fg_color="transparent")
+        hdr.pack(fill="x", padx=24, pady=(16, 0))
 
-        self._build_ui(extension_version)
-        self._update_step_ui()
-        self._dialog.focus_set()
-
-    def _define_steps(self) -> list[dict[str, str]]:
-        return [
-            {
-                "title": "Step 1: Open Chrome",
-                "desc": (
-                    "Launch Google Chrome or any Chromium-based browser "
-                    "(Edge, Brave, Opera, etc.)."
-                ),
-                "action_label": "Open Chrome",
-            },
-            {
-                "title": "Step 2: Enable Developer Mode",
-                "desc": (
-                    'Navigate to chrome://extensions in the address bar.\n'
-                    'Enable "Developer mode" using the toggle switch in the\n'
-                    "top-right corner of the extensions page."
-                ),
-                "action_label": "Open chrome://extensions",
-            },
-            {
-                "title": "Step 3: Load Unpacked",
-                "desc": (
-                    'Click the "Load unpacked" button in the top-left corner\n'
-                    "of the extensions page."
-                ),
-                "action_label": "Open Extension Folder",
-            },
-            {
-                "title": "Step 4: Select Extension Folder",
-                "desc": (
-                    f"In the file dialog, navigate to:\n\n"
-                    f"  {_EXTENSION_DIR}\n\n"
-                    "Select this folder and click OK."
-                ),
-                "action_label": "Copy Folder Path",
-            },
-            {
-                "title": "Step 5: Verify Installation",
-                "desc": (
-                    "Verify that MediaForge appears in the extensions list\n"
-                    "with no error messages. The extension icon should be\n"
-                    "visible when you visit YouTube."
-                ),
-                "action_label": "Open Chrome Extensions",
-            },
-            {
-                "title": "Done",
-                "desc": (
-                    "Installation complete! A floating MediaForge button\n"
-                    "will appear below YouTube video titles.\n\n"
-                    "If the button does not appear, reload the YouTube page\n"
-                    "or restart Chrome."
-                ),
-                "action_label": "",
-            },
-        ]
-
-    def _build_ui(self, ext_version: str) -> None:
-        # Header
-        ctk.CTkLabel(
-            self._dialog,
+        self._title_lbl = ctk.CTkLabel(
+            hdr,
             text="Installation Wizard",
-            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
             text_color="#e8eaf0",
-        ).pack(anchor="w", padx=24, pady=(20, 2))
+        )
+        self._title_lbl.pack(side="left")
 
-        ver_text = f"Extension v{ext_version}" if ext_version else "Extension version unknown"
-        ctk.CTkLabel(
-            self._dialog,
-            text=ver_text,
+        self._step_counter_lbl = ctk.CTkLabel(
+            hdr,
+            text="Step 1 of 8",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color="#8b92a8",
-        ).pack(anchor="w", padx=24, pady=(0, 10))
+        )
+        self._step_counter_lbl.pack(side="right")
 
-        # Progress indicator
-        progress_frame = ctk.CTkFrame(self._dialog, fg_color="transparent")
-        progress_frame.pack(fill="x", padx=24, pady=(0, 10))
-
+        # ── Progress bars ───────────────────────────────────────────────
+        pf = ctk.CTkFrame(self._dialog, fg_color="transparent")
+        pf.pack(fill="x", padx=24, pady=(8, 12))
         self._progress_bars: list[ctk.CTkFrame] = []
-        total = len(self._steps)
-        for i in range(total):
-            bar = ctk.CTkFrame(
-                progress_frame,
-                height=4,
-                corner_radius=2,
-                fg_color="#2e3347",
-            )
+        for _ in range(self._TOTAL_STEPS):
+            bar = ctk.CTkFrame(pf, height=4, corner_radius=2, fg_color="#2e3347")
             bar.pack(side="left", expand=True, fill="x", padx=2)
             self._progress_bars.append(bar)
 
-        # Steps container
-        self._steps_container = ctk.CTkFrame(self._dialog, fg_color="transparent")
-        self._steps_container.pack(fill="both", expand=True, padx=24, pady=(0, 8))
+        # ── Separator ───────────────────────────────────────────────────
+        ctk.CTkFrame(self._dialog, height=1, fg_color="#2e3347").pack(fill="x", padx=24)
 
-        for idx, step in enumerate(self._steps):
-            frame = ctk.CTkFrame(self._steps_container, fg_color="transparent")
+        # ── Content area (rebuilt per step) ─────────────────────────────
+        self._content = ctk.CTkFrame(self._dialog, fg_color="transparent")
+        self._content.pack(fill="both", expand=True, padx=24, pady=(12, 0))
 
-            # Step number + title
-            title_row = ctk.CTkFrame(frame, fg_color="transparent")
-            title_row.pack(fill="x", pady=(0, 4))
-            check_lbl = ctk.CTkLabel(
-                title_row,
-                text="\u25CB",
-                font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
-                text_color="#8b92a8",
-                width=24,
-            )
-            check_lbl.pack(side="left")
-            title_lbl = ctk.CTkLabel(
-                title_row,
-                text=step["title"],
-                font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
-                text_color="#e8eaf0",
-            )
-            title_lbl.pack(side="left")
+        # ── Navigation bar ──────────────────────────────────────────────
+        nav = ctk.CTkFrame(self._dialog, fg_color="transparent")
+        nav.pack(fill="x", padx=24, pady=(12, 16))
 
-            # Description
-            desc_lbl = ctk.CTkLabel(
-                frame,
-                text=step["desc"],
-                font=ctk.CTkFont(family="Segoe UI", size=11),
-                text_color="#8b92a8",
-                wraplength=420,
-                justify="left",
-                anchor="w",
-            )
-            desc_lbl.pack(fill="x", pady=(0, 6))
-
-            self._step_frames.append(frame)
-            self._step_checks.append(check_lbl)
-            self._step_labels.append(title_lbl)
-            self._step_descs.append(desc_lbl)
-
-        # Action button
-        self._action_btn = ctk.CTkButton(
-            self._dialog,
-            text="",
-            width=200,
-            height=34,
-            corner_radius=8,
-            fg_color="#4f8ef7",
-            hover_color="#3a76e8",
-            text_color="#ffffff",
-            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
-            command=self._on_action,
+        self._cancel_btn = ctk.CTkButton(
+            nav, text="Cancel", width=80, height=34, corner_radius=8,
+            fg_color="#20232f", hover_color="#ef4444", text_color="#e8eaf0",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            command=self._on_cancel,
         )
-        self._action_btn.pack(pady=(0, 6))
-
-        # Navigation row
-        nav_frame = ctk.CTkFrame(self._dialog, fg_color="transparent")
-        nav_frame.pack(fill="x", padx=24, pady=(0, 16))
+        self._cancel_btn.pack(side="left")
 
         self._prev_btn = ctk.CTkButton(
-            nav_frame,
-            text="\u25C0 Back",
-            width=100,
-            height=30,
-            corner_radius=8,
-            fg_color="#20232f",
-            hover_color="#2e3347",
-            text_color="#e8eaf0",
+            nav, text="\u25c0 Previous", width=100, height=34, corner_radius=8,
+            fg_color="#20232f", hover_color="#2e3347", text_color="#e8eaf0",
             font=ctk.CTkFont(family="Segoe UI", size=11),
             command=self._on_prev,
         )
-        self._prev_btn.pack(side="left")
+        self._prev_btn.pack(side="left", padx=(8, 0))
 
         self._next_btn = ctk.CTkButton(
-            nav_frame,
-            text="Next \u25B6",
-            width=100,
-            height=30,
-            corner_radius=8,
-            fg_color="#4f8ef7",
-            hover_color="#3a76e8",
-            text_color="#ffffff",
+            nav, text="Next \u25b6", width=100, height=34, corner_radius=8,
+            fg_color="#4f8ef7", hover_color="#3a76e8", text_color="#ffffff",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             command=self._on_next,
         )
         self._next_btn.pack(side="right")
 
-        self._close_btn = ctk.CTkButton(
-            nav_frame,
-            text="Close",
-            width=80,
-            height=30,
-            corner_radius=8,
-            fg_color="#20232f",
-            hover_color="#2e3347",
-            text_color="#e8eaf0",
-            font=ctk.CTkFont(family="Segoe UI", size=11),
-            command=self._dialog.destroy,
+        self._finish_btn = ctk.CTkButton(
+            nav, text="Finish \u2714", width=100, height=34, corner_radius=8,
+            fg_color="#22c55e", hover_color="#16a34a", text_color="#ffffff",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            command=self._on_finish,
         )
 
-    def _update_step_ui(self) -> None:
-        """Show/hide frames and update progress indicators."""
-        total = len(self._steps)
-        for idx, frame in enumerate(self._step_frames):
-            if idx == self._current_step:
-                frame.pack(fill="x", pady=(0, 4))
-            else:
-                frame.pack_forget()
+    # ------------------------------------------------------------------
+    # Step dispatcher
+    # ------------------------------------------------------------------
 
-        # Update progress bars
-        for idx, bar in enumerate(self._progress_bars):
-            if idx < self._current_step:
+    def _show_step(self, step: int) -> None:
+        self._current_step = step
+
+        for child in self._content.winfo_children():
+            child.destroy()
+
+        builders: dict[int, Callable[[], None]] = {
+            self._STEP_WELCOME: self._build_welcome,
+            self._STEP_SELECT_BROWSER: self._build_select_browser,
+            self._STEP_LAUNCH: self._build_launch,
+            self._STEP_EXTENSIONS_PAGE: self._build_extensions_page,
+            self._STEP_DEV_MODE: self._build_dev_mode,
+            self._STEP_LOAD_EXTENSION: self._build_load_extension,
+            self._STEP_VERIFICATION: self._build_verification,
+            self._STEP_FINISH: self._build_finish,
+        }
+        builders[step]()
+
+        self._step_counter_lbl.configure(text=f"Step {step + 1} of {self._TOTAL_STEPS}")
+
+        for i, bar in enumerate(self._progress_bars):
+            if i < step:
                 bar.configure(fg_color="#22c55e")
-            elif idx == self._current_step:
+            elif i == step:
                 bar.configure(fg_color="#4f8ef7")
             else:
                 bar.configure(fg_color="#2e3347")
 
-        # Update step check icons
-        for idx, check in enumerate(self._step_checks):
-            if idx < self._current_step:
-                check.configure(text="\u2714", text_color="#22c55e")
-            elif idx == self._current_step:
-                check.configure(text="\u25CF", text_color="#4f8ef7")
-            else:
-                check.configure(text="\u25CB", text_color="#8b92a8")
+        self._prev_btn.configure(state="normal" if step > self._STEP_WELCOME else "disabled")
 
-        # Navigation buttons
-        self._prev_btn.configure(state="normal" if self._current_step > 0 else "disabled")
+        self._next_btn.pack_forget()
+        self._finish_btn.pack_forget()
 
-        is_last = self._current_step >= total - 1
-        if is_last:
-            self._next_btn.pack_forget()
-            self._close_btn.pack(side="right")
+        if step == self._STEP_FINISH:
+            self._finish_btn.pack(side="right")
+        elif step in (self._STEP_LAUNCH, self._STEP_EXTENSIONS_PAGE, self._STEP_VERIFICATION):
+            pass  # inline Next buttons in content area handle these steps
         else:
-            self._close_btn.pack_forget()
             self._next_btn.pack(side="right")
 
-        # Action button
-        step = self._steps[self._current_step]
-        action_label = step.get("action_label", "")
-        if action_label:
-            self._action_btn.configure(text=action_label, state="normal")
-            if not self._action_btn.winfo_manager():
-                self._action_btn.pack(pady=(0, 6))
+    # ------------------------------------------------------------------
+    # Step 0 — Welcome
+    # ------------------------------------------------------------------
+
+    def _build_welcome(self) -> None:
+        f = self._content
+
+        ctk.CTkLabel(f, text="\U0001f9e9", font=ctk.CTkFont(size=52)).pack(pady=(20, 4))
+        ctk.CTkLabel(
+            f, text="Welcome to the Installation Wizard",
+            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            text_color="#e8eaf0",
+        ).pack(pady=(0, 4))
+
+        if self._extension_version:
+            ctk.CTkLabel(
+                f, text=f"Extension v{self._extension_version}",
+                font=ctk.CTkFont(family="Segoe UI", size=11),
+                text_color="#8b92a8",
+            ).pack(pady=(0, 14))
+
+        ctk.CTkLabel(
+            f,
+            text="This wizard will guide you through installing\nthe MediaForge browser extension step by step.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+            justify="center",
+        ).pack(pady=(0, 14))
+
+        box = ctk.CTkFrame(f, fg_color="#1a1d27", corner_radius=10)
+        box.pack(fill="x", padx=20, pady=(0, 8))
+        ctk.CTkLabel(
+            box,
+            text=(
+                "You will need:\n\n"
+                "  \u2022  A Chromium-based browser (Chrome, Brave, or Edge)\n"
+                "  \u2022  About 2 minutes of your time"
+            ),
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", padx=16, pady=14)
+
+    # ------------------------------------------------------------------
+    # Step 1 — Select Browser
+    # ------------------------------------------------------------------
+
+    def _build_select_browser(self) -> None:
+        f = self._content
+        ctk.CTkLabel(
+            f, text="Select Your Browser",
+            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            text_color="#e8eaf0",
+        ).pack(pady=(16, 4))
+        ctk.CTkLabel(
+            f,
+            text="Choose the browser where you want to install the extension.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+        ).pack(pady=(0, 14))
+
+        for name, cfg in self._BROWSER_CONFIG.items():
+            self._make_browser_card(f, name, cfg)
+
+    def _make_browser_card(self, parent: ctk.CTkFrame, name: str, cfg: dict) -> None:
+        selected = name == self._selected_browser
+        border = "#4f8ef7" if selected else "#2e3347"
+        bg = "#1e2233" if selected else "#1a1d27"
+
+        card = ctk.CTkFrame(
+            parent, fg_color=bg, border_color=border, border_width=2,
+            corner_radius=10,
+        )
+        card.pack(fill="x", padx=12, pady=4)
+
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="x", padx=14, pady=12)
+
+        icon_lbl = ctk.CTkLabel(inner, text=cfg["icon"], font=ctk.CTkFont(size=26))
+        icon_lbl.pack(side="left", padx=(0, 12))
+
+        name_lbl = ctk.CTkLabel(
+            inner, text=name,
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color="#e8eaf0",
+        )
+        name_lbl.pack(side="left")
+
+        if selected:
+            ctk.CTkLabel(
+                inner, text="\u2714 Selected",
+                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                text_color="#4f8ef7",
+            ).pack(side="right")
+
+        for widget in (card, inner, icon_lbl, name_lbl):
+            widget.bind("<Button-1>", lambda _e, n=name: self._select_browser(n))
+
+    def _select_browser(self, name: str) -> None:
+        if self._selected_browser == name:
+            return
+        self._selected_browser = name
+        self._show_step(self._STEP_SELECT_BROWSER)
+
+    # ------------------------------------------------------------------
+    # Step 2 — Launch Browser
+    # ------------------------------------------------------------------
+
+    def _build_launch(self) -> None:
+        f = self._content
+        cfg = self._BROWSER_CONFIG[self._selected_browser]
+
+        ctk.CTkLabel(f, text=cfg["icon"], font=ctk.CTkFont(size=48)).pack(pady=(16, 4))
+        ctk.CTkLabel(
+            f, text=f"Launching {self._selected_browser}",
+            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            text_color="#e8eaf0",
+        ).pack(pady=(0, 10))
+
+        if self._launched_browser == self._selected_browser and self._launch_success:
+            ctk.CTkLabel(
+                f, text=f"\u2714  {self._selected_browser} launched successfully",
+                font=ctk.CTkFont(family="Segoe UI", size=13),
+                text_color="#22c55e",
+            ).pack(pady=(0, 6))
+            self._show_next_in_content()
+        elif self._launching:
+            ctk.CTkLabel(
+                f, text=f"Launching {self._selected_browser}\u2026",
+                font=ctk.CTkFont(family="Segoe UI", size=13),
+                text_color="#f59e0b",
+            ).pack(pady=(0, 6))
+            ctk.CTkLabel(f, text="\u23f3", font=ctk.CTkFont(size=36)).pack()
+        elif self._launch_success is False:
+            ctk.CTkLabel(
+                f, text=f"\u2718  Failed to launch {self._selected_browser}",
+                font=ctk.CTkFont(family="Segoe UI", size=13),
+                text_color="#ef4444",
+            ).pack(pady=(0, 6))
+            if self._launch_error:
+                ctk.CTkLabel(
+                    f, text=self._launch_error,
+                    font=ctk.CTkFont(family="Segoe UI", size=11),
+                    text_color="#8b92a8",
+                    wraplength=420,
+                ).pack(pady=(0, 10))
+            ctk.CTkButton(
+                f, text="Retry", width=120, height=30, corner_radius=8,
+                fg_color="#4f8ef7", hover_color="#3a76e8", text_color="#ffffff",
+                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                command=self._retry_launch,
+            ).pack(pady=(0, 6))
         else:
-            if self._action_btn.winfo_manager():
-                self._action_btn.pack_forget()
+            self._do_launch_browser()
 
-    def _on_next(self) -> None:
-        if self._current_step < len(self._steps) - 1:
-            self._current_step += 1
-            self._update_step_ui()
+    def _do_launch_browser(self) -> None:
+        if self._launching:
+            return
+        self._launching = True
 
-    def _on_prev(self) -> None:
-        if self._current_step > 0:
-            self._current_step -= 1
-            self._update_step_ui()
+        browser_name = self._selected_browser
+        ext_url = self._BROWSER_CONFIG[browser_name]["extensions_url"]
 
-    def _on_action(self) -> None:
-        """Execute the action associated with the current step."""
-        step = self._steps[self._current_step]
-        action = step.get("action_label", "")
+        def _worker() -> None:
+            result: LaunchResult | None = None
+            try:
+                result = BrowserLauncher.launch_browser(browser_name, url=ext_url)
+            except Exception as exc:
+                self._launch_error = str(exc)
+            finally:
+                self._launching = False
+                if result is not None:
+                    self._launch_success = result.success
+                    if not result.success:
+                        self._launch_error = (
+                            result.error_message
+                            or (result.error_code.value if result.error_code else "Unknown error")
+                        )
+                if result is None:
+                    self._launch_success = False
+                if self._launch_success:
+                    self._launched_browser = browser_name
+                try:
+                    if self._dialog.winfo_exists():
+                        self._dialog.after(0, lambda: self._show_step(self._STEP_LAUNCH))
+                except Exception:
+                    pass
 
-        try:
-            if "Chrome" in action and "extension" not in action.lower():
-                # Open Chrome
-                webbrowser.open("https://www.google.com/chrome/")
-            elif "chrome://extensions" in action:
-                webbrowser.open("chrome://extensions")
-            elif "Extension Folder" in action:
-                self._open_folder_action()
-            elif "Copy Folder Path" in action:
-                self._copy_path_action()
-            elif "Chrome Extensions" in action:
-                webbrowser.open("chrome://extensions")
-        except Exception:
-            pass
+        threading.Thread(target=_worker, daemon=True, name="WizardLaunch").start()
+        ctk.CTkLabel(
+            self._content, text=f"Launching {self._selected_browser}\u2026",
+            font=ctk.CTkFont(family="Segoe UI", size=13),
+            text_color="#f59e0b",
+        ).pack(pady=(0, 6))
+        ctk.CTkLabel(self._content, text="\u23f3", font=ctk.CTkFont(size=36)).pack()
 
-    def _open_folder_action(self) -> None:
-        try:
-            if os.path.isdir(_EXTENSION_DIR):
-                if sys.platform == "win32":
-                    os.startfile(_EXTENSION_DIR)
-                elif sys.platform == "darwin":
-                    subprocess.Popen(["open", _EXTENSION_DIR])
+    def _retry_launch(self) -> None:
+        self._launch_success = None
+        self._launch_error = ""
+        self._show_step(self._STEP_LAUNCH)
+
+    # ------------------------------------------------------------------
+    # Step 3 — Open Extensions Page
+    # ------------------------------------------------------------------
+
+    def _build_extensions_page(self) -> None:
+        f = self._content
+        cfg = self._BROWSER_CONFIG[self._selected_browser]
+
+        ctk.CTkLabel(f, text="\U0001f517", font=ctk.CTkFont(size=48)).pack(pady=(16, 4))
+        ctk.CTkLabel(
+            f, text="Open Extensions Page",
+            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            text_color="#e8eaf0",
+        ).pack(pady=(0, 10))
+
+        ctk.CTkLabel(
+            f,
+            text=f"The {self._selected_browser} extensions management page\nwill be opened for you automatically.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+            justify="center",
+        ).pack(pady=(0, 14))
+
+        url_box = ctk.CTkFrame(f, fg_color="#1a1d27", corner_radius=8)
+        url_box.pack(fill="x", padx=20, pady=(0, 14))
+        ctk.CTkLabel(
+            url_box, text=cfg["extensions_url"],
+            font=ctk.CTkFont(family="Consolas", size=13, weight="bold"),
+            text_color="#4f8ef7",
+        ).pack(padx=16, pady=10)
+
+        if self._opened_page_browser == self._selected_browser:
+            ctk.CTkLabel(
+                f, text="\u2714  Page opened",
+                font=ctk.CTkFont(family="Segoe UI", size=12),
+                text_color="#22c55e",
+            ).pack(pady=(0, 4))
+            self._show_next_in_content()
+        elif not self._opening_page:
+            self._do_open_extensions_page()
+        else:
+            ctk.CTkLabel(
+                f, text="Opening page\u2026",
+                font=ctk.CTkFont(family="Segoe UI", size=12),
+                text_color="#f59e0b",
+            ).pack(pady=(0, 4))
+
+    def _do_open_extensions_page(self) -> None:
+        if self._opening_page:
+            return
+        self._opening_page = True
+        browser_name = self._selected_browser
+        url = self._BROWSER_CONFIG[browser_name]["extensions_url"]
+
+        def _worker() -> None:
+            try:
+                result = BrowserLauncher.launch_browser(browser_name, url=url)
+                if result.success:
+                    self._opened_page_browser = self._selected_browser
                 else:
-                    subprocess.Popen(["xdg-open", _EXTENSION_DIR])
-        except Exception:
-            pass
+                    self._opened_page_browser = None
+            except Exception:
+                self._opened_page_browser = None
+            finally:
+                self._opening_page = False
+                try:
+                    if self._dialog.winfo_exists():
+                        self._dialog.after(0, lambda: self._show_step(self._STEP_EXTENSIONS_PAGE))
+                except Exception:
+                    pass
 
-    def _copy_path_action(self) -> None:
+        threading.Thread(target=_worker, daemon=True, name="WizardOpenPage").start()
+        ctk.CTkLabel(
+            self._content, text="Opening page\u2026",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#f59e0b",
+        ).pack(pady=(0, 4))
+
+    # ------------------------------------------------------------------
+    # Step 4 — Enable Developer Mode
+    # ------------------------------------------------------------------
+
+    def _build_dev_mode(self) -> None:
+        f = self._content
+
+        ctk.CTkLabel(f, text="\U0001f527", font=ctk.CTkFont(size=48)).pack(pady=(16, 4))
+        ctk.CTkLabel(
+            f, text="Enable Developer Mode",
+            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            text_color="#e8eaf0",
+        ).pack(pady=(0, 10))
+
+        ctk.CTkLabel(
+            f,
+            text=(
+                f"1.  Look at the top-right corner of the\n"
+                f"    {self._selected_browser} extensions page.\n\n"
+                f'2.  Find the "Developer mode" toggle switch.\n\n'
+                f"3.  Click the toggle to enable it."
+            ),
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", padx=24, pady=(0, 14))
+
+        note = ctk.CTkFrame(f, fg_color="#241e12", corner_radius=8)
+        note.pack(fill="x", padx=20)
+        ctk.CTkLabel(
+            note,
+            text="\u26a0  Developer mode is required to load unpacked extensions.",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#f59e0b",
+        ).pack(padx=14, pady=10, anchor="w")
+
+    # ------------------------------------------------------------------
+    # Step 5 — Load Extension Folder
+    # ------------------------------------------------------------------
+
+    def _build_load_extension(self) -> None:
+        f = self._content
+
+        ctk.CTkLabel(f, text="\U0001f4c2", font=ctk.CTkFont(size=48)).pack(pady=(16, 4))
+        ctk.CTkLabel(
+            f, text="Load Extension Folder",
+            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            text_color="#e8eaf0",
+        ).pack(pady=(0, 10))
+
+        ctk.CTkLabel(
+            f,
+            text=(
+                f'1.  Click the "Load unpacked" button in the\n'
+                f"    top-left of the extensions page.\n\n"
+                f"2.  In the file dialog, navigate to:"
+            ),
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", padx=24, pady=(0, 4))
+
+        path_box = ctk.CTkFrame(f, fg_color="#1a1d27", corner_radius=8)
+        path_box.pack(fill="x", padx=20, pady=(0, 4))
+        ctk.CTkLabel(
+            path_box, text=_EXTENSION_DIR,
+            font=ctk.CTkFont(family="Consolas", size=11),
+            text_color="#4f8ef7",
+            wraplength=460,
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=8)
+
+        ctk.CTkLabel(
+            f, text='3.  Select this folder and click "Open".',
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", padx=24, pady=(0, 12))
+
+        ctk.CTkButton(
+            f, text="Copy Folder Path to Clipboard", width=200, height=30,
+            corner_radius=8, fg_color="#20232f", hover_color="#2e3347",
+            text_color="#e8eaf0",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            command=self._copy_path,
+        ).pack(pady=(0, 6))
+
+    def _copy_path(self) -> None:
         try:
             self._dialog.clipboard_clear()
             self._dialog.clipboard_append(_EXTENSION_DIR)
             self._dialog.update()
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Step 6 — Verification
+    # ------------------------------------------------------------------
+
+    def _build_verification(self) -> None:
+        f = self._content
+
+        ctk.CTkLabel(f, text="\U0001f50d", font=ctk.CTkFont(size=48)).pack(pady=(16, 4))
+        ctk.CTkLabel(
+            f, text="Verify Installation",
+            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            text_color="#e8eaf0",
+        ).pack(pady=(0, 10))
+
+        if self._verifying:
+            ctk.CTkLabel(
+                f, text="Verifying installation\u2026",
+                font=ctk.CTkFont(family="Segoe UI", size=13),
+                text_color="#f59e0b",
+            ).pack(pady=(0, 6))
+            ctk.CTkLabel(f, text="\u23f3", font=ctk.CTkFont(size=36)).pack()
+            return
+
+        if self._verification_status is None:
+            self._start_verification()
+            ctk.CTkLabel(
+                f, text="Starting verification\u2026",
+                font=ctk.CTkFont(family="Segoe UI", size=13),
+                text_color="#f59e0b",
+            ).pack(pady=(0, 6))
+            ctk.CTkLabel(f, text="\u23f3", font=ctk.CTkFont(size=36)).pack()
+            return
+
+        status = self._verification_status
+        self._verification_done = True
+        overall_ready, _ = _compute_overall_ready(status)
+
+        banner_bg = "#16a34a" if overall_ready == "Yes" else "#922b21"
+        banner = ctk.CTkFrame(f, fg_color=banner_bg, corner_radius=8)
+        banner.pack(fill="x", padx=8, pady=(0, 10))
+        b_inner = ctk.CTkFrame(banner, fg_color="transparent")
+        b_inner.pack(fill="x", padx=16, pady=10)
+        icon_text = "\u2714" if overall_ready == "Yes" else "\u2718"
+        ctk.CTkLabel(
+            b_inner, text=icon_text,
+            font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"),
+            text_color="#ffffff",
+        ).pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(
+            b_inner, text=f"Overall: {overall_ready}",
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            text_color="#ffffff",
+        ).pack(side="left")
+
+        any_running = any(
+            status.browser_running.get(b.name, False) for b in status.all_browsers
+        )
+        checks = [
+            ("Browser Installed", any(b.installed for b in status.all_browsers)),
+            ("Browser Running", any_running),
+            ("Extension Folder", status.folder_exists),
+            ("All Files Present", status.file_status.all_present),
+            ("Manifest Valid", bool(status.file_status.manifest_data)),
+            ("Versions Match", status.compatibility == ExtensionStatus.COMPATIBLE),
+        ]
+
+        cf = ctk.CTkFrame(f, fg_color="transparent")
+        cf.pack(fill="x", padx=8, pady=(0, 10))
+        for label, passed in checks:
+            row = ctk.CTkFrame(cf, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            icon = "\u2714" if passed else "\u2718"
+            color = _CLR_GREEN if passed else _CLR_RED
+            ctk.CTkLabel(
+                row, text=f"  {icon}  {label}",
+                font=ctk.CTkFont(family="Segoe UI", size=12),
+                text_color=color,
+            ).pack(side="left")
+
+        if overall_ready != "Yes":
+            self._show_troubleshooting(f)
+
+        btn_row = ctk.CTkFrame(f, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(6, 0))
+        ctk.CTkButton(
+            btn_row, text="Re-verify", width=100, height=30, corner_radius=8,
+            fg_color="#20232f", hover_color="#2e3347", text_color="#e8eaf0",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            command=self._retry_verification,
+        ).pack(side="left")
+        self._show_next_in_content(btn_row)
+
+    def _start_verification(self) -> None:
+        if self._verifying:
+            return
+        self._verifying = True
+
+        def _worker() -> None:
+            try:
+                status = run_full_detection()
+                self._verification_status = status
+            except Exception:
+                self._verification_status = ExtensionStatus()
+            finally:
+                self._verifying = False
+                try:
+                    if self._dialog.winfo_exists():
+                        self._dialog.after(0, lambda: self._show_step(self._STEP_VERIFICATION))
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True, name="WizardVerify").start()
+
+    def _retry_verification(self) -> None:
+        self._verification_done = False
+        self._verification_status = None
+        self._show_step(self._STEP_VERIFICATION)
+
+    def _show_troubleshooting(self, parent: ctk.CTkFrame) -> None:
+        ctk.CTkLabel(
+            parent, text="\u26a0  Troubleshooting",
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            text_color="#f59e0b",
+        ).pack(anchor="w", padx=8, pady=(6, 4))
+
+        for title, desc in self._TROUBLESHOOTING_ITEMS:
+            tip = ctk.CTkFrame(parent, fg_color="#1e2233", corner_radius=6)
+            tip.pack(fill="x", padx=8, pady=2)
+            inner = ctk.CTkFrame(tip, fg_color="transparent")
+            inner.pack(fill="x", padx=10, pady=6)
+            ctk.CTkLabel(
+                inner, text=f"\u2022 {title}",
+                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                text_color="#e8eaf0",
+            ).pack(anchor="w")
+            ctk.CTkLabel(
+                inner, text=desc,
+                font=ctk.CTkFont(family="Segoe UI", size=10),
+                text_color="#8b92a8",
+                wraplength=440,
+                justify="left",
+                anchor="w",
+            ).pack(anchor="w")
+
+    # ------------------------------------------------------------------
+    # Step 7 — Finish
+    # ------------------------------------------------------------------
+
+    def _build_finish(self) -> None:
+        f = self._content
+
+        ctk.CTkLabel(f, text="\u2705", font=ctk.CTkFont(size=52)).pack(pady=(20, 4))
+        ctk.CTkLabel(
+            f, text="Installation Complete",
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+            text_color="#22c55e",
+        ).pack(pady=(0, 6))
+
+        ctk.CTkLabel(
+            f,
+            text="The MediaForge extension is ready to use.",
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color="#8b92a8",
+        ).pack(pady=(0, 14))
+
+        info_box = ctk.CTkFrame(f, fg_color="#1a1d27", corner_radius=10)
+        info_box.pack(fill="x", padx=20, pady=(0, 10))
+        ctk.CTkLabel(
+            info_box,
+            text=(
+                "A floating MediaForge button will appear below\n"
+                "YouTube video titles when the extension is active.\n\n"
+                "If the button does not appear, reload the YouTube page\n"
+                "or restart the browser."
+            ),
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", padx=16, pady=12)
+
+        self._finish_status_lbl = ctk.CTkLabel(
+            f, text="Running final check\u2026",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#f59e0b",
+        )
+        self._finish_status_lbl.pack(pady=(0, 6))
+
+        self._run_final_check()
+
+    def _run_final_check(self) -> None:
+        def _worker() -> None:
+            try:
+                status = run_full_detection()
+            except Exception:
+                status = None
+            try:
+                if self._dialog.winfo_exists():
+                    self._dialog.after(0, lambda: self._apply_final_status(status))
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True, name="WizardFinalCheck").start()
+
+    def _apply_final_status(self, status: ExtensionStatus | None) -> None:
+        if not self._dialog.winfo_exists() or status is None:
+            return
+        overall_ready, _ = _compute_overall_ready(status)
+        if overall_ready == "Yes":
+            self._finish_status_lbl.configure(
+                text="\u2714  Extension is ready to use!",
+                text_color="#22c55e",
+            )
+        else:
+            self._finish_status_lbl.configure(
+                text="\u26a0  Extension may need attention \u2014 run Verify on the main page.",
+                text_color="#f59e0b",
+            )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _show_next_in_content(self, after_widget: ctk.CTkFrame | None = None) -> None:
+        """Place a 'Next' button inside the content area for inline flow."""
+        target = after_widget or self._content
+        ctk.CTkButton(
+            target, text="Next \u25b6", width=100, height=30, corner_radius=8,
+            fg_color="#4f8ef7", hover_color="#3a76e8", text_color="#ffffff",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            command=self._on_next,
+        ).pack(pady=(6, 0))
+
+    # ------------------------------------------------------------------
+    # Navigation
+    # ------------------------------------------------------------------
+
+    def _on_next(self) -> None:
+        if self._current_step < self._TOTAL_STEPS - 1:
+            self._show_step(self._current_step + 1)
+
+    def _on_prev(self) -> None:
+        if self._current_step > self._STEP_WELCOME:
+            self._show_step(self._current_step - 1)
+
+    def _on_cancel(self) -> None:
+        self._verifying = False
+        self._launching = False
+        self._opening_page = False
+        self._dialog.destroy()
+
+    def _on_finish(self) -> None:
+        self._verifying = False
+        self._launching = False
+        self._opening_page = False
+        self._dialog.destroy()

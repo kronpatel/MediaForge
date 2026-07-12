@@ -96,9 +96,6 @@ class TestKeyboardSafety(unittest.TestCase):
 
     def test_shortcuts_return_none_when_queue_inactive(self):
         """All shortcuts must check _active_queue_page() and return early."""
-        import inspect
-        import sys
-
         base = os.path.dirname(os.path.abspath(__file__))
         ui_path = os.path.join(base, "ui.py")
         with open(ui_path, encoding="utf-8") as f:
