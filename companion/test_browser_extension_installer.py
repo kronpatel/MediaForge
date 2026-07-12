@@ -643,13 +643,17 @@ class TestLaunchAll(unittest.TestCase):
     def tearDown(self):
         BrowserRegistry.reset()
 
-    def test_returns_list_per_browser(self):
+    @patch("browser.browser_extension_installer.BrowserLauncher.detect")
+    def test_returns_list_per_browser(self, mock_detect):
+        mock_detect.return_value = MagicMock(installed=True, path="C:\\fake\\browser.exe")
         results = ExtensionInstallationEngine.launch_all(
             extension_dir="C:\\nonexistent"
         )
         self.assertEqual(len(results), 3)
 
-    def test_all_fail_no_extension(self):
+    @patch("browser.browser_extension_installer.BrowserLauncher.detect")
+    def test_all_fail_no_extension(self, mock_detect):
+        mock_detect.return_value = MagicMock(installed=True, path="C:\\fake\\browser.exe")
         results = ExtensionInstallationEngine.launch_all(
             extension_dir="C:\\nonexistent"
         )
