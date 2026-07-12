@@ -56,7 +56,8 @@ def setUpModule():
     sys.modules["logger"] = MagicMock()
     sys.modules["updater"] = MagicMock()
 
-    # Import the target module
+    # Force reload of extension_manager to use mock dependencies
+    sys.modules.pop("extension_manager", None)
     import extension_manager
     em = extension_manager
 

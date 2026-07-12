@@ -45,6 +45,8 @@ sys.modules["backend_manager"] = MagicMock()
 sys.modules["notifications"] = MagicMock()
 
 try:
+    # Force reload of settings_panel to use mock dependencies
+    sys.modules.pop("settings_panel", None)
     from settings_panel import (
         MSG_INVALID_DOWNLOAD_FOLDER,
         MSG_INVALID_BACKEND_URL,

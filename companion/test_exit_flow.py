@@ -68,6 +68,8 @@ for _mod_name, _mod_stub in (
     sys.modules[_mod_name] = _mod_stub
 
 try:
+    # Force reload of ui to use mock dependencies
+    sys.modules.pop("ui", None)
     from ui import CompanionWindow
 finally:
     for _mod_name, _orig in _saved_modules.items():

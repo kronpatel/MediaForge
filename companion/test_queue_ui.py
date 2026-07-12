@@ -109,6 +109,8 @@ sys.modules["base_page"] = _mock_base
 sys.modules["customtkinter"] = ctk_mock
 
 try:
+    # Force reload of queue_panel to use mock dependencies
+    sys.modules.pop("queue_panel", None)
     from queue_panel import (
         QueuePage, QueueRow,
         _compute_row_hash,
