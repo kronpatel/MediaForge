@@ -30,29 +30,38 @@ _COMPANION = os.path.dirname(os.path.abspath(__file__))
 if _COMPANION not in sys.path:
     sys.path.insert(0, _COMPANION)
 
-# Save original modules before patching sys.modules
+from browser.browser_info import BrowserInfo
+from browser.browser_registry import BrowserRegistry
+from browser.browser_extension_installer import (
+    ExtensionInstallationEngine,
+    ExtensionErrorCode,
+)
+
+# Globals to share imported module and saved modules state
+em = None
 _saved_modules = {}
-for _mod_name in ("customtkinter", "base_page", "notifications", "backend_manager", "logger", "updater"):
-    _saved_modules[_mod_name] = sys.modules.get(_mod_name)
 
-# Mock them
-_ctk_mock = MagicMock()
-sys.modules["customtkinter"] = _ctk_mock
-sys.modules["base_page"] = MagicMock()
-sys.modules["notifications"] = MagicMock()
-sys.modules["backend_manager"] = MagicMock()
-sys.modules["logger"] = MagicMock()
-sys.modules["updater"] = MagicMock()
+def setUpModule():
+    global em, _saved_modules
+    # Save original modules before patching sys.modules
+    for _mod_name in ("customtkinter", "base_page", "notifications", "backend_manager", "logger", "updater", "extension_manager"):
+        _saved_modules[_mod_name] = sys.modules.get(_mod_name)
 
-try:
-    from browser.browser_info import BrowserInfo
-    from browser.browser_registry import BrowserRegistry
-    from browser.browser_extension_installer import (
-        ExtensionInstallationEngine,
-        ExtensionErrorCode,
-    )
-    import extension_manager as em
-finally:
+    # Mock them
+    _ctk_mock = MagicMock()
+    sys.modules["customtkinter"] = _ctk_mock
+    sys.modules["base_page"] = MagicMock()
+    sys.modules["notifications"] = MagicMock()
+    sys.modules["backend_manager"] = MagicMock()
+    sys.modules["logger"] = MagicMock()
+    sys.modules["updater"] = MagicMock()
+
+    # Import the target module
+    import extension_manager
+    em = extension_manager
+
+def tearDownModule():
+    global _saved_modules
     # Restore original modules to prevent test pollution
     for _mod_name, _orig in _saved_modules.items():
         if _orig is not None:

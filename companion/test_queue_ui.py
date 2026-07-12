@@ -101,9 +101,12 @@ ctk_mock.CTkInputDialog = MagicMock(return_value=MagicMock())
 ctk_mock.CTkToplevel = _FakeCTkFrame
 
 _saved_modules: dict[str, object] = {}
-for _mod_name in ("base_page", "customtkinter"):
+# Save modules that will be imported under mock context
+for _mod_name in ("base_page", "customtkinter", "queue_panel"):
     _saved_modules[_mod_name] = sys.modules.get(_mod_name)
-    sys.modules[_mod_name] = {"base_page": _mock_base, "customtkinter": ctk_mock}[_mod_name]
+
+sys.modules["base_page"] = _mock_base
+sys.modules["customtkinter"] = ctk_mock
 
 try:
     from queue_panel import (

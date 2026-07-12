@@ -45,6 +45,10 @@ class _FakeCTk:
 ctk_mock.CTk = _FakeCTk
 
 _saved_modules: dict[str, object] = {}
+# Save modules that will be imported under mock context
+for _mod_name in ("ui", "extension_manager", "extension_manager_page"):
+    _saved_modules[_mod_name] = sys.modules.get(_mod_name)
+
 for _mod_name, _mod_stub in (
     ("base_page", _mock_base_mod),
     ("customtkinter", ctk_mock),

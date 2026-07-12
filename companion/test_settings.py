@@ -36,10 +36,13 @@ ctk_mock.BooleanVar = MagicMock(side_effect=lambda: MagicMock())
 
 # Save originals before patching sys.modules
 _saved_modules: dict[str, object] = {}
-for _mod_name in ("base_page", "customtkinter", "backend_manager", "notifications"):
+for _mod_name in ("base_page", "customtkinter", "backend_manager", "notifications", "settings_panel"):
     _saved_modules[_mod_name] = sys.modules.get(_mod_name)
-    sys.modules[_mod_name] = {"base_page": _mock_base, "customtkinter": ctk_mock,
-                               "backend_manager": MagicMock(), "notifications": MagicMock()}[_mod_name]
+
+sys.modules["base_page"] = _mock_base
+sys.modules["customtkinter"] = ctk_mock
+sys.modules["backend_manager"] = MagicMock()
+sys.modules["notifications"] = MagicMock()
 
 try:
     from settings_panel import (
