@@ -14,7 +14,7 @@ echo Version: %VERSION%
 echo.
 
 :: --- Step 1: Clean ---
-echo [1/6] Cleaning previous artifacts...
+echo [1/7] Cleaning previous artifacts...
 call "%~dp0clean.bat"
 if %errorlevel% neq 0 (
     echo ERROR: Clean step failed.
@@ -24,7 +24,7 @@ echo  OK
 echo.
 
 :: --- Step 2: Build ---
-echo [2/6] Building companion EXE...
+echo [2/7] Building companion EXE...
 call "%~dp0build.bat"
 if %errorlevel% neq 0 (
     echo ERROR: Build step failed.
@@ -34,7 +34,7 @@ echo  OK
 echo.
 
 :: --- Step 3: Check resources ---
-echo [3/6] Checking resources...
+echo [3/7] Checking resources...
 python scripts\check_resources.py
 if %errorlevel% neq 0 (
     echo ERROR: Resource check failed.
@@ -44,7 +44,7 @@ echo  OK
 echo.
 
 :: --- Step 4: Package portable edition ---
-echo [4/6] Packaging portable edition...
+echo [4/7] Packaging portable edition...
 if not exist "%ROOT%release\" mkdir "%ROOT%release\"
 python scripts\package_portable.py
 if %errorlevel% neq 0 (

@@ -42,7 +42,19 @@ Get up and running in 3 minutes:
 
 ---
 
-## Recent Improvements (v1.2.3)
+## Recent Improvements (v1.3.0)
+
+*   **Extension Manager**: Complete multi-browser extension management with Chromium detection, profile discovery, session tracking, and automated extension installation.
+*   **Browser Sub-package**: Self-contained browser infrastructure library (16 modules) providing registry detection, profile scanning, session management, extension installation engine, and a state-machine automation pipeline.
+*   **Smart Recommendation Engine**: Context-aware recommendation system analyzing browser installation, extension registration, and running state to suggest optimal fix actions.
+*   **Installation Wizard**: Step-by-step wizard UI for browser-specific extension installation with progress tracking, error recovery, and retry support.
+*   **Browser Automation Engine**: Async state-machine pipeline with pluggable step handlers, cancellation support, session lifecycle tracking, and progress callbacks.
+*   **Page Architecture**: Refactored companion UI into modular page system with base class, history panel, queue panel, scheduler panel, and statistics panel.
+*   **Test Coverage**: Added 5 new test modules covering automation steps, exit flow, browser extension installer, dialog parenting, and cross-module integration.
+
+---
+
+## Previous Improvements (v1.2.3)
 
 *   **Auto Updater**: Background updates manager with releases checks, version comparison, download cancellation, integrity checks, and update notifications.
 *   **Installer Engine**: Robust setup installer execution with automatic recovery, admin privileges elevation, process locks checks, and diagnostic reporting.

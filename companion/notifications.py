@@ -242,11 +242,11 @@ class NotificationManager:
                 return
             self._accepting = False
             self._started = False
-        self._drain_queue()
-        self._persist_history()
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+        self._drain_queue()
+        self._persist_history()
         self._log("[NotificationManager] Queue stopped.")
 
     # ------------------------------------------------------------------

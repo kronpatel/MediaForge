@@ -26,6 +26,7 @@ from notifications import (
 
 # Browser package integration — replaces legacy detection code
 from browser import (
+    BrowserAutomationEngine,
     BrowserInfo,
     BrowserLauncher,
     BrowserProfileManager,
@@ -33,9 +34,16 @@ from browser import (
     BrowserRegistrationResult,
     BrowserSessionManager,
     ExtensionInstallationEngine,
-    ExtensionLaunchResult,
-    LaunchResult,
+    get_automation_engine,
 )
+from browser.automation import (
+    create_install_pipeline,
+    create_launch_pipeline,
+    create_open_ext_page_pipeline,
+    create_verify_pipeline,
+)
+from browser.automation_errors import AutomationError
+from browser.automation_result import AutomationResult
 
 if TYPE_CHECKING:
     from backend_manager import BackendManager
@@ -194,7 +202,7 @@ class ExtensionStatus:
         "file_status", "extension_version", "companion_version",
         "compatibility", "folder_exists",
         "all_browsers", "browser_registration", "installed_in_browser",
-        "browser_running",
+        "browser_running", "browser_processes",
     )
 
     # Compatibility states
@@ -214,6 +222,7 @@ class ExtensionStatus:
         self.browser_registration: list[BrowserRegistrationResult] = []
         self.installed_in_browser = False
         self.browser_running: dict[str, bool] = {}
+        self.browser_processes: dict[str, list] = {}
 
 
 def _detect_browser_running() -> dict[str, bool]:
@@ -284,9 +293,12 @@ def run_full_detection() -> ExtensionStatus:
 
     # 7. Browser running detection (BrowserSessionManager)
     try:
-        status.browser_running = _detect_browser_running()
+        running_data = BrowserSessionManager.running_all()
+        status.browser_running = {name: len(procs) > 0 for name, procs in running_data.items()}
+        status.browser_processes = running_data
     except Exception:
         status.browser_running = {}
+        status.browser_processes = {}
 
     # 8. Compatibility
     try:
@@ -602,7 +614,7 @@ class _BrowserCard:
             row, text="\U0001f50d Verify", width=72, height=_h, corner_radius=6,
             fg_color="#8b5cf6", hover_color="#7c3aed", text_color="#ffffff",
             font=_btn_font,
-            command=lambda: self._callbacks.get("verify", lambda _: None)(),
+            command=lambda: self._callbacks.get("verify", lambda _: None)(self._name),
         )
         self._verify_btn.pack(side="left")
 
@@ -666,6 +678,7 @@ class _BrowserCard:
         reg_result: BrowserRegistrationResult | None,
         running: bool,
         status: ExtensionStatus | None,
+        processes: list | None = None,
     ) -> None:
         """Refresh all card widgets from detection data."""
         health_label, health_fg, health_bg = _compute_browser_health(
@@ -713,13 +726,14 @@ class _BrowserCard:
         if self._action_backup is not None:
             self._action_backup = (health_label, health_fg, health_bg)
 
-        self._update_details(browser_info, reg_result, running)
+        self._update_details(browser_info, reg_result, running, processes=processes)
 
     def _update_details(
         self,
         browser_info: BrowserInfo,
         reg_result: BrowserRegistrationResult | None,
         running: bool,
+        processes: list | None = None,
     ) -> None:
         self._detail_lbls["exe"].configure(
             text=browser_info.path or "\u2014",
@@ -740,7 +754,7 @@ class _BrowserCard:
 
         if running:
             try:
-                procs = BrowserSessionManager.running(browser_info.name)
+                procs = processes if processes is not None else BrowserSessionManager.running(browser_info.name)
                 if procs:
                     pids = ", ".join(str(p.pid) for p in procs[:5])
                     extra = f" (+{len(procs) - 5})" if len(procs) > 5 else ""
@@ -845,6 +859,14 @@ class ExtensionManagerPage(BasePage):
         self._card_callbacks: dict[str, Any] | None = None
         self._active_filter: str = "Show All"
         self._selected_browser: str | None = None
+        self._automation_engine: BrowserAutomationEngine | None = None
+        self._automation_sessions: dict[str, str] = {}
+        self._automation_poll_jobs: dict[str, str] = {}
+        self._rec_session_id: str | None = None
+        self._rec_poll_job: str | None = None
+        self._rec_state: str = ""
+        self._rec_fixing: bool = False
+        self._delayed_jobs: set[str] = set()
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -959,6 +981,34 @@ class ExtensionManagerPage(BasePage):
         )
         self._recommend_desc.pack(fill="x", padx=16, pady=(2, 10))
 
+        # ── Smart Auto-Fix Action Row ──────────────────────────────────────
+        self._rec_action_frame = ctk.CTkFrame(
+            self._recommendation_card, fg_color="transparent",
+        )
+
+        self._rec_fix_btn = ctk.CTkButton(
+            self._rec_action_frame, text="", width=140, height=28, corner_radius=8,
+            fg_color="#4f8ef7", hover_color="#3a76e8", text_color="#ffffff",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            command=self._on_rec_fix_now,
+        )
+        self._rec_fix_btn.pack(side="left", padx=(0, 8))
+
+        self._rec_retry_btn = ctk.CTkButton(
+            self._rec_action_frame, text="Retry", width=70, height=28, corner_radius=8,
+            fg_color="#20232f", hover_color="#2e3347", text_color="#e8eaf0",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            command=self._on_rec_retry,
+        )
+        self._rec_retry_btn.pack(side="left")
+
+        self._rec_progress_lbl = ctk.CTkLabel(
+            self._rec_action_frame, text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#f59e0b", anchor="w",
+        )
+        self._rec_progress_lbl.pack(side="left", padx=(12, 0))
+
         # ── Action Buttons ────────────────────────────────────────────────
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=20, pady=(0, 8))
@@ -1029,7 +1079,7 @@ class ExtensionManagerPage(BasePage):
                 "install": self._on_card_install,
                 "extensions_page": self._on_card_open_ext_page,
                 "profile_folder": self._on_card_open_profile,
-                "verify": lambda: self._on_verify(),
+                "verify": self._on_card_verify,
                 "select": self._on_card_select,
             }
         return self._card_callbacks
@@ -1043,85 +1093,54 @@ class ExtensionManagerPage(BasePage):
             card.clear_action_state()
 
     def _on_card_launch(self, browser_name: str) -> None:
-        """Launch the browser (no extension loading) with action feedback."""
+        """Launch the browser via the automation engine."""
+        engine = self._ensure_engine()
+        if engine is None:
+            return
+        self._cancel_automation_for_browser(browser_name)
+
         card = self._browser_cards.get(browser_name)
         if card:
             card.set_action_state("Launching\u2026", "#4f8ef7", "#0f1a2e")
+        self._set_message(f"Launching {browser_name}\u2026", "#f59e0b")
 
-        def _worker():
-            success = False
-            try:
-                BrowserLauncher.launch_browser(browser_name)
-                success = True
-            except Exception:
-                pass
-
-            def _done():
-                if not self.winfo_exists():
-                    return
-                c = self._browser_cards.get(browser_name)
-                if c:
-                    if success:
-                        c.set_action_state("Completed", "#22c55e", "#0f2a1a")
-                    else:
-                        c.set_action_state("Failed", "#ef4444", "#2a0f0f")
-                    self.after(2500, lambda: self._clear_card_action(browser_name))
-                self.after(2000, self._on_refresh)
-
-            try:
-                if self.winfo_exists():
-                    self.after(0, _done)
-            except Exception:
-                pass
-
-        threading.Thread(target=_worker, daemon=True, name=f"CardLaunch{browser_name}").start()
+        session_id = engine.run_async(
+            browser_name=browser_name,
+            pipeline=create_launch_pipeline(),
+            progress_callback=lambda s: None,
+        )
+        self._automation_sessions[browser_name] = session_id
+        self._start_polling(browser_name, session_id)
 
     def _on_card_install(self, browser_name: str) -> None:
-        """Launch browser with extension loaded, with action feedback."""
-        self._set_message(f"Launching {browser_name} with extension\u2026", "#f59e0b")
+        """Install extension in browser via the automation engine."""
+        engine = self._ensure_engine()
+        if engine is None:
+            return
+        self._cancel_automation_for_browser(browser_name)
+
         card = self._browser_cards.get(browser_name)
         if card:
             card.set_action_state("Installing\u2026", "#f59e0b", "#2a1f0f")
+        self._set_message(f"Installing extension in {browser_name}\u2026", "#f59e0b")
 
-        def _worker():
-            try:
-                result = ExtensionInstallationEngine.launch(
-                    browser_name=browser_name,
-                    extension_dir=_EXTENSION_DIR,
-                    url="chrome://extensions",
-                )
-            except Exception as exc:
-                result = ExtensionLaunchResult(success=False, error_message=str(exc))
-
-            def _done():
-                if not self.winfo_exists():
-                    return
-                c = self._browser_cards.get(browser_name)
-                if c:
-                    if result.success:
-                        c.set_action_state("Completed", "#22c55e", "#0f2a1a")
-                    else:
-                        c.set_action_state("Failed", "#ef4444", "#2a0f0f")
-                    self.after(2500, lambda: self._clear_card_action(browser_name))
-                if result.success:
-                    self._set_message(
-                        f"Extension loaded in {browser_name}.", "#22c55e",
-                    )
-                else:
-                    err = result.error_message or "Unknown error"
-                    self._set_message(f"Launch failed: {err}", "#ef4444")
-                self.after(2000, self._on_refresh)
-
-            try:
-                if self.winfo_exists():
-                    self.after(0, _done)
-            except Exception:
-                pass
-
-        threading.Thread(target=_worker, daemon=True, name=f"CardInstall{browser_name}").start()
+        session_id = engine.run_async(
+            browser_name=browser_name,
+            extension_dir=_EXTENSION_DIR,
+            target_url="chrome://extensions",
+            pipeline=create_install_pipeline(),
+            progress_callback=lambda s: None,
+        )
+        self._automation_sessions[browser_name] = session_id
+        self._start_polling(browser_name, session_id)
 
     def _on_card_open_ext_page(self, browser_name: str) -> None:
-        """Open the extensions management page with action feedback."""
+        """Open the extensions page via the automation engine."""
+        engine = self._ensure_engine()
+        if engine is None:
+            return
+        self._cancel_automation_for_browser(browser_name)
+
         card = self._browser_cards.get(browser_name)
         if card:
             card.set_action_state("Opening\u2026", "#4f8ef7", "#0f1a2e")
@@ -1132,19 +1151,15 @@ class ExtensionManagerPage(BasePage):
             "Edge": "edge://extensions",
         }
         url = urls.get(browser_name, "chrome://extensions")
-        try:
-            result = BrowserLauncher.launch_browser(browser_name, url=url)
-            if not result.success:
-                raise RuntimeError(result.error_message or "Failed to launch browser")
-            self._set_message(f"Opened {url}")
-            if card:
-                card.set_action_state("Completed", "#22c55e", "#0f2a1a")
-                self.after(2500, lambda: self._clear_card_action(browser_name))
-        except Exception as exc:
-            self._set_message(f"Failed to open: {exc}", "#ef4444")
-            if card:
-                card.set_action_state("Failed", "#ef4444", "#2a0f0f")
-                self.after(2500, lambda: self._clear_card_action(browser_name))
+
+        session_id = engine.run_async(
+            browser_name=browser_name,
+            target_url=url,
+            pipeline=create_open_ext_page_pipeline(),
+            progress_callback=lambda s: None,
+        )
+        self._automation_sessions[browser_name] = session_id
+        self._start_polling(browser_name, session_id)
 
     def _on_card_open_profile(self, browser_name: str) -> None:
         """Open the browser profile folder with action feedback."""
@@ -1164,23 +1179,129 @@ class ExtensionManagerPage(BasePage):
                 self._set_message(f"Opened {browser_name} profile folder.")
                 if card:
                     card.set_action_state("Completed", "#22c55e", "#0f2a1a")
-                    self.after(2500, lambda: self._clear_card_action(browser_name))
+                    self._schedule_delayed(2500, lambda bn=browser_name: self._clear_card_action(bn))
             else:
                 self._set_message(f"Profile folder not found for {browser_name}.", "#f59e0b")
                 if card:
                     card.set_action_state("Not Found", "#f59e0b", "#2a1f0f")
-                    self.after(2500, lambda: self._clear_card_action(browser_name))
+                    self._schedule_delayed(2500, lambda bn=browser_name: self._clear_card_action(bn))
         except Exception as exc:
             self._set_message(f"Failed to open profile: {exc}", "#ef4444")
             if card:
                 card.set_action_state("Failed", "#ef4444", "#2a0f0f")
-                self.after(2500, lambda: self._clear_card_action(browser_name))
+                self._schedule_delayed(2500, lambda bn=browser_name: self._clear_card_action(bn))
+
+    # ── Automation Engine Integration ────────────────────────────────
+
+    def _ensure_engine(self) -> BrowserAutomationEngine | None:
+        """Lazily initialize and return the automation engine."""
+        if self._automation_engine is None:
+            try:
+                self._automation_engine = get_automation_engine()
+            except Exception:
+                return None
+        return self._automation_engine
+
+    def _on_card_verify(self, browser_name: str) -> None:
+        """Verify extension installation via the automation engine."""
+        engine = self._ensure_engine()
+        if engine is None:
+            return
+        self._cancel_automation_for_browser(browser_name)
+
+        card = self._browser_cards.get(browser_name)
+        if card:
+            card.set_action_state("Verifying\u2026", "#8b5cf6", "#1a0f2e")
+        self._set_message(f"Verifying {browser_name} installation\u2026", "#f59e0b")
+
+        session_id = engine.run_async(
+            browser_name=browser_name,
+            extension_dir=_EXTENSION_DIR,
+            pipeline=create_verify_pipeline(),
+            progress_callback=lambda s: None,
+        )
+        self._automation_sessions[browser_name] = session_id
+        self._start_polling(browser_name, session_id)
+
+    def _cancel_automation_for_browser(self, browser_name: str) -> None:
+        """Cancel any active automation session for the given browser."""
+        self._stop_polling(browser_name)
+        session_id = self._automation_sessions.pop(browser_name, None)
+        if session_id and self._automation_engine:
+            try:
+                self._automation_engine.cancel(session_id)
+            except Exception:
+                pass
+
+    def _cancel_all_automation(self) -> None:
+        """Cancel all active automation sessions."""
+        for browser_name in list(self._automation_sessions.keys()):
+            self._cancel_automation_for_browser(browser_name)
+
+    def _start_polling(self, browser_name: str, session_id: str) -> None:
+        """Start polling an automation session for completion."""
+        self._stop_polling(browser_name)
+        self._poll_automation(browser_name, session_id)
+
+    def _stop_polling(self, browser_name: str) -> None:
+        """Stop polling for a given browser."""
+        job = self._automation_poll_jobs.pop(browser_name, None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+
+    def _poll_automation(self, browser_name: str, session_id: str) -> None:
+        """Poll an automation session for completion, updating UI."""
+        if not self.winfo_exists():
+            return
+
+        engine = self._automation_engine
+        if engine is None:
+            return
+
+        session = engine.get_session(session_id)
+        if session is None or session.is_terminal:
+            result = engine.get_result(session_id)
+            if result is not None:
+                self._on_automation_finished(browser_name, result)
+            return
+
+        self._automation_poll_jobs[browser_name] = self.after(
+            200, lambda: self._poll_automation(browser_name, session_id),
+        )
+
+    def _on_automation_finished(self, browser_name: str, result: Any) -> None:
+        """Handle automation session completion."""
+        if not self.winfo_exists():
+            return
+
+        self._automation_sessions.pop(browser_name, None)
+        self._stop_polling(browser_name)
+
+        card = self._browser_cards.get(browser_name)
+        if card:
+            if result.success:
+                card.set_action_state("Completed", "#22c55e", "#0f2a1a")
+            else:
+                card.set_action_state("Failed", "#ef4444", "#2a0f0f")
+            self._schedule_delayed(2500, lambda bn=browser_name: self._clear_card_action(bn))
+
+        if result.success:
+            self._set_message(f"{browser_name} action completed.", "#22c55e")
+            self._schedule_delayed(2000, self._on_refresh)
+        else:
+            err = result.error.message if result.error else "Unknown error"
+            self._set_message(f"{browser_name} action failed: {err}", "#ef4444")
 
     def _on_card_select(self, browser_name: str) -> None:
         """Handle card header click — select browser and update recommendation."""
         if self._selected_browser == browser_name:
             self._selected_browser = None
         else:
+            if self._selected_browser != browser_name:
+                self._cancel_rec_session()
             self._selected_browser = browser_name
 
         for name, card in self._browser_cards.items():
@@ -1188,77 +1309,164 @@ class ExtensionManagerPage(BasePage):
 
         self._update_recommendation_for_selected()
 
+    def _compute_recommendation_state(
+        self, status: ExtensionStatus | None, browser_name: str | None,
+    ) -> dict[str, Any]:
+        """Compute the recommendation state, action label, and pipeline.
+
+        Returns a dict with keys: state, title, msg, desc, bg, border,
+        title_color, action_label, pipeline_factory.
+        """
+        none_state: dict[str, Any] = {
+            "state": "no_status", "title": "", "msg": "", "desc": "",
+            "bg": "#1a1a2e", "border": "#f59e0b", "title_color": "#f59e0b",
+            "action_label": "", "pipeline_factory": None,
+        }
+        if status is None:
+            return none_state
+
+        if browser_name is not None:
+            reg_lookup = {r.browser_name: r for r in status.browser_registration}
+            reg = reg_lookup.get(browser_name)
+            browser_info = None
+            for b in status.all_browsers:
+                if b.name == browser_name:
+                    browser_info = b
+                    break
+
+            if browser_info is None or not browser_info.installed:
+                return {
+                    "state": "browser_missing",
+                    "title": "\u26a0 Not Installed",
+                    "msg": f"{browser_name} is not installed on this system.",
+                    "desc": "Install or update the browser, then click Refresh.",
+                    "bg": "#1a1215", "border": _CLR_RED, "title_color": _CLR_RED,
+                    "action_label": "", "pipeline_factory": None,
+                }
+
+            running = status.browser_running.get(browser_name, False)
+            if not running:
+                return {
+                    "state": "browser_closed",
+                    "title": "\u26a0 Browser Closed",
+                    "msg": f"{browser_name} is installed but not running.",
+                    "desc": "Launch the browser to activate the extension.",
+                    "bg": "#241e12", "border": _CLR_ORANGE, "title_color": _CLR_ORANGE,
+                    "action_label": "Launch Browser",
+                    "pipeline_factory": create_launch_pipeline,
+                }
+
+            ext_ok = reg.extension_registered if reg else False
+            if not ext_ok:
+                return {
+                    "state": "extension_missing",
+                    "title": "\u26a0 Extension Missing",
+                    "msg": f"{browser_name} is running but the extension is not installed.",
+                    "desc": "Install the extension to enable MediaForge features.",
+                    "bg": "#241e12", "border": _CLR_ORANGE, "title_color": _CLR_ORANGE,
+                    "action_label": "Install Extension",
+                    "pipeline_factory": create_install_pipeline,
+                }
+
+            if status.compatibility == ExtensionStatus.MISMATCH:
+                return {
+                    "state": "version_mismatch",
+                    "title": "\u26a0 Version Mismatch",
+                    "msg": f"{browser_name}: extension and companion versions differ.",
+                    "desc": "Relaunch the browser to update the extension.",
+                    "bg": "#241e12", "border": _CLR_ORANGE, "title_color": _CLR_ORANGE,
+                    "action_label": "Relaunch Browser",
+                    "pipeline_factory": create_launch_pipeline,
+                }
+
+            return {
+                "state": "healthy",
+                "title": "\u2714 Healthy",
+                "msg": f"{browser_name}: extension is installed and compatible.",
+                "desc": "Everything is ready. No action needed.",
+                "bg": "#0f2a1a", "border": "#22c55e", "title_color": "#22c55e",
+                "action_label": "", "pipeline_factory": None,
+            }
+
+        # No browser selected — global view
+        any_browser_installed = any(b.installed for b in status.all_browsers)
+        is_installed_any = status.installed_in_browser
+
+        if not any_browser_installed:
+            return {
+                "state": "browser_missing",
+                "title": "\u26a0 Recommended Action",
+                "msg": "No supported browser was found.",
+                "desc": "Install Chrome, Brave or Microsoft Edge to continue.",
+                "bg": "#1a1215", "border": _CLR_RED, "title_color": _CLR_RED,
+                "action_label": "", "pipeline_factory": None,
+            }
+        if status.compatibility == ExtensionStatus.MISMATCH:
+            return {
+                "state": "version_mismatch",
+                "title": "\u26a0 Recommended Action",
+                "msg": "Extension update required.",
+                "desc": "Launch the browser again to update the extension.",
+                "bg": "#241e12", "border": _CLR_ORANGE, "title_color": _CLR_ORANGE,
+                "action_label": "Relaunch Browser",
+                "pipeline_factory": create_launch_pipeline,
+            }
+        if not is_installed_any:
+            return {
+                "state": "extension_missing",
+                "title": "\u26a0 Recommended Action",
+                "msg": "MediaForge Extension is not installed in this browser.",
+                "desc": "Use the Install button on the browser card to load the extension.",
+                "bg": "#241e12", "border": _CLR_ORANGE, "title_color": _CLR_ORANGE,
+                "action_label": "Install Extension",
+                "pipeline_factory": create_install_pipeline,
+            }
+        return none_state
+
     def _update_recommendation_for_selected(self) -> None:
         """Update the Recommendation Card based on the selected browser."""
         if self._selected_browser is None or self._cached_status is None:
             self._refresh_recommendation_from_status(self._cached_status)
             return
 
-        bname = self._selected_browser
-        status = self._cached_status
-        reg_lookup = {r.browser_name: r for r in status.browser_registration}
-        reg = reg_lookup.get(bname)
+        rec = self._compute_recommendation_state(
+            self._cached_status, self._selected_browser,
+        )
 
-        browser_info = None
-        for b in status.all_browsers:
-            if b.name == bname:
-                browser_info = b
-                break
-
-        if browser_info is None or not browser_info.installed:
-            self._show_recommendation(
-                "\u26a0 Not Installed",
-                f"{bname} is not installed on this system.",
-                "Install or update the browser, then click Refresh.",
-                "#1a1215", _CLR_RED, _CLR_RED,
-            )
+        if rec["state"] == "no_status":
+            self._recommendation_card.pack_forget()
             return
 
-        running = status.browser_running.get(bname, False)
-        if not running:
-            self._show_recommendation(
-                "\u26a0 Browser Closed",
-                f"{bname} is installed but not running.",
-                f"Click Launch on the {bname} card to start it.",
-                "#241e12", _CLR_ORANGE, _CLR_ORANGE,
-            )
-            return
-
-        ext_ok = reg.extension_registered if reg else False
-        if not ext_ok:
-            self._show_recommendation(
-                "\u26a0 Extension Missing",
-                f"{bname} is running but the extension is not installed.",
-                f"Click Install on the {bname} card to load the extension.",
-                "#241e12", _CLR_ORANGE, _CLR_ORANGE,
-            )
-            return
-
-        if status.compatibility == ExtensionStatus.MISMATCH:
-            self._show_recommendation(
-                "\u26a0 Version Mismatch",
-                f"{bname}: extension and companion versions differ.",
-                "Launch the browser again to update the extension.",
-                "#241e12", _CLR_ORANGE, _CLR_ORANGE,
-            )
-            return
-
+        self._rec_state = rec["state"]
         self._show_recommendation(
-            "\u2714 Healthy",
-            f"{bname}: extension is installed and compatible.",
-            "Everything is ready. No action needed.",
-            "#0f2a1a", "#22c55e", "#22c55e",
+            rec["title"], rec["msg"], rec["desc"],
+            rec["bg"], rec["border"], rec["title_color"],
+            action_label=rec["action_label"],
+            pipeline_factory=rec["pipeline_factory"],
         )
 
     def _show_recommendation(
         self, title: str, msg: str, desc: str,
         bg: str, border: str, title_color: str,
+        action_label: str = "",
+        pipeline_factory: Any = None,
     ) -> None:
         """Configure and show the recommendation card with given content."""
         self._recommendation_card.configure(fg_color=bg, border_color=border)
         self._recommend_title.configure(text=title, text_color=title_color)
         self._recommend_msg.configure(text=msg)
         self._recommend_desc.configure(text=desc)
+
+        if action_label and not self._rec_fixing:
+            self._rec_fix_btn.configure(text=action_label, state="normal")
+            self._rec_retry_btn.pack_forget()
+            self._rec_progress_lbl.configure(text="")
+            self._rec_action_frame.pack(fill="x", padx=16, pady=(0, 10))
+        elif self._rec_fixing:
+            self._rec_action_frame.pack(fill="x", padx=16, pady=(0, 10))
+        else:
+            self._rec_action_frame.pack_forget()
+
         self._recommendation_card.pack(
             fill="x", padx=20, pady=(0, 12), after=self._status_card,
         )
@@ -1269,32 +1477,133 @@ class ExtensionManagerPage(BasePage):
             self._recommendation_card.pack_forget()
             return
 
-        any_browser_installed = any(b.installed for b in status.all_browsers)
-        is_installed_any = status.installed_in_browser
+        rec = self._compute_recommendation_state(status, None)
 
-        if not any_browser_installed:
-            self._show_recommendation(
-                "\u26a0 Recommended Action",
-                "No supported browser was found.",
-                "Install Chrome, Brave or Microsoft Edge to continue.",
-                "#1a1215", _CLR_RED, _CLR_RED,
-            )
-        elif status.compatibility == ExtensionStatus.MISMATCH:
-            self._show_recommendation(
-                "\u26a0 Recommended Action",
-                "Extension update required.",
-                "Launch the browser again to update the extension.",
-                "#241e12", _CLR_ORANGE, _CLR_ORANGE,
-            )
-        elif not is_installed_any:
-            self._show_recommendation(
-                "\u26a0 Recommended Action",
-                "MediaForge Extension is not installed in this browser.",
-                "Use the Install button on the browser card to load the extension.",
-                "#241e12", _CLR_ORANGE, _CLR_ORANGE,
-            )
-        else:
+        if rec["state"] == "no_status":
             self._recommendation_card.pack_forget()
+            return
+
+        self._rec_state = rec["state"]
+        self._show_recommendation(
+            rec["title"], rec["msg"], rec["desc"],
+            rec["bg"], rec["border"], rec["title_color"],
+            action_label=rec["action_label"],
+            pipeline_factory=rec["pipeline_factory"],
+        )
+
+    # ── Smart Recommendation Auto-Fix ──────────────────────────────────
+
+    def _on_rec_fix_now(self) -> None:
+        """Trigger the appropriate automation pipeline for the current rec state."""
+        if self._rec_fixing or self._rec_session_id is not None:
+            return
+
+        engine = self._ensure_engine()
+        if engine is None:
+            return
+
+        rec = self._compute_recommendation_state(
+            self._cached_status, self._selected_browser,
+        )
+        pipeline_factory = rec.get("pipeline_factory")
+        if pipeline_factory is None:
+            return
+
+        browser_name = self._selected_browser
+        if browser_name is None:
+            for b in (self._cached_status.all_browsers if self._cached_status else []):
+                if b.installed:
+                    browser_name = b.name
+                    break
+        if browser_name is None:
+            return
+
+        self._rec_fixing = True
+        self._rec_fix_btn.configure(state="disabled", text="Fixing\u2026")
+        self._rec_retry_btn.pack_forget()
+        self._rec_progress_lbl.configure(text="\u23f3 Starting\u2026")
+
+        session_id = engine.run_async(
+            browser_name=browser_name,
+            extension_dir=_EXTENSION_DIR,
+            pipeline=pipeline_factory(),
+            progress_callback=lambda s: None,
+        )
+        self._rec_session_id = session_id
+        self._poll_rec_session()
+
+    def _on_rec_retry(self) -> None:
+        """Retry the last failed recommendation auto-fix."""
+        self._rec_fixing = False
+        self._rec_session_id = None
+        self._on_rec_fix_now()
+
+    def _poll_rec_session(self) -> None:
+        """Poll the recommendation automation session for completion."""
+        if not self.winfo_exists():
+            return
+        if self._rec_session_id is None:
+            return
+
+        engine = self._automation_engine
+        if engine is None:
+            return
+
+        session = engine.get_session(self._rec_session_id)
+        if session is None or session.is_terminal:
+            result = engine.get_result(self._rec_session_id)
+            self._on_rec_finished(result)
+            return
+
+        state_name = str(getattr(session, "current_state", "")).split(".")[-1]
+        if state_name:
+            self._rec_progress_lbl.configure(text=f"\u23f3 {state_name}\u2026")
+        self._rec_poll_job = self.after(200, self._poll_rec_session)
+
+    def _on_rec_finished(self, result: Any) -> None:
+        """Handle recommendation automation completion."""
+        self._rec_session_id = None
+        self._rec_fixing = False
+        if self.winfo_exists():
+            self._rec_fix_btn.configure(state="normal")
+
+        if result is not None and result.success:
+            if self.winfo_exists():
+                self._rec_progress_lbl.configure(text="\u2714 Done")
+                self._rec_retry_btn.pack_forget()
+            self._set_message("Auto-fix completed successfully.", "#22c55e")
+            self._schedule_delayed(300, self._on_refresh)
+        else:
+            if self.winfo_exists():
+                self._rec_progress_lbl.configure(text="\u2716 Failed")
+                self._rec_retry_btn.pack(side="left")
+            err = ""
+            if result and result.error:
+                err = result.error.message
+            self._set_message(f"Auto-fix failed: {err}" if err else "Auto-fix failed.", "#ef4444")
+
+    def _cancel_rec_session(self) -> None:
+        """Cancel any active recommendation automation session."""
+        job = self._rec_poll_job
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._rec_poll_job = None
+
+        if self._rec_session_id is not None and self._automation_engine is not None:
+            try:
+                self._automation_engine.cancel(self._rec_session_id)
+            except Exception:
+                pass
+        self._rec_session_id = None
+        self._rec_fixing = False
+        if self.winfo_exists():
+            self._rec_fix_btn.configure(state="normal")
+            self._rec_progress_lbl.configure(text="")
+            self._rec_retry_btn.pack_forget()
+            self._rec_action_frame.pack_forget()
 
     # ── Browser Filters ─────────────────────────────────────────────────
 
@@ -1373,7 +1682,8 @@ class ExtensionManagerPage(BasePage):
 
             running = status.browser_running.get(b.name, False)
             reg_result = reg_lookup.get(b.name)
-            self._browser_cards[b.name].update_state(b, reg_result, running, status)
+            procs = status.browser_processes.get(b.name, [])
+            self._browser_cards[b.name].update_state(b, reg_result, running, status, processes=procs)
             self._browser_cards[b.name].set_selected(b.name == self._selected_browser)
 
         # Apply filter (handles packing and empty-filter message)
@@ -1398,6 +1708,11 @@ class ExtensionManagerPage(BasePage):
         self._on_refresh()
 
     def on_hide(self) -> None:
+        self._detecting = False
+        self._cancel_all_delayed()
+        self._cancel_rec_session()
+        self._cancel_all_automation()
+
         if self._verify_dialog is not None:
             try:
                 if self._verify_dialog._dialog.winfo_exists():
@@ -1407,6 +1722,10 @@ class ExtensionManagerPage(BasePage):
             self._verify_dialog = None
 
         if self._wizard_dialog is not None:
+            try:
+                self._wizard_dialog._cancel_wizard_sessions()
+            except Exception:
+                pass
             try:
                 if self._wizard_dialog._dialog.winfo_exists():
                     self._wizard_dialog._dialog.destroy()
@@ -1519,6 +1838,8 @@ class ExtensionManagerPage(BasePage):
         self._cached_status = status
         self._refresh_btn.configure(state="normal")
 
+        any_browser_installed = any(b.installed for b in status.all_browsers)
+
         # ── Browser Cards ────────────────────────────────────────────────
         self._update_browser_cards(status)
 
@@ -1572,7 +1893,6 @@ class ExtensionManagerPage(BasePage):
             self._fire_compatibility_notification()
 
         # Final message
-        any_browser_installed = any(b.installed for b in status.all_browsers)
         if not any_browser_installed and not status.folder_exists:
             self._set_message(
                 "No Chromium browser detected. Install Chrome, Brave, or Edge.",
@@ -1603,6 +1923,37 @@ class ExtensionManagerPage(BasePage):
         if not self.winfo_exists():
             return
         self._msg_lbl.configure(text=text, text_color=color)
+
+    # ── Delayed Callback Lifecycle ────────────────────────────────────────
+
+    def _schedule_delayed(self, delay_ms: int, callback: Callable[[], None]) -> str | None:
+        """Schedule a delayed ``after()`` callback, tracking its job ID.
+
+        Returns the job ID so callers can reference it, or ``None``
+        if the widget was already destroyed.
+        """
+        if not self.winfo_exists():
+            return None
+        job_id = self.after(delay_ms, callback)
+        self._delayed_jobs.add(job_id)
+        return job_id
+
+    def _cancel_delayed(self, job_id: str) -> None:
+        """Cancel a single tracked delayed callback (safe if already fired)."""
+        self._delayed_jobs.discard(job_id)
+        try:
+            self.after_cancel(job_id)
+        except Exception:
+            pass
+
+    def _cancel_all_delayed(self) -> None:
+        """Cancel every tracked delayed callback."""
+        for job_id in list(self._delayed_jobs):
+            try:
+                self.after_cancel(job_id)
+            except Exception:
+                pass
+        self._delayed_jobs.clear()
 
     def _fire_compatibility_notification(self) -> None:
         """Publish a desktop notification when the extension becomes compatible."""
@@ -1824,13 +2175,16 @@ class _InstallationWizard:
         self._opened_page_browser: str | None = None
         self._verification_done: bool = False
 
-        # Transient async state
+        # Transient async state — UI flow flags
         self._launching: bool = False
-        self._launch_success: bool | None = None
-        self._launch_error: str = ""
         self._opening_page: bool = False
         self._verifying: bool = False
         self._verification_status: ExtensionStatus | None = None
+
+        # Wizard automation session tracking
+        self._wizard_sessions: dict[str, str] = {}
+        self._wizard_results: dict[str, Any] = {}
+        self._wizard_poll_jobs: dict[str, str] = {}
 
         self._build_dialog()
         self._show_step(self._STEP_WELCOME)
@@ -1923,6 +2277,112 @@ class _InstallationWizard:
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             command=self._on_finish,
         )
+
+    # ------------------------------------------------------------------
+    # Automation helpers
+    # ------------------------------------------------------------------
+
+    def _get_engine(self) -> BrowserAutomationEngine | None:
+        """Lazily return the automation engine."""
+        try:
+            return get_automation_engine()
+        except Exception:
+            return None
+
+    def _schedule_ui(self, step: int) -> None:
+        """Schedule a UI rebuild on the main thread."""
+        try:
+            if self._dialog.winfo_exists():
+                self._dialog.after(0, lambda s=step: self._show_step(s))
+        except Exception:
+            pass
+
+    def _poll_wizard_session(self, step_key: str, session_id: str) -> None:
+        """Poll an automation session for completion."""
+        if not self._dialog.winfo_exists():
+            return
+        engine = self._get_engine()
+        if engine is None:
+            return
+        session = engine.get_session(session_id)
+        if session is None or session.is_terminal:
+            result = engine.get_result(session_id)
+            self._on_wizard_session_finished(step_key, result)
+            return
+        job = self._dialog.after(
+            200, lambda: self._poll_wizard_session(step_key, session_id),
+        )
+        self._wizard_poll_jobs[step_key] = job
+
+    def _on_wizard_session_finished(self, step_key: str, result: Any) -> None:
+        """Handle completion of a wizard automation session."""
+        if not self._dialog.winfo_exists():
+            return
+
+        self._wizard_sessions.pop(step_key, None)
+        self._wizard_results[step_key] = result
+
+        poll_job = self._wizard_poll_jobs.pop(step_key, None)
+        if poll_job is not None:
+            try:
+                self._dialog.after_cancel(poll_job)
+            except Exception:
+                pass
+
+        if step_key == "launch":
+            self._launching = False
+            if result and result.success:
+                self._launched_browser = self._selected_browser
+            self._schedule_ui(self._STEP_LAUNCH)
+
+        elif step_key == "open_page":
+            self._opening_page = False
+            if result and result.success:
+                self._opened_page_browser = self._selected_browser
+            else:
+                self._opened_page_browser = None
+            self._schedule_ui(self._STEP_EXTENSIONS_PAGE)
+
+        elif step_key == "verify":
+            self._run_post_verify_detection()
+
+    def _run_post_verify_detection(self) -> None:
+        """Run full detection after verify automation completes for detailed UI."""
+
+        def _worker() -> None:
+            try:
+                self._verification_status = run_full_detection()
+            except Exception:
+                self._verification_status = ExtensionStatus()
+            finally:
+                self._verifying = False
+                self._verification_done = True
+                self._schedule_ui(self._STEP_VERIFICATION)
+
+        threading.Thread(target=_worker, daemon=True, name="WizardPostVerify").start()
+
+    def _cancel_wizard_session(self, step_key: str) -> None:
+        """Cancel a specific wizard automation session."""
+        poll_job = self._wizard_poll_jobs.pop(step_key, None)
+        if poll_job is not None:
+            try:
+                self._dialog.after_cancel(poll_job)
+            except Exception:
+                pass
+
+        session_id = self._wizard_sessions.pop(step_key, None)
+        if session_id:
+            engine = self._get_engine()
+            if engine is not None:
+                try:
+                    engine.cancel(session_id)
+                except Exception:
+                    pass
+
+    def _cancel_wizard_sessions(self) -> None:
+        """Cancel all active wizard automation sessions."""
+        for key in list(self._wizard_sessions.keys()):
+            self._cancel_wizard_session(key)
 
     # ------------------------------------------------------------------
     # Step dispatcher
@@ -2070,7 +2530,15 @@ class _InstallationWizard:
     def _select_browser(self, name: str) -> None:
         if self._selected_browser == name:
             return
+        self._cancel_wizard_sessions()
         self._selected_browser = name
+        self._launched_browser = None
+        self._opened_page_browser = None
+        self._verification_done = False
+        self._verification_status = None
+        self._launching = False
+        self._opening_page = False
+        self._verifying = False
         self._show_step(self._STEP_SELECT_BROWSER)
 
     # ------------------------------------------------------------------
@@ -2088,7 +2556,8 @@ class _InstallationWizard:
             text_color="#e8eaf0",
         ).pack(pady=(0, 10))
 
-        if self._launched_browser == self._selected_browser and self._launch_success:
+        launch_result = self._wizard_results.get("launch")
+        if self._launched_browser == self._selected_browser and launch_result and launch_result.success:
             ctk.CTkLabel(
                 f, text=f"\u2714  {self._selected_browser} launched successfully",
                 font=ctk.CTkFont(family="Segoe UI", size=13),
@@ -2102,15 +2571,16 @@ class _InstallationWizard:
                 text_color="#f59e0b",
             ).pack(pady=(0, 6))
             ctk.CTkLabel(f, text="\u23f3", font=ctk.CTkFont(size=36)).pack()
-        elif self._launch_success is False:
+        elif launch_result is not None and not launch_result.success:
             ctk.CTkLabel(
                 f, text=f"\u2718  Failed to launch {self._selected_browser}",
                 font=ctk.CTkFont(family="Segoe UI", size=13),
                 text_color="#ef4444",
             ).pack(pady=(0, 6))
-            if self._launch_error:
+            error_msg = launch_result.error_message if launch_result.error else ""
+            if error_msg:
                 ctk.CTkLabel(
-                    f, text=self._launch_error,
+                    f, text=error_msg,
                     font=ctk.CTkFont(family="Segoe UI", size=11),
                     text_color="#8b92a8",
                     wraplength=420,
@@ -2130,34 +2600,23 @@ class _InstallationWizard:
         self._launching = True
 
         browser_name = self._selected_browser
-        ext_url = self._BROWSER_CONFIG[browser_name]["extensions_url"]
 
-        def _worker() -> None:
-            result: LaunchResult | None = None
-            try:
-                result = BrowserLauncher.launch_browser(browser_name, url=ext_url)
-            except Exception as exc:
-                self._launch_error = str(exc)
-            finally:
-                self._launching = False
-                if result is not None:
-                    self._launch_success = result.success
-                    if not result.success:
-                        self._launch_error = (
-                            result.error_message
-                            or (result.error_code.value if result.error_code else "Unknown error")
-                        )
-                if result is None:
-                    self._launch_success = False
-                if self._launch_success:
-                    self._launched_browser = browser_name
-                try:
-                    if self._dialog.winfo_exists():
-                        self._dialog.after(0, lambda: self._show_step(self._STEP_LAUNCH))
-                except Exception:
-                    pass
+        engine = self._get_engine()
+        if engine is None:
+            self._launching = False
+            self._wizard_results["launch"] = AutomationResult(
+                success=False,
+                error=AutomationError(message="Automation engine not available"),
+            )
+            self._schedule_ui(self._STEP_LAUNCH)
+            return
 
-        threading.Thread(target=_worker, daemon=True, name="WizardLaunch").start()
+        session_id = engine.run_async(
+            browser_name=browser_name,
+            pipeline=create_launch_pipeline(),
+        )
+        self._wizard_sessions["launch"] = session_id
+        self._poll_wizard_session("launch", session_id)
         ctk.CTkLabel(
             self._content, text=f"Launching {self._selected_browser}\u2026",
             font=ctk.CTkFont(family="Segoe UI", size=13),
@@ -2166,8 +2625,8 @@ class _InstallationWizard:
         ctk.CTkLabel(self._content, text="\u23f3", font=ctk.CTkFont(size=36)).pack()
 
     def _retry_launch(self) -> None:
-        self._launch_success = None
-        self._launch_error = ""
+        self._wizard_results.pop("launch", None)
+        self._launched_browser = None
         self._show_step(self._STEP_LAUNCH)
 
     # ------------------------------------------------------------------
@@ -2201,6 +2660,7 @@ class _InstallationWizard:
             text_color="#4f8ef7",
         ).pack(padx=16, pady=10)
 
+        page_result = self._wizard_results.get("open_page")
         if self._opened_page_browser == self._selected_browser:
             ctk.CTkLabel(
                 f, text="\u2714  Page opened",
@@ -2208,14 +2668,34 @@ class _InstallationWizard:
                 text_color="#22c55e",
             ).pack(pady=(0, 4))
             self._show_next_in_content()
-        elif not self._opening_page:
-            self._do_open_extensions_page()
-        else:
+        elif page_result is not None and not page_result.success:
+            ctk.CTkLabel(
+                f, text="\u2718  Failed to open extensions page",
+                font=ctk.CTkFont(family="Segoe UI", size=13),
+                text_color="#ef4444",
+            ).pack(pady=(0, 6))
+            error_msg = page_result.error_message if page_result.error else ""
+            if error_msg:
+                ctk.CTkLabel(
+                    f, text=error_msg,
+                    font=ctk.CTkFont(family="Segoe UI", size=11),
+                    text_color="#8b92a8",
+                    wraplength=420,
+                ).pack(pady=(0, 10))
+            ctk.CTkButton(
+                f, text="Retry", width=120, height=30, corner_radius=8,
+                fg_color="#4f8ef7", hover_color="#3a76e8", text_color="#ffffff",
+                font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+                command=self._retry_open_page,
+            ).pack(pady=(0, 6))
+        elif self._opening_page:
             ctk.CTkLabel(
                 f, text="Opening page\u2026",
                 font=ctk.CTkFont(family="Segoe UI", size=12),
                 text_color="#f59e0b",
             ).pack(pady=(0, 4))
+        else:
+            self._do_open_extensions_page()
 
     def _do_open_extensions_page(self) -> None:
         if self._opening_page:
@@ -2224,29 +2704,33 @@ class _InstallationWizard:
         browser_name = self._selected_browser
         url = self._BROWSER_CONFIG[browser_name]["extensions_url"]
 
-        def _worker() -> None:
-            try:
-                result = BrowserLauncher.launch_browser(browser_name, url=url)
-                if result.success:
-                    self._opened_page_browser = self._selected_browser
-                else:
-                    self._opened_page_browser = None
-            except Exception:
-                self._opened_page_browser = None
-            finally:
-                self._opening_page = False
-                try:
-                    if self._dialog.winfo_exists():
-                        self._dialog.after(0, lambda: self._show_step(self._STEP_EXTENSIONS_PAGE))
-                except Exception:
-                    pass
+        engine = self._get_engine()
+        if engine is None:
+            self._opening_page = False
+            self._wizard_results["open_page"] = AutomationResult(
+                success=False,
+                error=AutomationError(message="Automation engine not available"),
+            )
+            self._schedule_ui(self._STEP_EXTENSIONS_PAGE)
+            return
 
-        threading.Thread(target=_worker, daemon=True, name="WizardOpenPage").start()
+        session_id = engine.run_async(
+            browser_name=browser_name,
+            target_url=url,
+            pipeline=create_open_ext_page_pipeline(),
+        )
+        self._wizard_sessions["open_page"] = session_id
+        self._poll_wizard_session("open_page", session_id)
         ctk.CTkLabel(
             self._content, text="Opening page\u2026",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color="#f59e0b",
         ).pack(pady=(0, 4))
+
+    def _retry_open_page(self) -> None:
+        self._wizard_results.pop("open_page", None)
+        self._opened_page_browser = None
+        self._show_step(self._STEP_EXTENSIONS_PAGE)
 
     # ------------------------------------------------------------------
     # Step 4 — Enable Developer Mode
@@ -2444,25 +2928,38 @@ class _InstallationWizard:
             return
         self._verifying = True
 
+        engine = self._get_engine()
+        if engine is None:
+            self._run_fallback_detection()
+            return
+
+        session_id = engine.run_async(
+            browser_name=self._selected_browser,
+            extension_dir=_EXTENSION_DIR,
+            pipeline=create_verify_pipeline(),
+        )
+        self._wizard_sessions["verify"] = session_id
+        self._poll_wizard_session("verify", session_id)
+
+    def _run_fallback_detection(self) -> None:
+        """Run full detection directly when automation engine is unavailable."""
+
         def _worker() -> None:
             try:
-                status = run_full_detection()
-                self._verification_status = status
+                self._verification_status = run_full_detection()
             except Exception:
                 self._verification_status = ExtensionStatus()
             finally:
                 self._verifying = False
-                try:
-                    if self._dialog.winfo_exists():
-                        self._dialog.after(0, lambda: self._show_step(self._STEP_VERIFICATION))
-                except Exception:
-                    pass
+                self._verification_done = True
+                self._schedule_ui(self._STEP_VERIFICATION)
 
-        threading.Thread(target=_worker, daemon=True, name="WizardVerify").start()
+        threading.Thread(target=_worker, daemon=True, name="WizardFallbackDetect").start()
 
     def _retry_verification(self) -> None:
         self._verification_done = False
         self._verification_status = None
+        self._wizard_results.pop("verify", None)
         self._show_step(self._STEP_VERIFICATION)
 
     def _show_troubleshooting(self, parent: ctk.CTkFrame) -> None:
@@ -2593,12 +3090,14 @@ class _InstallationWizard:
             self._show_step(self._current_step - 1)
 
     def _on_cancel(self) -> None:
+        self._cancel_wizard_sessions()
         self._verifying = False
         self._launching = False
         self._opening_page = False
         self._dialog.destroy()
 
     def _on_finish(self) -> None:
+        self._cancel_wizard_sessions()
         self._verifying = False
         self._launching = False
         self._opening_page = False

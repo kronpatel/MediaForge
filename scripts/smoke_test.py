@@ -102,6 +102,7 @@ class SmokeTest:
         print("[smoke] Starting backend server...")
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        env["MEDIAFORGE_PORTABLE"] = "1"
         self.process = subprocess.Popen(
             [sys.executable, "app.py"],
             cwd=BACKEND_DIR,

@@ -202,6 +202,7 @@ _jobs: dict[str, DownloadJob] = {}
 _jobs_lock = threading.RLock()
 _history_lock = threading.RLock()
 _worker_lock = threading.Lock()
+_settings_lock = threading.Lock()
 _worker_started = False
 _active_job_id: str | None = None
 _history_cache: list[dict[str, Any]] | None = None
@@ -227,7 +228,7 @@ def default_settings() -> dict[str, Any]:
         "download_folder": DOWNLOAD_DIR,
         "ffmpeg_path": FFMPEG_PATH,
         "backend_url": "http://127.0.0.1:5000",
-        "version": "1.2.3",
+        "version": "1.3.0",
     }
 
 
@@ -250,22 +251,23 @@ def read_settings() -> dict[str, Any]:
 
 
 def write_settings(changes: dict[str, Any]) -> dict[str, Any]:
-    settings = read_settings()
+    with _settings_lock:
+        settings = read_settings()
 
-    if "download_folder" in changes:
-        folder = str(changes.get("download_folder") or "").strip()
-        settings["download_folder"] = folder if is_valid_download_folder(folder) else DOWNLOAD_DIR
+        if "download_folder" in changes:
+            folder = str(changes.get("download_folder") or "").strip()
+            settings["download_folder"] = folder if is_valid_download_folder(folder) else DOWNLOAD_DIR
 
-    if "ffmpeg_path" in changes:
-        settings["ffmpeg_path"] = str(changes.get("ffmpeg_path") or "").strip()
+        if "ffmpeg_path" in changes:
+            settings["ffmpeg_path"] = str(changes.get("ffmpeg_path") or "").strip()
 
-    if "backend_url" in changes:
-        settings["backend_url"] = str(changes.get("backend_url") or "").strip()
+        if "backend_url" in changes:
+            settings["backend_url"] = str(changes.get("backend_url") or "").strip()
 
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as settings_file:
-        json.dump(settings, settings_file, indent=2, ensure_ascii=False)
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as settings_file:
+            json.dump(settings, settings_file, indent=2, ensure_ascii=False)
 
-    return settings
+        return settings
 
 
 def reset_download_folder() -> dict[str, Any]:
@@ -558,7 +560,7 @@ def progress_hook_for(job_id: str) -> Callable[[dict[str, Any]], None]:
             from diagnostics import _perf_metrics as _pm
             _pm.record_download_speed(float(speed_bps) / (1024 * 1024))
 
-        elif download_status == "finished":
+        if download_status == "finished":
             message = "Download complete. Processing with FFmpeg..."
             with _jobs_lock:
                 job = _jobs.get(job_id)
@@ -1002,6 +1004,7 @@ def remove_job(job_id: str) -> None:
 def _cancel_jobs(job_ids: list[str]) -> list[dict[str, Any]]:
     """Internal batch cancel — cancels multiple jobs atomically."""
     snapshots: list[dict[str, Any]] = []
+    cancelled_jobs: list[DownloadJob] = []
     with _jobs_lock:
         for jid in job_ids:
             job = _jobs.get(jid)
@@ -1010,7 +1013,8 @@ def _cancel_jobs(job_ids: list[str]) -> list[dict[str, Any]]:
             validate_transition(job.status, DownloadState.CANCELLED.value)
             snapshot = _cancel_job_internal(job, save_queue=False)
             snapshots.append(snapshot)
-    for job in [j for j in _jobs.values() if j.status == DownloadState.CANCELLED.value and j.id in job_ids]:
+            cancelled_jobs.append(job)
+    for job in cancelled_jobs:
         append_history(job)
     logger.info("[Queue] Cancelled %d job(s): %s", len(job_ids), ", ".join(job_ids))
     _schedule_save_queue_state()

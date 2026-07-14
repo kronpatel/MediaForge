@@ -30,6 +30,7 @@ class BrowserRegistry:
     def __init__(self) -> None:
         self._definitions: Dict[str, BrowserDefinition] = {}
         self._order: List[str] = []
+        self._all_cache: List[BrowserDefinition] | None = None
         self._load_defaults()
 
     # -- singleton ------------------------------------------------------------
@@ -54,12 +55,14 @@ class BrowserRegistry:
         self._definitions[key] = definition
         if key not in self._order:
             self._order.append(key)
+        self._all_cache = None
 
     def unregister(self, name: str) -> bool:
         """Remove a browser definition by name. Returns True if removed."""
         if name in self._definitions:
             del self._definitions[name]
             self._order.remove(name)
+            self._all_cache = None
             return True
         return False
 
@@ -73,8 +76,10 @@ class BrowserRegistry:
         return name in self._definitions
 
     def all(self) -> List[BrowserDefinition]:
-        """Return definitions in registration order."""
-        return [self._definitions[n] for n in self._order if n in self._definitions]
+        """Return definitions in registration order (cached)."""
+        if self._all_cache is None:
+            self._all_cache = [self._definitions[n] for n in self._order if n in self._definitions]
+        return self._all_cache
 
     def names(self) -> List[str]:
         """Return browser names in registration order."""

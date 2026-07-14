@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-14
+
+### Added
+- **Extension Manager**: Complete multi-browser extension management system with Chromium detection, profile discovery, session tracking, and automated extension installation.
+- **Browser Sub-package**: Self-contained browser infrastructure library (16 modules) providing registry detection, profile scanning, session management, extension installation engine, and a full state-machine automation pipeline.
+- **Smart Recommendation Engine**: Context-aware recommendation system that analyzes browser installation, extension registration, and running state to suggest optimal fix actions.
+- **Installation Wizard**: Step-by-step wizard UI for browser-specific extension installation with progress tracking, error recovery, and retry support.
+- **Browser Automation Engine**: Async state-machine pipeline with pluggable step handlers, cancellation support, session lifecycle tracking, and progress callbacks.
+- **Page Architecture**: Refactored companion UI into modular page system with base class, history panel, queue panel, scheduler panel, and statistics panel.
+- **Dialog Parenting**: All messagebox and dialog calls now properly parent to the main window.
+- **Exit Flow**: Graceful shutdown with background task cancellation, notification drain, and thread join.
+- **Test Coverage**: Added 5 new test modules covering automation steps, exit flow, browser extension installer, dialog parenting, and cross-module integration.
+
+### Fixed
+- **Progress Hook**: Fixed indentation bug where `elif download_status == "finished"` was chained to `if speed_bps:` instead of `if download_status == "downloading"`, causing the FFmpeg processing message to never display.
+- **Notification Shutdown**: Fixed race condition where worker thread and `_drain_queue()` could process items concurrently during shutdown.
+- **Cancel Job Safety**: Fixed `_cancel_jobs()` iterating `_jobs.values()` outside the lock, preventing potential dictionary-changed-size crashes.
+- **Settings Race Condition**: Added `_settings_lock` to serialize concurrent `write_settings()` calls, preventing last-writer-wins data loss.
+- **Release Pipeline**: Fixed step numbering inconsistency in `release.bat` (`[1/6]` through `[4/6]` corrected to `[1/7]` through `[4/7]`).
+- **Dashboard Initialization**: Added missing `datetime` import and `_window_ref` initialization to prevent `AttributeError` during early polling.
+- **Version Verification**: Expanded `verify_versions.py` to validate version strings in all extension JS/HTML files, installer script, and companion settings panel.
+
+### Improved
+- **Browser Detection**: Registry-based and filesystem-based browser detection for Chrome, Edge, and Brave with environment variable overrides.
+- **Extension Validation**: Multi-file manifest validation with detailed error reporting for missing or invalid extension files.
+- **Session Tracking**: Thread-safe session lifecycle management with snapshot-based cross-thread reads.
+
 ## [1.2.3] - 2026-07-11
 
 ### Fixed

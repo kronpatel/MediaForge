@@ -10,6 +10,7 @@ dashboard.py – DashboardController & DashboardPage
 
 from __future__ import annotations
 
+from datetime import datetime
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +58,7 @@ class DashboardController:
         self._lock = threading.Lock()
         self._last_data: dict[str, Any] = {"offline": True}
         self._notification_sent: bool = False
+        self._window_ref: Any = None
 
     def register_page(self, page: BasePage) -> None:
         with self._lock:
