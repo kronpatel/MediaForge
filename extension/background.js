@@ -2,7 +2,7 @@ const DEFAULT_BACKEND_URL = "http://127.0.0.1:5000";
 const API_REQUEST_TIMEOUT_MS = 30000;
 
 chrome.runtime.onInstalled.addListener(() => {
-    console.log("MediaForge v1.3.0 installed");
+    console.log("MediaForge v1.3.1 installed");
 });
 
 async function getBackendUrl() {

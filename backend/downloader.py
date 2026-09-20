@@ -228,7 +228,7 @@ def default_settings() -> dict[str, Any]:
         "download_folder": DOWNLOAD_DIR,
         "ffmpeg_path": FFMPEG_PATH,
         "backend_url": "http://127.0.0.1:5000",
-        "version": "1.3.0",
+        "version": "1.3.1",
     }
 
 
