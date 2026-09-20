@@ -26,6 +26,9 @@ class InstallerManager:
 
     def _resolve_install_root(self) -> str:
         """Determine the project root directory where the ZIP should be extracted."""
+        import sys
+        if getattr(sys, "frozen", False):
+            return os.path.dirname(os.path.abspath(sys.executable))
         # updater.py lives in companion/ — project root is one level up
         import updater as _upd
         companion_dir = os.path.dirname(os.path.abspath(_upd.__file__))

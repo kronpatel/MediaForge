@@ -390,7 +390,7 @@ if __name__ == "__main__":
     app.run(
         host=host,
         port=port,
-        debug=True,
+        debug=False,
         threaded=True,
         use_reloader=False,
     )

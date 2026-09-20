@@ -381,9 +381,29 @@ class BackendManager:
         """
         host, port = DEFAULT_HOST, DEFAULT_PORT
 
-        if os.path.exists(SETTINGS_FILE):
+        # Determine if portable mode to read the correct settings file
+        is_portable = False
+        if os.environ.get("MEDIAFORGE_PORTABLE") == "1":
+            is_portable = True
+        elif getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            if os.path.exists(os.path.join(exe_dir, "portable_settings.json")):
+                is_portable = True
+        else:
+            is_portable = True
+
+        if is_portable:
+            settings_file = os.path.join(BACKEND_DIR, "settings.json")
+        else:
+            local_app_data = os.environ.get("LOCALAPPDATA")
+            if local_app_data:
+                settings_file = os.path.join(local_app_data, "MediaForge", "backend", "settings.json")
+            else:
+                settings_file = os.path.join(BACKEND_DIR, "settings.json")
+
+        if os.path.exists(settings_file):
             try:
-                with open(SETTINGS_FILE, "r", encoding="utf-8") as fh:
+                with open(settings_file, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
                 raw_url: str = data.get("backend_url", "")
                 if raw_url:

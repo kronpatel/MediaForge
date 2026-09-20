@@ -1,0 +1,51 @@
+{
+  "model": "coding-combo",
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://192.168.0.189:20128",
+    "ANTHROPIC_API_KEY": "sk-b9fd92c1a92df14a-09935b-cfb408d0",
+    "ANTHROPIC_MODEL": "coding-combo",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+    "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest test_phase4_security.py -v)",
+      "Bash(python -m pytest --collect-only)",
+      "Bash(python -m pytest -v)",
+      "Bash(python -m pytest --tb=short -q)",
+      "Bash(grep -v \"^\\\\s*$\")",
+      "Bash(python *)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(echo \"exit: $?\")",
+      "Bash(git commit *)",
+      "Bash(go build *)",
+      "Bash(env GOOS=windows GOARCH=amd64 go build -o olt-agent.exe main.go config.go logger.go)",
+      "Bash(pytest test_issue002_multitenant.py test_issue003_agent_api.py)",
+      "Bash(python scripts/run_local_tests.py)",
+      "Bash(rm -f local_test_summary.txt)",
+      "Bash(git add *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "graphify hook-guard search"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "graphify hook-guard read"
+          }
+        ]
+      }
+    ]
+  }
+}

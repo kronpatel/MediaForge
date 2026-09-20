@@ -654,6 +654,10 @@ def base_options(job_id: str | None = None, playlist: bool = False) -> dict[str,
         "restrictfilenames": False,
         "trim_file_name": 180,
         "windowsfilenames": True,
+        "extractor_args": {"youtube": {"player_client": ["ios", "tv"]}},
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+        }
     }
 
     if job_id:

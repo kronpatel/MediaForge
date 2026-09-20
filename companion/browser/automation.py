@@ -70,9 +70,9 @@ def create_launch_pipeline() -> AutomationSteps:
 
 
 def create_install_pipeline() -> AutomationSteps:
-    """Pipeline for validating extension and launching browser with it.
+    """Pipeline for launching browser and opening extensions page for manual loading.
 
-    Steps: detect_browser → validate_extension → launch_browser.
+    Steps: detect_browser → validate_extension → launch_browser (opens extensions page).
     """
     from .step_handlers import (  # noqa: PLC0415
         detect_browser,
@@ -97,7 +97,7 @@ def create_install_pipeline() -> AutomationSteps:
             name="launch_browser",
             handler=launch_browser,
             state=AutomationState.LAUNCHING,
-            description="Launch browser with extension loaded",
+            description="Launch browser and open extensions page",
         ),
     ])
 

@@ -1113,7 +1113,7 @@ class ExtensionManagerPage(BasePage):
         self._start_polling(browser_name, session_id)
 
     def _on_card_install(self, browser_name: str) -> None:
-        """Install extension in browser via the automation engine."""
+        """Install extension in browser — opens extensions page for manual loading."""
         engine = self._ensure_engine()
         if engine is None:
             return
@@ -1121,13 +1121,20 @@ class ExtensionManagerPage(BasePage):
 
         card = self._browser_cards.get(browser_name)
         if card:
-            card.set_action_state("Installing\u2026", "#f59e0b", "#2a1f0f")
-        self._set_message(f"Installing extension in {browser_name}\u2026", "#f59e0b")
+            card.set_action_state("Opening\u2026", "#4f8ef7", "#0f1a2e")
+        self._set_message(f"Opening {browser_name} extensions page\u2026", "#f59e0b")
+
+        _EXT_URLS = {
+            "Chrome": "chrome://extensions",
+            "Brave": "brave://extensions",
+            "Edge": "edge://extensions",
+        }
+        ext_url = _EXT_URLS.get(browser_name, "chrome://extensions")
 
         session_id = engine.run_async(
             browser_name=browser_name,
             extension_dir=_EXTENSION_DIR,
-            target_url="chrome://extensions",
+            target_url=ext_url,
             pipeline=create_install_pipeline(),
             progress_callback=lambda s: None,
         )
@@ -1280,20 +1287,25 @@ class ExtensionManagerPage(BasePage):
         self._automation_sessions.pop(browser_name, None)
         self._stop_polling(browser_name)
 
+        err_msg = ""
+        if result.error:
+            err_msg = result.error.message if hasattr(result.error, "message") else str(result.error)
+
         card = self._browser_cards.get(browser_name)
         if card:
             if result.success:
                 card.set_action_state("Completed", "#22c55e", "#0f2a1a")
             else:
-                card.set_action_state("Failed", "#ef4444", "#2a0f0f")
-            self._schedule_delayed(2500, lambda bn=browser_name: self._clear_card_action(bn))
+                short_err = err_msg[:40] + "…" if len(err_msg) > 40 else err_msg
+                card.set_action_state(f"Failed: {short_err}" if short_err else "Failed", "#ef4444", "#2a0f0f")
+            self._schedule_delayed(4000, lambda bn=browser_name: self._clear_card_action(bn))
 
         if result.success:
-            self._set_message(f"{browser_name} action completed.", "#22c55e")
-            self._schedule_delayed(2000, self._on_refresh)
+            self._set_message(f"{browser_name} action completed successfully.", "#22c55e")
         else:
-            err = result.error.message if result.error else "Unknown error"
-            self._set_message(f"{browser_name} action failed: {err}", "#ef4444")
+            self._set_message(f"{browser_name}: {err_msg or 'Unknown error'}", "#ef4444")
+
+        self._schedule_delayed(1500, self._on_refresh)
 
     def _on_card_select(self, browser_name: str) -> None:
         """Handle card header click — select browser and update recommendation."""
@@ -1978,7 +1990,7 @@ class ExtensionManagerPage(BasePage):
         if self._cached_status:
             ext_ver = self._cached_status.extension_version
         self._wizard_dialog = _InstallationWizard(
-            self.winfo_toplevel(), ext_ver
+            self.winfo_toplevel(), ext_ver, on_close=self._on_refresh,
         )
 
 
@@ -2164,9 +2176,10 @@ class _InstallationWizard:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def __init__(self, parent: ctk.CTk, extension_version: str) -> None:
+    def __init__(self, parent: ctk.CTk, extension_version: str, on_close: Callable[[], None] | None = None) -> None:
         self._parent = parent
         self._extension_version = extension_version
+        self._on_close_cb = on_close
         self._selected_browser: str = "Chrome"
         self._current_step: int = self._STEP_WELCOME
 
@@ -3095,6 +3108,11 @@ class _InstallationWizard:
         self._launching = False
         self._opening_page = False
         self._dialog.destroy()
+        if self._on_close_cb is not None:
+            try:
+                self._on_close_cb()
+            except Exception:
+                pass
 
     def _on_finish(self) -> None:
         self._cancel_wizard_sessions()
@@ -3102,3 +3120,8 @@ class _InstallationWizard:
         self._launching = False
         self._opening_page = False
         self._dialog.destroy()
+        if self._on_close_cb is not None:
+            try:
+                self._on_close_cb()
+            except Exception:
+                pass

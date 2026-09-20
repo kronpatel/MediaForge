@@ -181,8 +181,11 @@ class TestLaunchBrowser(unittest.TestCase):
             name="Chrome", installed=True, path="/chrome.exe",
         )
         launch_result = LaunchResult(success=True, pid=1234)
-        with patch("browser.step_handlers.BrowserLauncher.launch") as mock:
-            mock.return_value = launch_result
+        not_running = BrowserSessionResult(browser_name="Chrome", processes=[])
+        with patch("browser.step_handlers.BrowserLauncher.launch") as mock_launch, \
+             patch("browser.step_handlers.BrowserSessionManager.find") as mock_find:
+            mock_launch.return_value = launch_result
+            mock_find.return_value = not_running
             error = launch_browser(session)
             self.assertIsNone(error)
             self.assertEqual(session._launch_result.pid, 1234)
@@ -197,8 +200,11 @@ class TestLaunchBrowser(unittest.TestCase):
             error_code=LaunchErrorCode.PERMISSION_DENIED,
             error_message="access denied",
         )
-        with patch("browser.step_handlers.BrowserLauncher.launch") as mock:
-            mock.return_value = launch_result
+        not_running = BrowserSessionResult(browser_name="Chrome", processes=[])
+        with patch("browser.step_handlers.BrowserLauncher.launch") as mock_launch, \
+             patch("browser.step_handlers.BrowserSessionManager.find") as mock_find:
+            mock_launch.return_value = launch_result
+            mock_find.return_value = not_running
             error = launch_browser(session)
             self.assertIsNotNone(error)
             self.assertEqual(error.code, AutomationErrorCode.LAUNCH_FAILED)
@@ -208,10 +214,13 @@ class TestLaunchBrowser(unittest.TestCase):
         session._detected_browser_info = BrowserInfo(
             name="Chrome", installed=True, path="/chrome.exe",
         )
-        with patch("browser.step_handlers.BrowserLauncher.launch") as mock:
-            mock.return_value = LaunchResult(success=True, pid=1)
+        not_running = BrowserSessionResult(browser_name="Chrome", processes=[])
+        with patch("browser.step_handlers.BrowserLauncher.launch") as mock_launch, \
+             patch("browser.step_handlers.BrowserSessionManager.find") as mock_find:
+            mock_launch.return_value = LaunchResult(success=True, pid=1)
+            mock_find.return_value = not_running
             launch_browser(session)
-            call_args = mock.call_args
+            call_args = mock_launch.call_args
             self.assertIn("--load-extension", call_args.kwargs.get("args", call_args[1].get("args", [])))
 
     def test_exception_returns_error(self):
@@ -219,11 +228,53 @@ class TestLaunchBrowser(unittest.TestCase):
         session._detected_browser_info = BrowserInfo(
             name="Chrome", installed=True, path="/chrome.exe",
         )
-        with patch("browser.step_handlers.BrowserLauncher.launch") as mock:
-            mock.side_effect = OSError("spawn failed")
+        not_running = BrowserSessionResult(browser_name="Chrome", processes=[])
+        with patch("browser.step_handlers.BrowserLauncher.launch") as mock_launch, \
+             patch("browser.step_handlers.BrowserSessionManager.find") as mock_find:
+            mock_launch.side_effect = OSError("spawn failed")
+            mock_find.return_value = not_running
             error = launch_browser(session)
             self.assertIsNotNone(error)
             self.assertEqual(error.code, AutomationErrorCode.LAUNCH_FAILED)
+
+    def test_reuses_existing_session_opens_url(self):
+        session = AutomationSession(browser_name="Chrome", target_url="chrome://extensions")
+        session._detected_browser_info = BrowserInfo(
+            name="Chrome", installed=True, path="/chrome.exe",
+        )
+        # Mock browser session as already running
+        running = BrowserSessionResult(browser_name="Chrome", processes=[ProcessInfo(
+            pid=5678, name="chrome.exe", exe_path="/chrome.exe",
+            browser_name="Chrome", browser_exe="chrome.exe",
+        )])
+        with patch("browser.step_handlers.BrowserLauncher.launch") as mock_launch, \
+             patch("browser.step_handlers.BrowserSessionManager.find") as mock_find:
+            mock_launch.return_value = LaunchResult(success=True, pid=5678)
+            mock_find.return_value = running
+            error = launch_browser(session)
+            self.assertIsNone(error)
+            # BrowserLauncher.launch should have been called with target_url
+            mock_launch.assert_called_once_with(
+                exe_path="/chrome.exe", args=[], url="chrome://extensions"
+            )
+
+    def test_reuses_existing_session_no_url(self):
+        session = AutomationSession(browser_name="Chrome", target_url="")
+        session._detected_browser_info = BrowserInfo(
+            name="Chrome", installed=True, path="/chrome.exe",
+        )
+        # Mock browser session as already running
+        running = BrowserSessionResult(browser_name="Chrome", processes=[ProcessInfo(
+            pid=5678, name="chrome.exe", exe_path="/chrome.exe",
+            browser_name="Chrome", browser_exe="chrome.exe",
+        )])
+        with patch("browser.step_handlers.BrowserLauncher.launch") as mock_launch, \
+             patch("browser.step_handlers.BrowserSessionManager.find") as mock_find:
+            mock_find.return_value = running
+            error = launch_browser(session)
+            self.assertIsNone(error)
+            # BrowserLauncher.launch should NOT have been called
+            mock_launch.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════════════════

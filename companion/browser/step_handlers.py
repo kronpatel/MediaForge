@@ -34,7 +34,10 @@ from .browser_profiles import BrowserProfileManager
 from .browser_sessions import BrowserSessionManager
 from .browser_registry import BrowserRegistry
 from .browser_extension_installer import ExtensionInstallationEngine
-import extension_manager
+
+# Lazy import — resolved on first use to avoid circular dependency
+# with extension_manager.  Tests may mock this attribute directly.
+extension_manager = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +131,9 @@ def validate_extension(session: AutomationSession) -> AutomationError | None:
 def launch_browser(session: AutomationSession) -> AutomationError | None:
     """Launch the detected browser with the extension loaded.
 
-    Uses :meth:`BrowserLauncher.launch` with ``--load-extension`` arg.
+    If the browser is already running, skips launch and reuses the
+    existing session.  Uses :meth:`BrowserLauncher.launch` with
+    ``--load-extension`` arg when a fresh launch is needed.
     Stores the :class:`LaunchResult` on ``session._launch_result``.
 
     Returns ``None`` on success, or an error if launch failed.
@@ -136,6 +141,36 @@ def launch_browser(session: AutomationSession) -> AutomationError | None:
     browser_info = getattr(session, "_detected_browser_info", None)
     if browser_info is None or not browser_info.installed:
         return browser_not_found(session.browser_name)
+
+    try:
+        existing = BrowserSessionManager.find(session.browser_name)
+        if existing and existing.is_running:
+            from .browser_launcher import LaunchResult  # noqa: PLC0415
+            session._launch_result = LaunchResult(  # type: ignore[attr-defined]
+                success=True,
+                pid=existing.pids[0] if existing.pids else 0,
+                browser_name=session.browser_name,
+                exe_path=browser_info.path,
+            )
+            logger.info(
+                "[StepHandlers] Reusing existing %s session (PID %s)",
+                session.browser_name, existing.pids,
+            )
+            if session.target_url:
+                try:
+                    BrowserLauncher.launch(
+                        exe_path=browser_info.path,
+                        args=[],
+                        url=session.target_url,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[StepHandlers] Failed to open URL in existing browser: %s",
+                        exc,
+                    )
+            return None
+    except Exception:  # noqa: BLE001
+        pass
 
     ext_dir = session.extension_dir
     args = ["--load-extension", ext_dir] if ext_dir else []
@@ -238,6 +273,20 @@ def verify_installation(session: AutomationSession) -> AutomationError | None:
 
     browser_info = getattr(session, "_detected_browser_info", None)
     detected_browsers = [browser_info] if browser_info and browser_info.installed else None
+
+    # Lazy-resolve the extension_manager module to avoid circular import
+    # at module load time.  Tests may pre-set this attribute via mock.
+    global extension_manager  # noqa: PLW0603
+    if extension_manager is None:
+        try:
+            import extension_manager as _mod  # noqa: PLC0415
+            extension_manager = _mod
+        except ImportError:
+            return make_error(
+                AutomationErrorCode.EXTENSION_MISSING,
+                "extension_manager module not available",
+                details={"extension_dir": ext_dir},
+            )
 
     try:
         results, installed_any = extension_manager.detect_browser_registration(

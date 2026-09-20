@@ -100,7 +100,7 @@ _VALID_TRANSITIONS[AutomationState.PENDING]   = {
     AutomationState.LAUNCHING, AutomationState.CANCELLED, AutomationState.FAILED,
 }
 _VALID_TRANSITIONS[AutomationState.LAUNCHING] = {
-    AutomationState.RUNNING, AutomationState.CANCELLED, AutomationState.FAILED,
+    AutomationState.RUNNING, AutomationState.COMPLETED, AutomationState.CANCELLED, AutomationState.FAILED,
 }
 _VALID_TRANSITIONS[AutomationState.RUNNING]   = {
     AutomationState.COMPLETED, AutomationState.CANCELLED, AutomationState.FAILED,
