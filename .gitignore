@@ -71,3 +71,4 @@ build_test.log
 install_debug.log
 install_lowest.log
 
+.claude/
