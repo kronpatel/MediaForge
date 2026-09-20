@@ -75,19 +75,30 @@
         const shortsMatch = url.pathname.match(/^\/shorts\/([^/?#]+)/);
         const titleNode = findTitleContainer();
 
+        const isInstagram = url.hostname.includes("instagram.com");
+        const instagramMatch = url.pathname.match(/^\/(reel|p)\/([^/?#]+)/);
+
         return {
             videoId: videoId || shortsMatch?.[1] || "",
             playlistId,
-            title: titleNode?.textContent?.trim() || "YouTube media",
+            title: titleNode?.textContent?.trim() || (isInstagram ? "Instagram media" : "YouTube media"),
             isWatch: url.pathname === "/watch" && Boolean(videoId),
             isShort: Boolean(shortsMatch),
             isPlaylist: url.pathname === "/playlist" && Boolean(playlistId),
+            isInstagram,
+            isInstagramVideo: isInstagram && Boolean(instagramMatch),
+            instagramId: instagramMatch?.[2] || "",
+            pathname: url.pathname,
             href: window.location.href
         };
     }
 
     function getDownloadUrl(mode) {
         const page = getPageInfo();
+
+        if (page.isInstagramVideo && page.instagramId) {
+            return `https://www.instagram.com${page.pathname}`;
+        }
 
         if (mode.startsWith("playlist_") && page.playlistId) {
             return `https://www.youtube.com/playlist?list=${page.playlistId}`;
@@ -137,6 +148,32 @@
         const style = document.createElement("style");
         style.id = STYLE_ID;
         style.textContent = `
+            @keyframes kerzox-fade-in {
+                from { opacity: 0; transform: translateY(10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            .kerzox-toast {
+                position: fixed;
+                bottom: 24px;
+                right: 24px;
+                background: #111;
+                border: 1px solid rgba(255,255,255,0.2);
+                color: #fff;
+                padding: 12px 20px;
+                border-radius: 8px;
+                font: 500 14px/20px Roboto, Arial, sans-serif;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+                z-index: 2147483648;
+                animation: kerzox-fade-in 300ms ease-out forwards;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+            .kerzox-toast.kerzox-toast-error {
+                border-color: rgba(255,100,100,0.5);
+                background: #250b0b;
+            }
+
             #${BUTTON_ID}, #${MENU_ID} button {
                 font-family: Roboto, Arial, sans-serif;
             }
@@ -862,6 +899,10 @@
     }
 
     function findActionContainer() {
+        if (window.location.hostname.includes("instagram.com")) {
+            return document.querySelector("section._aamu._ae3_._ae47._ae48, section._aamz, section[data-testid='ufi-section']") || document.querySelector("article");
+        }
+
         const selectors = [
             "ytd-watch-metadata #actions #top-level-buttons-computed",
             "ytd-watch-metadata #actions-inner #top-level-buttons-computed",
@@ -874,6 +915,10 @@
     }
 
     function findTitleContainer() {
+        if (window.location.hostname.includes("instagram.com")) {
+            return document.querySelector("h1") || document.querySelector("article section:first-of-type span");
+        }
+
         const selectors = [
             "ytd-watch-metadata h1.ytd-watch-metadata",
             "ytd-watch-metadata h1",
@@ -1082,16 +1127,35 @@
         }
     }
 
-    function setStatus(message, isLoading = false) {
+    function showToast(message, isError = false) {
+        const toast = document.createElement("div");
+        toast.className = "kerzox-toast";
+        if (isError) toast.classList.add("kerzox-toast-error");
+
+        toast.innerHTML = `
+            ${isError ? icon('close') : icon('spark')}
+            <span>${message}</span>
+        `;
+        document.body.appendChild(toast);
+
+        setTimeout(() => {
+            if (toast.parentNode) toast.parentNode.removeChild(toast);
+        }, 4000);
+    }
+
+    function setStatus(message, isLoading = false, isError = false) {
         updateProgress({ message, progress: 0 });
         setLoading(isLoading);
+        if (isError || message.includes("Adding download") || message.includes("success")) {
+            showToast(message, isError);
+        }
     }
 
     async function startDownload(mode) {
         const url = getDownloadUrl(mode);
 
         if (!url) {
-            setStatus("No supported YouTube video or playlist found.");
+            setStatus("No supported MediaForge media URL found.", false, true);
             return;
         }
 
@@ -1104,7 +1168,7 @@
             const result = await apiRequest("/download", "POST", { url, mode });
 
             if (!result.success || !result.data?.success) {
-                setStatus(result.error || result.data?.message || "Download request failed.");
+                setStatus(result.error || result.data?.message || "Download request failed.", false, true);
                 return;
             }
 
@@ -1112,11 +1176,12 @@
             activeJobs.add(result.data.job_id);
             updateProgress(result.data.job);
             setLoading(true);
+            showToast("Successfully added to download queue!");
             refreshPanels();
             pollStatus();
         } catch (error) {
             console.error("Kerzox backend error:", error);
-            setStatus("Backend not reachable.");
+            setStatus("Backend not reachable.", false, true);
         }
     }
 

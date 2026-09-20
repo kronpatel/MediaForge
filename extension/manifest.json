@@ -9,6 +9,7 @@
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
+    "https://www.instagram.com/*",
     "http://127.0.0.1:*/*"
   ],
   "background": {
@@ -17,7 +18,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.youtube.com/*"
+        "https://www.youtube.com/*",
+        "https://www.instagram.com/*"
       ],
       "js": [
         "content.js"

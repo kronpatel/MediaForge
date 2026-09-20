@@ -143,7 +143,7 @@ def set_registry_autostart(enabled: bool) -> None:
         if enabled:
             # Use sys.executable to run main.py
             main_script = os.path.join(_COMPANION_DIR, "main.py")
-            cmd = f'"{sys.executable}" "{os.path.abspath(main_script)}"'
+            cmd = f'"{sys.executable.replace("python.exe", "pythonw.exe")}" "{os.path.abspath(main_script)}"'
             winreg.SetValueEx(key, "MediaForgeCompanion", 0, winreg.REG_SZ, cmd)
         else:
             try:
@@ -249,7 +249,7 @@ class SettingsPage(BasePage):
         self._poll_entry = self._create_form_row_entry(self._form, "Poll Interval (sec)", self._poll_var, "Default is 3 seconds")
 
         self._auto_start_companion_var = ctk.BooleanVar()
-        self._create_form_row_checkbox(self._form, "Auto Start Companion", "Start Companion automatically on Windows launch", self._auto_start_companion_var)
+        self._create_form_row_checkbox(self._form, "Auto Start with Windows", "Start Companion automatically in the System Tray on Windows launch", self._auto_start_companion_var)
 
         self._auto_start_backend_var = ctk.BooleanVar()
         self._create_form_row_checkbox(self._form, "Auto Start Backend", "Start the backend process automatically on Companion startup", self._auto_start_backend_var)

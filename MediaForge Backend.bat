@@ -13,6 +13,6 @@ if exist ".\.venv\Scripts\activate.bat" (
 )
 echo [MediaForge] Starting Backend Server...
 
-cd /d "%~dp0backend"
-python app.py
-pause
+cd /d "%~dp0companion"
+start pythonw main.py
+exit
