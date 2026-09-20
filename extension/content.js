@@ -73,10 +73,11 @@
         const videoId = url.searchParams.get("v") || "";
         const playlistId = url.searchParams.get("list") || "";
         const shortsMatch = url.pathname.match(/^\/shorts\/([^/?#]+)/);
-        const titleNode = findTitleContainer();
 
         const isInstagram = url.hostname.includes("instagram.com");
         const instagramMatch = url.pathname.match(/^\/(reel|p)\/([^/?#]+)/);
+
+        let titleNode = findTitleContainer();
 
         return {
             videoId: videoId || shortsMatch?.[1] || "",
@@ -121,7 +122,7 @@
 
     function isSupportedPage() {
         const page = getPageInfo();
-        return page.isWatch || page.isShort || page.isPlaylist;
+        return page.isWatch || page.isShort || page.isPlaylist || page.isInstagramVideo;
     }
 
     function icon(name) {
@@ -196,6 +197,7 @@
                 padding: 0 13px;
                 transition: background 160ms ease, transform 160ms ease, box-shadow 160ms ease;
                 white-space: nowrap;
+                z-index: 2000;
             }
 
             #${BUTTON_ID}:hover,
@@ -900,7 +902,7 @@
 
     function findActionContainer() {
         if (window.location.hostname.includes("instagram.com")) {
-            return document.querySelector("section._aamu._ae3_._ae47._ae48, section._aamz, section[data-testid='ufi-section']") || document.querySelector("article");
+            return document.querySelector("section[data-testid='ufi-section'], section._aamu, article div:not([class]) section");
         }
 
         const selectors = [
@@ -916,7 +918,7 @@
 
     function findTitleContainer() {
         if (window.location.hostname.includes("instagram.com")) {
-            return document.querySelector("h1") || document.querySelector("article section:first-of-type span");
+            return document.querySelector("article");
         }
 
         const selectors = [
@@ -963,7 +965,14 @@
             const slot = document.createElement("div");
             slot.id = TITLE_SLOT_ID;
             slot.appendChild(button);
-            titleContainer.insertAdjacentElement("afterend", slot);
+
+            // Insert smartly depending on Instagram container tree vs YouTube
+            if (window.location.hostname.includes("instagram.com")) {
+                titleContainer.appendChild(slot);
+            } else {
+                titleContainer.insertAdjacentElement("afterend", slot);
+            }
+
             currentPageKey = pageKey;
             return true;
         }
@@ -1421,11 +1430,11 @@
         activeTimeouts.push(id);
     }
 
-    function watchYouTubeNavigation() {
+    function watchNavigation() {
         const onNavigate = () => {
             currentPageKey = "";
             clearAllTimeouts();
-            
+
             if (isSupportedPage()) {
                 connectObserver();
                 scheduleInject();
@@ -1458,7 +1467,7 @@
     }
 
     function start() {
-        watchYouTubeNavigation();
+        watchNavigation();
         if (isSupportedPage()) {
             connectObserver();
             scheduleInject();
