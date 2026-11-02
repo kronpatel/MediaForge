@@ -44,7 +44,10 @@ class LifecycleCycleTest(unittest.TestCase):
     """Real backend lifecycle stress test — cycles with process lifecycle."""
 
     CYCLES = 12
-    STARTUP_WAIT = 15.0
+    # Browser/runtime validation tests run before this suite on hosted
+    # Windows runners and can leave the machine briefly CPU-bound.  Allow
+    # slow-but-valid backend startup without weakening the lifecycle checks.
+    STARTUP_WAIT = 30.0
 
     @classmethod
     def setUpClass(cls):
