@@ -36,6 +36,56 @@ from downloader import (
 )
 
 
+# ── Test isolation: route all backend data paths to a temp dir ──
+_ISOLATION_TMPDIR = None
+_ISOLATION_ORIG_PATHS = {}
+
+
+def setUpModule():
+    global _ISOLATION_TMPDIR, _ISOLATION_ORIG_PATHS, BASE_DIR
+    import diagnostics as _diag
+    _ISOLATION_TMPDIR = tempfile.TemporaryDirectory(prefix="mf_test_diag_")
+    _tmp = _ISOLATION_TMPDIR.name
+    _ISOLATION_ORIG_PATHS = {
+        "_dl.BASE_DIR": _dl.BASE_DIR,
+        "_dl.QUEUE_STATE_FILE": _dl.QUEUE_STATE_FILE,
+        "_dl.HISTORY_FILE": _dl.HISTORY_FILE,
+        "_dl.SETTINGS_FILE": _dl.SETTINGS_FILE,
+        "_dl.DOWNLOAD_DIR": _dl.DOWNLOAD_DIR,
+        "diagnostics.BASE_DIR": _diag.BASE_DIR,
+        "diagnostics.HISTORY_FILE": _diag.HISTORY_FILE,
+        "diagnostics.DIAGNOSTICS_EXPORT_FILE": _diag.DIAGNOSTICS_EXPORT_FILE,
+        "test.BASE_DIR": BASE_DIR,
+    }
+    _dl.BASE_DIR = _tmp
+    _dl.QUEUE_STATE_FILE = os.path.join(_tmp, "queue_state.json")
+    _dl.HISTORY_FILE = os.path.join(_tmp, "download_history.jsonl")
+    _dl.SETTINGS_FILE = os.path.join(_tmp, "settings.json")
+    _dl.DOWNLOAD_DIR = os.path.join(_tmp, "Downloads")
+    os.makedirs(_dl.DOWNLOAD_DIR, exist_ok=True)
+    _diag.BASE_DIR = _tmp
+    _diag.HISTORY_FILE = os.path.join(_tmp, "download_history.jsonl")
+    _diag.DIAGNOSTICS_EXPORT_FILE = os.path.join(_tmp, "diagnostics.json")
+    BASE_DIR = _dl.BASE_DIR
+
+
+def tearDownModule():
+    global _ISOLATION_TMPDIR, BASE_DIR
+    import diagnostics as _diag
+    _dl.BASE_DIR = _ISOLATION_ORIG_PATHS["_dl.BASE_DIR"]
+    _dl.QUEUE_STATE_FILE = _ISOLATION_ORIG_PATHS["_dl.QUEUE_STATE_FILE"]
+    _dl.HISTORY_FILE = _ISOLATION_ORIG_PATHS["_dl.HISTORY_FILE"]
+    _dl.SETTINGS_FILE = _ISOLATION_ORIG_PATHS["_dl.SETTINGS_FILE"]
+    _dl.DOWNLOAD_DIR = _ISOLATION_ORIG_PATHS["_dl.DOWNLOAD_DIR"]
+    _diag.BASE_DIR = _ISOLATION_ORIG_PATHS["diagnostics.BASE_DIR"]
+    _diag.HISTORY_FILE = _ISOLATION_ORIG_PATHS["diagnostics.HISTORY_FILE"]
+    _diag.DIAGNOSTICS_EXPORT_FILE = _ISOLATION_ORIG_PATHS["diagnostics.DIAGNOSTICS_EXPORT_FILE"]
+    BASE_DIR = _ISOLATION_ORIG_PATHS["test.BASE_DIR"]
+    if _ISOLATION_TMPDIR is not None:
+        _ISOLATION_TMPDIR.cleanup()
+        _ISOLATION_TMPDIR = None
+
+
 class TestHealthCheckAPI(unittest.TestCase):
     def setUp(self):
         with _jobs_lock:
@@ -98,7 +148,7 @@ class TestDiagnosticsReport(unittest.TestCase):
     def test_diagnostics_application_info(self):
         report = diagnostics_report()
         self.assertEqual(report["application"]["name"], "MediaForge Backend")
-        self.assertEqual(report["application"]["version"], "1.3.0")
+        self.assertEqual(report["application"]["version"], "2.0.0")
         self.assertGreaterEqual(report["application"]["uptime_seconds"], 0)
 
     def test_diagnostics_system_info(self):

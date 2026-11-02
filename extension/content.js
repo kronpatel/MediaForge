@@ -4,11 +4,12 @@
     if (window.__kerzox_mediaforge_initialized) return;
     window.__kerzox_mediaforge_initialized = true;
 
-    const VERSION = "1.3.1";
+    const VERSION = "2.0.0";
     const BUTTON_ID = "kerzox-download-button";
     const MENU_ID = "kerzox-download-menu";
     const STYLE_ID = "kerzox-download-style";
     const TITLE_SLOT_ID = "kerzox-title-download-slot";
+    const FLOATING_ID = "kerzox-instagram-floating-download";
 
     function apiRequest(endpoint, method = "GET", body = null) {
         return new Promise((resolve) => {
@@ -46,6 +47,11 @@
     let pollFailureCount = 0;
     const MAX_POLL_FAILURES = 5;
 
+    // Instagram floating button positioning state.
+    let igPositionRafId = null;
+    let igResizeObserver = null;
+    let igTrackedVideo = null;
+
     function clearAllTimeouts() {
         activeTimeouts.forEach((id) => window.clearTimeout(id));
         activeTimeouts = [];
@@ -75,7 +81,7 @@
         const shortsMatch = url.pathname.match(/^\/shorts\/([^/?#]+)/);
 
         const isInstagram = url.hostname.includes("instagram.com");
-        const instagramMatch = url.pathname.match(/^\/(reel|p)\/([^/?#]+)/);
+        const instagramMatch = url.pathname.match(/^\/(reel|reels|p)\/([^/?#]+)/);
 
         let titleNode = findTitleContainer();
 
@@ -149,30 +155,116 @@
         const style = document.createElement("style");
         style.id = STYLE_ID;
         style.textContent = `
-            @keyframes kerzox-fade-in {
-                from { opacity: 0; transform: translateY(10px); }
+            @keyframes kerzox-toast-in {
+                from { opacity: 0; transform: translateY(-8px); }
                 to { opacity: 1; transform: translateY(0); }
             }
-            .kerzox-toast {
+            @keyframes kerzox-toast-out {
+                from { opacity: 1; transform: translateY(0); }
+                to { opacity: 0; transform: translateY(-8px); }
+            }
+            .kerzox-toast-stack {
                 position: fixed;
-                bottom: 24px;
-                right: 24px;
-                background: #111;
-                border: 1px solid rgba(255,255,255,0.2);
-                color: #fff;
-                padding: 12px 20px;
-                border-radius: 8px;
-                font: 500 14px/20px Roboto, Arial, sans-serif;
-                box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+                top: 20px;
+                right: 20px;
                 z-index: 2147483648;
-                animation: kerzox-fade-in 300ms ease-out forwards;
                 display: flex;
-                align-items: center;
-                gap: 10px;
+                flex-direction: column;
+                gap: 8px;
+                pointer-events: none;
+                max-width: 340px;
+                width: 340px;
+            }
+            .kerzox-toast {
+                background: rgba(14, 14, 14, 0.88);
+                backdrop-filter: blur(16px);
+                -webkit-backdrop-filter: blur(16px);
+                border: 1px solid rgba(255,255,255,0.12);
+                color: #fff;
+                padding: 10px 12px;
+                border-radius: 10px;
+                font: 500 12px/17px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+                box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+                animation: kerzox-toast-in 220ms ease-out forwards;
+                display: flex;
+                align-items: flex-start;
+                gap: 8px;
+                pointer-events: auto;
+                position: relative;
+                word-break: break-word;
+            }
+            .kerzox-toast.kerzox-toast-dismissing {
+                animation: kerzox-toast-out 180ms ease-in forwards;
             }
             .kerzox-toast.kerzox-toast-error {
-                border-color: rgba(255,100,100,0.5);
-                background: #250b0b;
+                border-color: rgba(255,80,80,0.4);
+                background: rgba(40, 8, 8, 0.92);
+            }
+            .kerzox-toast.kerzox-toast-success {
+                border-color: rgba(52,199,89,0.35);
+            }
+            .kerzox-toast svg {
+                width: 15px;
+                height: 15px;
+                fill: none;
+                stroke: currentColor;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+                stroke-width: 2;
+                flex-shrink: 0;
+                margin-top: 1px;
+            }
+            .kerzox-toast-error svg {
+                stroke: #ff6b6b;
+            }
+            .kerzox-toast-success svg {
+                stroke: #34c759;
+            }
+            .kerzox-toast-body {
+                flex: 1;
+                min-width: 0;
+            }
+            .kerzox-toast-msg {
+                color: #e8e8e8;
+                line-height: 17px;
+            }
+            .kerzox-toast-close {
+                background: none;
+                border: none;
+                color: rgba(255,255,255,0.4);
+                cursor: pointer;
+                padding: 0;
+                margin: 0 0 0 4px;
+                flex-shrink: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                transition: background 120ms ease, color 120ms ease;
+            }
+            .kerzox-toast-close:hover {
+                background: rgba(255,255,255,0.1);
+                color: rgba(255,255,255,0.8);
+            }
+            .kerzox-toast-close svg {
+                width: 12px;
+                height: 12px;
+                stroke-width: 2.5;
+            }
+            @media (max-width: 480px) {
+                .kerzox-toast-stack {
+                    right: 10px;
+                    left: 10px;
+                    max-width: none;
+                    width: auto;
+                }
+                .kerzox-toast {
+                    padding: 8px 10px;
+                    font-size: 11px;
+                    border-radius: 8px;
+                }
             }
 
             #${BUTTON_ID}, #${MENU_ID} button {
@@ -760,11 +852,25 @@
         document.getElementById(BUTTON_ID)?.remove();
         document.getElementById(MENU_ID)?.remove();
         document.getElementById(TITLE_SLOT_ID)?.remove();
+        document.getElementById(FLOATING_ID)?.remove();
+        teardownIgPositioning();
         clearAllTimeouts();
         window.clearTimeout(statusTimer);
         window.clearTimeout(panelTimer);
         activeJobId = "";
         activeJobs.clear();
+    }
+
+    function teardownIgPositioning() {
+        if (igPositionRafId !== null) {
+            cancelAnimationFrame(igPositionRafId);
+            igPositionRafId = null;
+        }
+        if (igResizeObserver) {
+            igResizeObserver.disconnect();
+            igResizeObserver = null;
+        }
+        igTrackedVideo = null;
     }
 
     function createButton() {
@@ -901,10 +1007,6 @@
     }
 
     function findActionContainer() {
-        if (window.location.hostname.includes("instagram.com")) {
-            return document.querySelector("section[data-testid='ufi-section'], section._aamu, article div:not([class]) section");
-        }
-
         const selectors = [
             "ytd-watch-metadata #actions #top-level-buttons-computed",
             "ytd-watch-metadata #actions-inner #top-level-buttons-computed",
@@ -917,10 +1019,6 @@
     }
 
     function findTitleContainer() {
-        if (window.location.hostname.includes("instagram.com")) {
-            return document.querySelector("article");
-        }
-
         const selectors = [
             "ytd-watch-metadata h1.ytd-watch-metadata",
             "ytd-watch-metadata h1",
@@ -936,13 +1034,29 @@
         if (!isSupportedPage()) {
             currentPageKey = "";
             removeInjectedUi();
-            return true; // Unsupported page; do not retry.
+            return true;
         }
 
-        const pageKey = getPageInfo().href;
+        const page = getPageInfo();
+        const pageKey = page.href;
+
+        // Instagram: use floating download button, skip action-bar injection entirely.
+        if (page.isInstagramVideo) {
+            // Remove any leftover YouTube-style UI.
+            document.getElementById(BUTTON_ID)?.remove();
+            document.getElementById(MENU_ID)?.remove();
+            document.getElementById(TITLE_SLOT_ID)?.remove();
+            ensureStyles();
+            createOrUpdateFloatingButton();
+            currentPageKey = pageKey;
+            return true;
+        }
+
+        // YouTube: remove floating button if present, use action-bar injection.
+        document.getElementById(FLOATING_ID)?.remove();
+
         const existingButton = document.getElementById(BUTTON_ID);
         const existingMenu = document.getElementById(MENU_ID);
-
         if (existingButton && existingMenu && currentPageKey === pageKey) {
             return true;
         }
@@ -965,20 +1079,281 @@
             const slot = document.createElement("div");
             slot.id = TITLE_SLOT_ID;
             slot.appendChild(button);
-
-            // Insert smartly depending on Instagram container tree vs YouTube
-            if (window.location.hostname.includes("instagram.com")) {
-                titleContainer.appendChild(slot);
-            } else {
-                titleContainer.insertAdjacentElement("afterend", slot);
-            }
-
+            titleContainer.insertAdjacentElement("afterend", slot);
             currentPageKey = pageKey;
             return true;
         }
 
         return false;
     }
+
+    function createOrUpdateFloatingButton() {
+        const existing = document.getElementById(FLOATING_ID);
+        if (existing) {
+            console.log("[MediaForge][Instagram] Floating button already exists");
+            // Re-anchor to whatever video is active now.
+            anchorToActiveReel();
+            return;
+        }
+
+        console.log("[MediaForge][Instagram] Floating button created");
+
+        const wrapper = document.createElement("div");
+        wrapper.id = FLOATING_ID;
+
+        const shadow = wrapper.attachShadow({ mode: "open" });
+
+        const style = document.createElement("style");
+        style.textContent = `
+            :host {
+                position: fixed !important;
+                z-index: 2147483647 !important;
+                pointer-events: none !important;
+                display: block !important;
+                top: 0 !important;
+                left: 0 !important;
+            }
+            .mf-float-inner {
+                pointer-events: auto;
+                display: inline-flex;
+                flex-direction: column;
+                align-items: center;
+            }
+            .mf-float-btn {
+                display: inline-flex;
+                align-items: center;
+                gap: 7px;
+                background: rgba(0, 0, 0, 0.72);
+                backdrop-filter: blur(12px);
+                -webkit-backdrop-filter: blur(12px);
+                border: 1px solid rgba(255,255,255,0.14);
+                border-radius: 10px;
+                color: #fff;
+                padding: 8px 14px;
+                cursor: pointer;
+                font: 700 13px/18px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+                white-space: nowrap;
+                box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+                transition: background 140ms ease, box-shadow 140ms ease;
+                pointer-events: auto;
+                user-select: none;
+            }
+            .mf-float-btn:hover {
+                background: rgba(0, 0, 0, 0.85);
+                box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+            }
+            .mf-float-btn:active {
+                background: rgba(0, 0, 0, 0.92);
+            }
+            .mf-float-btn svg {
+                width: 16px;
+                height: 16px;
+                fill: none;
+                stroke: currentColor;
+                stroke-width: 2;
+                stroke-linecap: round;
+                stroke-linejoin: round;
+                flex-shrink: 0;
+            }
+            .mf-brand {
+                font: 600 9px/12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+                color: rgba(255,255,255,0.4);
+                margin-top: 3px;
+                text-align: center;
+                letter-spacing: 0.4px;
+            }
+            /* Compact mode for small reels */
+            :host(.mf-compact) .mf-float-btn {
+                padding: 6px 10px;
+                font-size: 11px;
+                gap: 5px;
+                border-radius: 8px;
+            }
+            :host(.mf-compact) .mf-float-btn svg {
+                width: 14px;
+                height: 14px;
+            }
+            :host(.mf-compact) .mf-brand {
+                display: none;
+            }
+        `;
+
+        const container = document.createElement("div");
+        container.className = "mf-float-inner";
+        container.innerHTML = `
+            <button class="mf-float-btn" type="button" title="Download with MediaForge">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+                <span>Download</span>
+            </button>
+            <div class="mf-brand">MediaForge</div>
+        `;
+
+        const btn = container.querySelector(".mf-float-btn");
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            const currentUrl = window.location.href;
+            console.log("[MediaForge][Instagram] Floating download clicked");
+            console.log("[MediaForge][Instagram] Current URL:", currentUrl);
+            startDownloadInstagram();
+        });
+
+        shadow.appendChild(style);
+        shadow.appendChild(container);
+        document.body.appendChild(wrapper);
+
+        // Start positioning loop after the element is in the DOM.
+        anchorToActiveReel();
+    }
+
+    /**
+     * Find the most-visible <video> element in the viewport.
+     * Uses pure geometry — no Instagram class names or selectors.
+     */
+    function findActiveReelVideo() {
+        const videos = document.querySelectorAll("video");
+        if (!videos.length) return null;
+
+        const vpW = window.innerWidth;
+        const vpH = window.innerHeight;
+        let best = null;
+        let bestArea = 0;
+
+        videos.forEach((video) => {
+            // Skip tiny/hidden videos (thumbnails, previews).
+            if (video.offsetWidth < 100 || video.offsetHeight < 100) return;
+
+            const rect = video.getBoundingClientRect();
+            // Visible portion clipped to viewport.
+            const visLeft = Math.max(rect.left, 0);
+            const visTop = Math.max(rect.top, 0);
+            const visRight = Math.min(rect.right, vpW);
+            const visBottom = Math.min(rect.bottom, vpH);
+
+            const visW = visRight - visLeft;
+            const visH = visBottom - visTop;
+            if (visW <= 0 || visH <= 0) return;
+
+            const area = visW * visH;
+            if (area > bestArea) {
+                bestArea = area;
+                best = video;
+            }
+        });
+
+        return best;
+    }
+
+    /**
+     * Start (or restart) the rAF loop that keeps the floating button
+     * anchored to the top-right corner of the active Reel video.
+     */
+    function anchorToActiveReel() {
+        // Clean up any previous loop / observer.
+        teardownIgPositioning();
+
+        const wrapper = document.getElementById(FLOATING_ID);
+        if (!wrapper) return;
+
+        // Set up a ResizeObserver to re-anchor when the video resizes.
+        igResizeObserver = new ResizeObserver(() => {
+            positionFloatingOverVideo(wrapper);
+        });
+
+        // rAF loop: tracks scroll, navigation, video swaps.
+        function tick() {
+            positionFloatingOverVideo(wrapper);
+            igPositionRafId = requestAnimationFrame(tick);
+        }
+        igPositionRafId = requestAnimationFrame(tick);
+    }
+
+    /**
+     * Position the floating wrapper at the top-right of the largest
+     * visible <video>, constrained fully inside the video bounds.
+     */
+    function positionFloatingOverVideo(wrapper) {
+        if (!wrapper || !document.body.contains(wrapper)) {
+            teardownIgPositioning();
+            return;
+        }
+
+        const video = findActiveReelVideo();
+
+        // Track the video for ResizeObserver.
+        if (video !== igTrackedVideo) {
+            if (igResizeObserver) {
+                if (igTrackedVideo) igResizeObserver.unobserve(igTrackedVideo);
+                if (video) igResizeObserver.observe(video);
+            }
+            igTrackedVideo = video;
+        }
+
+        if (!video) {
+            wrapper.style.display = "none";
+            return;
+        }
+
+        wrapper.style.display = "";
+
+        const vRect = video.getBoundingClientRect();
+        const MARGIN = 14;
+
+        // Measure the button. Shadow DOM elements aren't measurable from outside,
+        // so we measure the host element itself after it has rendered.
+        const btnW = wrapper.offsetWidth || 120;
+        const btnH = wrapper.offsetHeight || 40;
+
+        // Check if the reel is too small — switch to compact mode.
+        const isCompact = vRect.width < 300 || vRect.height < 400;
+        wrapper.classList.toggle("mf-compact", isCompact);
+
+        // Preferred position: top-right inside the video.
+        let x = vRect.right - btnW - MARGIN;
+        let y = vRect.top + MARGIN;
+
+        // Boundary safety: clamp fully inside video rect.
+        x = Math.max(vRect.left + MARGIN, Math.min(x, vRect.right - btnW - MARGIN));
+        y = Math.max(vRect.top + MARGIN, Math.min(y, vRect.bottom - btnH - MARGIN));
+
+        // Also clamp to viewport so it doesn't go offscreen.
+        x = Math.max(0, Math.min(x, window.innerWidth - btnW));
+        y = Math.max(0, Math.min(y, window.innerHeight - btnH));
+
+        wrapper.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+    }
+
+    async function startDownloadInstagram() {
+        const page = getPageInfo();
+        if (!page.isInstagramVideo || !page.instagramId) {
+            showToast("No Instagram media found on this page.", true);
+            return;
+        }
+
+        const url = `https://www.instagram.com${page.pathname}`;
+        const mode = "1080p";
+
+        ensureStyles();
+        showToast("Adding Instagram download to queue...");
+
+        try {
+            const result = await apiRequest("/download", "POST", { url, mode });
+
+            if (!result.success || !result.data?.success) {
+                showToast(result.error || result.data?.message || "Download request failed.", true);
+                return;
+            }
+
+            activeJobId = result.data.job_id;
+            activeJobs.add(result.data.job_id);
+            showToast("Successfully added to download queue!");
+            pollStatus();
+        } catch (error) {
+            console.error("Kerzox backend error:", error);
+            showToast("Backend not reachable.", true);
+        }
+    }
+
 
     function positionMenu() {
         const button = document.getElementById(BUTTON_ID);
@@ -1136,20 +1511,80 @@
         }
     }
 
+    const TOAST_STACK_ID = "kerzox-toast-stack";
+    const MAX_TOASTS = 4;
+
+    function getToastStack() {
+        let stack = document.getElementById(TOAST_STACK_ID);
+        if (!stack) {
+            stack = document.createElement("div");
+            stack.id = TOAST_STACK_ID;
+            stack.className = "kerzox-toast-stack";
+            document.body.appendChild(stack);
+        }
+        return stack;
+    }
+
+    function dismissToast(toast) {
+        if (toast.dataset.dismissing) return;
+        toast.dataset.dismissing = "1";
+        toast.classList.add("kerzox-toast-dismissing");
+        toast.addEventListener("animationend", () => {
+            toast.remove();
+            // Remove empty stack container.
+            const stack = document.getElementById(TOAST_STACK_ID);
+            if (stack && !stack.children.length) stack.remove();
+        }, { once: true });
+    }
+
     function showToast(message, isError = false) {
+        ensureStyles();
+        const stack = getToastStack();
+
+        // Evict oldest toasts if at capacity.
+        while (stack.children.length >= MAX_TOASTS) {
+            const oldest = stack.firstElementChild;
+            if (oldest) dismissToast(oldest);
+        }
+
+        const isSuccess = !isError && (
+            message.includes("success") || message.includes("Success") ||
+            message.includes("complete") || message.includes("Complete") ||
+            message.includes("added") || message.includes("Added")
+        );
+
         const toast = document.createElement("div");
         toast.className = "kerzox-toast";
         if (isError) toast.classList.add("kerzox-toast-error");
+        if (isSuccess) toast.classList.add("kerzox-toast-success");
+
+        const iconSvg = isError
+            ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>'
+            : isSuccess
+            ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>'
+            : '<svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>';
+
+        const closeSvg = '<svg viewBox="0 0 24 24"><path d="m18 6-12 12"/><path d="m6 6 12 12"/></svg>';
 
         toast.innerHTML = `
-            ${isError ? icon('close') : icon('spark')}
-            <span>${message}</span>
+            ${iconSvg}
+            <div class="kerzox-toast-body">
+                <div class="kerzox-toast-msg"></div>
+            </div>
+            <button class="kerzox-toast-close" type="button" title="Dismiss">${closeSvg}</button>
         `;
-        document.body.appendChild(toast);
+        toast.querySelector(".kerzox-toast-msg").textContent = message;
 
-        setTimeout(() => {
-            if (toast.parentNode) toast.parentNode.removeChild(toast);
-        }, 4000);
+        toast.querySelector(".kerzox-toast-close").addEventListener("click", (e) => {
+            e.stopPropagation();
+            dismissToast(toast);
+        });
+
+        stack.appendChild(toast);
+
+        // Auto-dismiss after delay.
+        const delay = isError ? 6000 : 4000;
+        setTimeout(() => dismissToast(toast), delay);
     }
 
     function setStatus(message, isLoading = false, isError = false) {
@@ -1209,7 +1644,14 @@
             pollFailureCount = 0;
             const job = result.data.job;
             updateProgress(job);
-            setLoading(["queued", "running", "downloading", "retrying"].includes(job.status));
+            // Keep controls locked for every non-terminal state.  In
+            // particular, `starting` and `verifying` are real backend states
+            // and must not briefly re-enable the download buttons.
+            const activeState = [
+                "queued", "starting", "running", "downloading",
+                "retrying", "verifying", "recovering"
+            ].includes(job.status);
+            setLoading(activeState);
 
             if (job.status === "completed") {
                 activeJobs.delete(activeJobId);
@@ -1224,6 +1666,15 @@
                 activeJobId = "";
                 updateProgress({ ...job, message: job.error || "Download failed" });
                 notifyDownload("MediaForge download failed", job.error || "Download failed", job.id);
+                refreshPanels();
+                return;
+            }
+
+            if (job.status === "cancelled") {
+                activeJobs.delete(activeJobId);
+                activeJobId = "";
+                updateProgress({ ...job, message: job.message || "Download cancelled" });
+                notifyDownload("MediaForge download cancelled", job.message || "Download cancelled", job.id);
                 refreshPanels();
                 return;
             }

@@ -192,7 +192,7 @@ class NotificationManager:
         self._renderers: list[Listener] = []
 
         self._duplicate_window = duplicate_window
-        self._recent_ids: set[str] = set()
+        self._recent_ids: dict[str, float] = {}  # notification_id -> timestamp
         self._recent_titles: dict[str, float] = {}
         self._dup_lock = threading.Lock()
 
@@ -412,18 +412,25 @@ class NotificationManager:
     def _is_duplicate(self, notification: Notification) -> bool:
         now = time.monotonic()
         with self._dup_lock:
+            expiry = now - self._duplicate_window
+
+            # Clean up stale titles
+            stale_titles = [t for t, ts in self._recent_titles.items() if ts < expiry]
+            for s in stale_titles:
+                del self._recent_titles[s]
+
+            # Clean up stale IDs (prevents unbounded growth of _recent_ids)
+            stale_ids = [i for i, ts in self._recent_ids.items() if ts < expiry]
+            for i in stale_ids:
+                del self._recent_ids[i]
+
             if notification.id in self._recent_ids:
                 return True
-
-            expiry = now - self._duplicate_window
-            stale = [t for t, ts in self._recent_titles.items() if ts < expiry]
-            for s in stale:
-                del self._recent_titles[s]
 
             if notification.title in self._recent_titles:
                 return True
 
-            self._recent_ids.add(notification.id)
+            self._recent_ids[notification.id] = now
             self._recent_titles[notification.title] = now
             return False
 

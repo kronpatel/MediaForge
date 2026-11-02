@@ -23,8 +23,9 @@ from __future__ import annotations
 import logging as _logging
 from logging.handlers import RotatingFileHandler as _RotatingFileHandler
 import os as _os
-import time as _time
+import sys as _sys
 import threading
+import time as _time
 import traceback
 from datetime import datetime
 from typing import Callable, Literal, NamedTuple
@@ -41,6 +42,8 @@ def is_portable_mode() -> bool:
     if not getattr(sys, "frozen", False):
         return True
     exe_dir = _os.path.dirname(_os.path.abspath(sys.executable))
+    if _os.path.exists(_os.path.join(exe_dir, "installed_mode.marker")):
+        return False
     if _os.path.exists(_os.path.join(exe_dir, "portable_settings.json")):
         return True
     return False
@@ -176,6 +179,18 @@ class AppLogger:
 
     def error(self, message: str, **kwargs) -> None:
         self.log(message, "ERROR", **kwargs)
+
+    def exception(self, message: str, *, exc: BaseException | None = None) -> None:
+        """Log at ERROR with the active (or supplied) exception.
+
+        When ``exc`` is not provided, the exception currently being handled
+        (``sys.exc_info()[1]``) is used, so ``except: logger.exception("msg")``
+        captures the live traceback.  Traceback emission remains gated by
+        ``self.debug`` to avoid leaking internals in production logs.
+        """
+        if exc is None:
+            exc = _sys.exc_info()[1]
+        self.log(message, "ERROR", exc=exc)
 
     def debug_log(self, message: str, **kwargs) -> None:
         if self.debug:

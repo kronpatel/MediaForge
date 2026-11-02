@@ -15,6 +15,51 @@ from downloader import (
 import recovery
 
 
+# ── Test isolation: route all backend data paths to a temp dir ──
+_ISOLATION_TMPDIR = None
+_ISOLATION_ORIG_PATHS = {}
+
+
+def setUpModule():
+    global _ISOLATION_TMPDIR, _ISOLATION_ORIG_PATHS, QUEUE_STATE_FILE
+    _ISOLATION_TMPDIR = tempfile.TemporaryDirectory(prefix="mf_test_qp_")
+    _tmp = _ISOLATION_TMPDIR.name
+    _ISOLATION_ORIG_PATHS = {
+        "BASE_DIR": downloader.BASE_DIR,
+        "QUEUE_STATE_FILE": downloader.QUEUE_STATE_FILE,
+        "HISTORY_FILE": downloader.HISTORY_FILE,
+        "SETTINGS_FILE": downloader.SETTINGS_FILE,
+        "DOWNLOAD_DIR": downloader.DOWNLOAD_DIR,
+        "recovery.BASE_DIR": recovery.BASE_DIR,
+        "recovery.QUEUE_STATE_FILE": recovery.QUEUE_STATE_FILE,
+        "recovery.HISTORY_FILE": recovery.HISTORY_FILE,
+    }
+    downloader.BASE_DIR = _tmp
+    downloader.QUEUE_STATE_FILE = os.path.join(_tmp, "queue_state.json")
+    downloader.HISTORY_FILE = os.path.join(_tmp, "download_history.jsonl")
+    downloader.SETTINGS_FILE = os.path.join(_tmp, "settings.json")
+    downloader.DOWNLOAD_DIR = os.path.join(_tmp, "Downloads")
+    os.makedirs(downloader.DOWNLOAD_DIR, exist_ok=True)
+    recovery.BASE_DIR = _tmp
+    recovery.QUEUE_STATE_FILE = os.path.join(_tmp, "queue_state.json")
+    recovery.HISTORY_FILE = os.path.join(_tmp, "download_history.jsonl")
+    # Re-bind the name imported by value from downloader
+    QUEUE_STATE_FILE = downloader.QUEUE_STATE_FILE
+
+
+def tearDownModule():
+    global _ISOLATION_TMPDIR, QUEUE_STATE_FILE
+    for _k, _v in _ISOLATION_ORIG_PATHS.items():
+        if _k.startswith("recovery."):
+            setattr(recovery, _k.split(".", 1)[1], _v)
+        else:
+            setattr(downloader, _k, _v)
+    QUEUE_STATE_FILE = _ISOLATION_ORIG_PATHS["QUEUE_STATE_FILE"]
+    if _ISOLATION_TMPDIR is not None:
+        _ISOLATION_TMPDIR.cleanup()
+        _ISOLATION_TMPDIR = None
+
+
 class TestJobSerialization(unittest.TestCase):
     def test_job_to_dict_roundtrip(self):
         job = DownloadJob(

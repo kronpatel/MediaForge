@@ -1,18 +1,14 @@
 @echo off
 title MediaForge Backend
 
-echo [MediaForge] Checking for engine updates...
-if exist ".\.venv\Scripts\activate.bat" (
-    call ".\.venv\Scripts\activate.bat"
-    python -m pip install -U --quiet yt-dlp
-) else if exist ".\venv\Scripts\activate.bat" (
-    call ".\venv\Scripts\activate.bat"
-    python -m pip install -U --quiet yt-dlp
-) else (
-    python -m pip install -U --quiet yt-dlp
-)
 echo [MediaForge] Starting Backend Server...
 
-cd /d "%~dp0companion"
-start pythonw main.py
+:: Frozen / installed layout: MediaForgeBackend.exe ships next to this script.
+if exist "%~dp0MediaForgeBackend.exe" (
+    start "" /D"%~dp0" MediaForgeBackend.exe
+) else (
+    :: Source / development layout: launch backend/app.py via the interpreter.
+    start "" /D"%~dp0" python backend/app.py
+)
+
 exit

@@ -8,6 +8,14 @@ const theme = document.getElementById("theme");
 const statusNode = document.getElementById("status");
 const versionNode = document.querySelector("[data-version]");
 
+function normalizeBackendUrl(value) {
+    return String(value || DEFAULT_BACKEND_URL).trim().replace(/\/+$/, "");
+}
+
+function backendEndpoint(path) {
+    return `${normalizeBackendUrl(API_BASE_URL)}/${String(path).replace(/^\/+/, "")}`;
+}
+
 document.getElementById("saveFolder").addEventListener("click", saveFolder);
 document.getElementById("resetFolder").addEventListener("click", resetFolder);
 document.getElementById("chooseFolder").addEventListener("click", chooseFolder);
@@ -25,7 +33,7 @@ async function loadStoredBackendUrl() {
     try {
         const stored = await chrome.storage.local.get(["kerzoxBackendUrl"]);
         if (stored.kerzoxBackendUrl) {
-            API_BASE_URL = stored.kerzoxBackendUrl;
+            API_BASE_URL = normalizeBackendUrl(stored.kerzoxBackendUrl);
         }
     } catch {
         // chrome.storage unavailable; keep default
@@ -36,7 +44,7 @@ async function loadSettings() {
     setStatus("Loading settings...");
 
     try {
-        const response = await fetch(`${API_BASE_URL}/settings`);
+        const response = await fetch(backendEndpoint("/settings"));
         const data = await response.json();
 
         if (!response.ok || !data.success) {
@@ -62,11 +70,11 @@ function applySettings(settings) {
     downloadFolder.value = settings.download_folder || "";
     ffmpegPath.value = settings.ffmpeg_path || "";
     backendUrl.value = settings.backend_url || API_BASE_URL;
-    versionNode.textContent = `v${settings.version || "1.3.1"}`;
+    versionNode.textContent = `v${settings.version || "2.0.0"}`;
 }
 
 async function saveBackendUrl() {
-    const newUrl = backendUrl.value.trim();
+    const newUrl = normalizeBackendUrl(backendUrl.value);
     if (!newUrl) {
         setStatus("Backend URL cannot be empty.");
         return;
@@ -86,7 +94,7 @@ async function saveFolder() {
     setStatus("Saving download folder...");
 
     try {
-        const response = await fetch(`${API_BASE_URL}/settings`, {
+        const response = await fetch(backendEndpoint("/settings"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -115,7 +123,7 @@ async function resetFolder() {
     setStatus("Resetting download folder...");
 
     try {
-        const response = await fetch(`${API_BASE_URL}/settings/reset-folder`, { method: "POST" });
+        const response = await fetch(backendEndpoint("/settings/reset-folder"), { method: "POST" });
         const data = await response.json();
 
         if (!response.ok || !data.success) {
@@ -136,7 +144,7 @@ async function chooseFolder() {
     setStatus("Opening folder picker...");
 
     try {
-        const response = await fetch(`${API_BASE_URL}/settings/select-folder`, { method: "POST" });
+        const response = await fetch(backendEndpoint("/settings/select-folder"), { method: "POST" });
         const data = await response.json();
 
         if (!response.ok || !data.success) {
@@ -171,7 +179,7 @@ async function saveTheme() {
     document.body.dataset.theme = theme.value;
 
     try {
-        await fetch(`${API_BASE_URL}/settings`, {
+        await fetch(backendEndpoint("/settings"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ theme: theme.value })

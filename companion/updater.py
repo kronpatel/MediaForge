@@ -22,7 +22,7 @@ import requests
 if TYPE_CHECKING:
     from logger import AppLogger
 
-COMPANION_VERSION = "1.3.1"
+COMPANION_VERSION = "2.0.0"
 OWNER = "kronpatel"
 REPO = "MediaForge"
 GITHUB_API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
@@ -35,6 +35,8 @@ def is_portable_mode() -> bool:
     if not getattr(sys, "frozen", False):
         return True
     exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    if os.path.exists(os.path.join(exe_dir, "installed_mode.marker")):
+        return False
     if os.path.exists(os.path.join(exe_dir, "portable_settings.json")):
         return True
     return False
@@ -494,7 +496,7 @@ class UpdateManager:
                 self.logger.info(f"[Updater] Update download completed successfully. Ready to install: {FINAL_DOWNLOAD_FILE}")
 
             except Exception as exc:
-                self.logger.error(f"[Updater] Download failed: {exc}")
+                self.logger.exception("[Updater] Download failed")
                 self._cleanup_temp_file()
                 self._notify("Failed", 0.0, str(exc))
             finally:
@@ -509,9 +511,17 @@ class UpdateManager:
             if not self._download_running:
                 return
             self._download_stop_event.set()
-        
-        # Give downloader thread a moment to notice the cancel and cleanup
-        time.sleep(0.2)
+
+        # Wait for the download thread to exit (it cleans up the temp file itself
+        # when it observes the stop event).  Poll _download_running instead of
+        # sleeping a fixed interval so we don't race the thread's file cleanup.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if not self._download_running:
+                break
+            time.sleep(0.05)
+
+        # Final cleanup (no-op if the thread already removed the temp file).
         self._cleanup_temp_file()
 
     def open_release_notes(self) -> None:
@@ -669,6 +679,82 @@ class UpdateManager:
     # Cache Persistence
     # ------------------------------------------------------------------
 
+    def _installer_status_candidates(self) -> list[str]:
+        """Return status-file locations used by current and older installers."""
+        candidates = [
+            os.path.join(UPDATES_DIR, "installer_status.json"),
+            os.path.join(_DIR, "updates", "installer_status.json"),
+            os.path.join(os.path.dirname(_DIR), "updates", "installer_status.json"),
+        ]
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            candidates.append(os.path.join(exe_dir, "updates", "installer_status.json"))
+        return list(dict.fromkeys(candidates))
+
+    def _recover_installation_state(self) -> None:
+        """Resolve an interrupted installer transaction on startup.
+
+        The external batch updater writes its result independently of the
+        Companion watcher.  This makes a completed or failed update visible
+        after the original process has exited or crashed.
+        """
+        status_data: dict[str, Any] | None = None
+        status_path = ""
+        for candidate in self._installer_status_candidates():
+            if not os.path.isfile(candidate):
+                continue
+            try:
+                with open(candidate, "r", encoding="utf-8-sig") as fh:
+                    loaded = json.load(fh)
+                if isinstance(loaded, dict) and loaded.get("exit_code") is not None:
+                    status_data = loaded
+                    status_path = candidate
+                    break
+            except (OSError, ValueError, TypeError):
+                continue
+
+        self._installation_in_progress = False
+        if status_data is None:
+            self._installer_state = "Interrupted"
+            self._last_install_result = "interrupted"
+            self._last_install_error = "Installer stopped before writing a completion status."
+            self._startup_recovery_events.append(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Installer Interrupted"
+            )
+            self.logger.warning(
+                "[Updater] Previous installation did not leave a completion status. "
+                "The update remains available for retry."
+            )
+        else:
+            try:
+                exit_code = int(status_data.get("exit_code"))
+            except (TypeError, ValueError):
+                exit_code = 1
+            self._last_exit_code = exit_code
+            completed_at = str(status_data.get("completed_at") or "")
+            if exit_code == 0:
+                self._pending_install = False
+                self._installer_path = ""
+                self._installer_version = ""
+                self._download_completed_at = 0.0
+                self._installer_sha256 = ""
+                self._installer_state = "Completed"
+                self._last_install_result = "success"
+                self._last_install_error = ""
+                message = "Installer completed successfully"
+            else:
+                self._installer_state = "Failed"
+                self._last_install_result = "failed"
+                self._last_install_error = f"Installer exited with code {exit_code}."
+                message = self._last_install_error
+            self._startup_recovery_events.append(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {message}"
+                + (f" ({completed_at})" if completed_at else "")
+            )
+            self.logger.info(f"[Updater] {message} ({status_path}).")
+
+        self._save_cache()
+
     def _load_cache(self) -> None:
         """Load release metadata snapshot from local cache, handling corruption gracefully."""
         if getattr(self, "_recovery_completed", False):
@@ -688,7 +774,7 @@ class UpdateManager:
                     os.remove(corrupt_path)
                 os.rename(CACHE_FILE, corrupt_path)
             except Exception as e:
-                self.logger.error(f"[Updater] Failed to rename corrupted cache file: {e}")
+                self.logger.exception("[Updater] Failed to rename corrupted cache file")
             
             # Reset parameters to default
             self._latest_version = "v—"
@@ -742,14 +828,8 @@ class UpdateManager:
 
             if self._installation_in_progress:
                 self.logger.info("[Updater] Companion started with an installation in progress. Deferring verification until backend startup...")
-                self._startup_recovery_events.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Deferred Verification Started")
+                self._recover_installation_state()
                 self._recovery_completed = True
-                
-                self._recovery_completed = True
-                try:
-                    self._save_cache()
-                except Exception:
-                    pass
             else:
                 self._recovery_completed = True
 
@@ -848,7 +928,7 @@ class UpdateManager:
                 os.fsync(fh.fileno())
             os.replace(tmp_file, CACHE_FILE)
         except Exception as exc:
-            self.logger.error(f"[Updater] Failed to save cache file: {exc}")
+            self.logger.exception("[Updater] Failed to save cache file")
             tmp_file = CACHE_FILE + ".tmp"
             if os.path.exists(tmp_file):
                 try:

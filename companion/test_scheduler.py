@@ -17,6 +17,7 @@ import sys
 import json
 import datetime
 import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch, mock_open
 
@@ -214,6 +215,202 @@ class TestEventBus(unittest.TestCase):
         self.mgr.register_listener(cb)   # register twice
         self.mgr._notify("Event", {})
         cb.assert_called_once()          # still only one call
+
+
+class FakeWindow:
+    """Minimal Tkinter-window stand-in capturing after() callbacks."""
+    def __init__(self) -> None:
+        self.after_calls = []
+        self.exists = True
+
+    def after(self, ms: int, fn) -> None:
+        self.after_calls.append(fn)
+
+    def winfo_exists(self) -> bool:
+        return self.exists
+
+
+class TestSchedulerThreadSafety(unittest.TestCase):
+    """Scheduler events must reach listeners on the Tkinter main thread."""
+
+    def setUp(self):
+        for f in (SCHEDULER_FILE, HISTORY_FILE, SCHEDULER_FILE + ".tmp", HISTORY_FILE + ".tmp"):
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        self.mgr = _make_scheduler()
+        self.mgr._schedules.clear()
+        self.window = FakeWindow()
+        self.mgr.window = self.window
+        # Do NOT start the UI poll here; tests call _start_ui_poll() explicitly
+        # when they need the recurring poll running.
+
+    def tearDown(self):
+        self.mgr.shutdown()
+        for f in (SCHEDULER_FILE, HISTORY_FILE, SCHEDULER_FILE + ".tmp", HISTORY_FILE + ".tmp"):
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+    def test_notify_from_background_thread_only_enqueues(self):
+        """_notify() from a background thread only performs queue.put(), never calls Tkinter."""
+        cb = MagicMock()
+        self.mgr.register_listener(cb)
+
+        queue_size_before = self.mgr._ui_event_queue.qsize()
+        after_calls_before = len(self.window.after_calls)
+
+        t = threading.Thread(target=self.mgr._notify, args=("Schedule Started", {"url": "https://x"}))
+        t.start()
+        t.join()
+
+        # Not delivered synchronously from the background thread
+        cb.assert_not_called()
+        # Only queue.put() was performed
+        self.assertEqual(self.mgr._ui_event_queue.qsize(), queue_size_before + 1)
+        # No Tkinter after() calls from _notify()
+        self.assertEqual(len(self.window.after_calls), after_calls_before)
+
+    def test_main_thread_poll_drains_queued_events(self):
+        """Calling _ui_poll() on the main thread drains the queue and delivers to listeners."""
+        cb = MagicMock()
+        self.mgr.register_listener(cb)
+
+        # Enqueue from background threads
+        self.mgr._notify("Event 1", {"i": 1})
+        self.mgr._notify("Event 2", {"i": 2})
+
+        cb.assert_not_called()  # Not delivered until main-thread poll runs
+
+        # Simulate main-thread poll (poll must be active to drain)
+        self.mgr._ui_poll_active = True
+        self.mgr._ui_poll()
+
+        cb.assert_any_call("Event 1", {"i": 1})
+        cb.assert_any_call("Event 2", {"i": 2})
+        self.assertEqual(cb.call_count, 2)
+
+    def test_listener_callback_runs_on_calling_thread(self):
+        """Listener callback thread identity equals the thread that calls _ui_poll()."""
+        calling_thread_id = threading.get_ident()
+        callback_thread_ids = []
+
+        def cb(event_name, payload):
+            callback_thread_ids.append(threading.get_ident())
+
+        self.mgr.register_listener(cb)
+        self.mgr._notify("Test", {"k": "v"})
+
+        # Deliver via main-thread poll (simulating Tkinter main thread)
+        self.mgr._ui_poll_active = True
+        self.mgr._ui_poll()
+
+        self.assertEqual(len(callback_thread_ids), 1)
+        self.assertEqual(callback_thread_ids[0], calling_thread_id)
+
+    def test_multiple_queued_notifications_delivered(self):
+        """Multiple queued notifications are all delivered on a single poll."""
+        cb = MagicMock()
+        self.mgr.register_listener(cb)
+
+        for i in range(5):
+            self.mgr._notify(f"Event {i}", {"i": i})
+
+        cb.assert_not_called()
+        self.mgr._ui_poll_active = True
+        self.mgr._ui_poll()
+        self.assertEqual(cb.call_count, 5)
+
+    def test_start_ui_poll_schedules_recurring_poll(self):
+        """_start_ui_poll() schedules _ui_poll via window.after(100, ...) from main thread."""
+        self.mgr._start_ui_poll()
+        self.assertTrue(self.mgr._ui_poll_active)
+        self.assertEqual(len(self.window.after_calls), 1)
+        # The scheduled function is _ui_poll
+        self.assertEqual(self.window.after_calls[0], self.mgr._ui_poll)
+
+    def test_shutdown_stops_future_polling(self):
+        """shutdown() sets _ui_poll_active=False, preventing rescheduling."""
+        self.mgr._start_ui_poll()
+        cb = MagicMock()
+        self.mgr.register_listener(cb)
+
+        self.mgr._notify("Event", {"k": "v"})
+        self.mgr.shutdown()
+
+        self.assertFalse(self.mgr._ui_poll_active)
+
+        # _ui_poll does not reschedule after shutdown
+        after_calls_before = len(self.window.after_calls)
+        self.mgr._ui_poll()
+        after_calls_after = len(self.window.after_calls)
+        self.assertEqual(after_calls_after, after_calls_before)  # No new after() scheduled
+
+    def test_shutdown_prevents_delivery_of_pending_events(self):
+        """After shutdown, _ui_poll() must not drain or deliver pending queue entries."""
+        self.mgr._start_ui_poll()
+        cb = MagicMock()
+        self.mgr.register_listener(cb)
+
+        # Enqueue an event, then shut down
+        self.mgr._notify("Event", {"k": "v"})
+        self.mgr.shutdown()
+
+        self.assertFalse(self.mgr._ui_poll_active)
+
+        # _ui_poll() must return immediately without draining pending events
+        self.mgr._ui_poll()
+        cb.assert_not_called()
+        # No new after() scheduled after shutdown
+        self.assertEqual(len(self.window.after_calls), 1)
+
+    def test_window_destroyed_stops_polling(self):
+        """When the window is destroyed, _ui_poll stops rescheduling safely."""
+        self.mgr._start_ui_poll()
+        cb = MagicMock()
+        self.mgr.register_listener(cb)
+
+        self.mgr._notify("Event", {"k": "v"})
+
+        # _notify() must not call any Tkinter API even when window is alive
+        after_calls_before = len(self.window.after_calls)
+        cb.assert_not_called()
+
+        # Destroy the window
+        self.window.exists = False
+
+        # _ui_poll should drain the queue but not reschedule (window destroyed)
+        self.mgr._ui_poll()
+        # cb was called because the event was already queued before destruction
+        cb.assert_called_once_with("Event", {"k": "v"})
+        # No new after() scheduled because window was destroyed
+        self.assertEqual(len(self.window.after_calls), after_calls_before)
+
+    def test_gui_mode_never_delivers_directly_from_background_thread(self):
+        """GUI mode never falls back to direct worker-thread delivery."""
+        cb = MagicMock()
+        self.mgr.register_listener(cb)
+
+        # Call _notify from a background thread
+        t = threading.Thread(target=self.mgr._notify, args=("Schedule Started", {"url": "https://x"}))
+        t.start()
+        t.join()
+
+        cb.assert_not_called()
+        self.assertEqual(self.mgr._ui_event_queue.qsize(), 1)
+
+    def test_non_gui_usage_delivers_directly(self):
+        """Without a window, _notify() delivers synchronously (headless/test)."""
+        mgr = _make_scheduler()  # window is None
+        cb = MagicMock()
+        mgr.register_listener(cb)
+        mgr._notify("Event", {"k": "v"})
+        cb.assert_called_once_with("Event", {"k": "v"})
+        mgr.shutdown()
 
 
 class TestAtomicPersistence(unittest.TestCase):
@@ -448,6 +645,229 @@ class TestConcurrencyGuard(unittest.TestCase):
         self.assertEqual(call_count, 1,
                          f"Expected exactly 1 backend /download dispatch, got {call_count}")
 
+    def test_two_different_jobs_run_concurrently(self):
+        """Different schedule IDs must execute concurrently (per-job locks).
+
+        Two threads dispatch two *different* jobs at the same time.  A barrier
+        held inside the mocked /download handler forces both network calls to be
+        in flight simultaneously, proving the jobs run in parallel rather than
+        being serialized behind a single global lock.
+        """
+        mock_send = MagicMock(return_value=MagicMock(status_code=202, json=lambda: {"job_id": "fake-job"}))
+        self.mgr.backend._send_request = mock_send
+
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.mgr._schedules["job-a"] = {
+            "uuid": "job-a",
+            "url": "https://youtube.com/watch?v=job-a",
+            "mode": "mp3",
+            "scheduled_time": now_str,
+            "repeat_type": "One Time",
+            "enabled": True,
+            "max_retries": 0,
+            "state": "Scheduled",
+        }
+        self.mgr._schedules["job-b"] = {
+            "uuid": "job-b",
+            "url": "https://youtube.com/watch?v=job-b",
+            "mode": "mp3",
+            "scheduled_time": now_str,
+            "repeat_type": "One Time",
+            "enabled": True,
+            "max_retries": 0,
+            "state": "Scheduled",
+        }
+
+        reach_barrier = threading.Barrier(2, timeout=5)
+
+        def blocking_send(*args, **kwargs):
+            reach_barrier.wait()   # both threads arrive here together
+            return mock_send(*args, **kwargs)
+
+        self.mgr.backend._send_request = blocking_send
+
+        t1 = threading.Thread(target=self.mgr._execute_job_thread, args=("job-a",))
+        t2 = threading.Thread(target=self.mgr._execute_job_thread, args=("job-b",))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        # Both different jobs dispatched a /download POST, and both were inside
+        # the network call at the same time (the barrier forces that overlap).
+        self.assertEqual(mock_send.call_count, 2,
+                         "Expected both different jobs to dispatch /download")
+
+    def test_two_jobs_different_output_folders_dispatch_own_folder(self):
+        """Concurrent jobs with different output folders each send their own
+        folder in the download payload; the global download_folder is never
+        mutated via save_settings."""
+        mock_send = MagicMock(return_value=MagicMock(status_code=202, json=lambda: {"job_id": "fake-job"}))
+        self.mgr.backend._send_request = mock_send
+
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.mgr._schedules["job-a"] = {
+            "uuid": "job-a",
+            "url": "https://youtube.com/watch?v=job-a",
+            "mode": "mp3",
+            "output_folder": "C:/FolderA",
+            "scheduled_time": now_str,
+            "repeat_type": "One Time",
+            "enabled": True,
+            "max_retries": 0,
+            "state": "Scheduled",
+        }
+        self.mgr._schedules["job-b"] = {
+            "uuid": "job-b",
+            "url": "https://youtube.com/watch?v=job-b",
+            "mode": "mp3",
+            "output_folder": "C:/FolderB",
+            "scheduled_time": now_str,
+            "repeat_type": "One Time",
+            "enabled": True,
+            "max_retries": 0,
+            "state": "Scheduled",
+        }
+
+        reach_barrier = threading.Barrier(2, timeout=5)
+
+        def blocking_send(*args, **kwargs):
+            reach_barrier.wait()
+            return mock_send(*args, **kwargs)
+
+        self.mgr.backend._send_request = blocking_send
+
+        with patch("os.path.isdir", return_value=True):
+            t1 = threading.Thread(target=self.mgr._execute_job_thread, args=("job-a",))
+            t2 = threading.Thread(target=self.mgr._execute_job_thread, args=("job-b",))
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+
+        self.assertEqual(mock_send.call_count, 2)
+
+        folders = sorted(
+            call.kwargs.get("json", {}).get("output_folder")
+            for call in mock_send.call_args_list
+        )
+        self.assertEqual(folders, ["C:/FolderA", "C:/FolderB"],
+                         "Each job must download to its own output folder")
+
+        # The global download_folder setting must not be mutated per job.
+        folder_calls = [c for c in self.mgr.backend.save_settings.call_args_list
+                        if "download_folder" in c[0][0]]
+        self.assertEqual(len(folder_calls), 0,
+                         "Global download_folder must not be mutated per job")
+
+    def test_delete_schedule_keeps_active_id_during_running_job(self):
+        """delete_schedule() must not remove active UUID while job is running.
+        The running execution's finally block owns active-ID cleanup.
+        A replacement schedule with the same UUID must not execute concurrently."""
+        jid = "delete-active-concurrency-id"
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.mgr._schedules[jid] = {
+            "uuid": jid,
+            "url": "https://youtube.com/watch?v=delete-active",
+            "mode": "mp3",
+            "scheduled_time": now_str,
+            "repeat_type": "One Time",
+            "enabled": True,
+            "max_retries": 0,
+            "state": "Scheduled",
+        }
+        release_event = threading.Event()
+        call_count = [0]
+
+        def blocking_send(*args, **kwargs):
+            call_count[0] += 1
+            release_event.wait(timeout=10)
+            return MagicMock(status_code=202, json=lambda: {"job_id": "fake-job"})
+
+        self.mgr.backend._send_request = blocking_send
+
+        # Start execution thread
+        t1 = threading.Thread(target=self.mgr._execute_job_thread, args=(jid,))
+        t1.start()
+
+        # Wait until job becomes active
+        for _ in range(500):  # up to 5 seconds
+            if jid in self.mgr._active_job_ids:
+                break
+            time.sleep(0.01)
+        self.assertIn(jid, self.mgr._active_job_ids,
+                      "Job must become active before proceeding")
+
+        # Delete the schedule while job is running
+        self.mgr.delete_schedule(jid)
+
+        # Active UUID must remain present (finally block owns cleanup)
+        self.assertIn(jid, self.mgr._active_job_ids,
+                      "Active UUID must remain while job is running")
+        # Schedule must be removed from listing
+        self.assertNotIn(jid, self.mgr._schedules)
+        # Backend job tracking must be removed
+        self.assertNotIn(jid, self.mgr._active_jobs)
+
+        # Attempt second execution with same UUID — must be rejected
+        t2_done = threading.Event()
+
+        def run_second():
+            self.mgr._execute_job_thread(jid)
+            t2_done.set()
+
+        t2 = threading.Thread(target=run_second)
+        t2.start()
+        t2_done.wait(timeout=5)
+        # Second execution must not dispatch /download (rejected by active guard)
+        self.assertEqual(call_count[0], 1,
+                         "Second execution with same UUID must not dispatch /download")
+
+        # Release the original thread
+        release_event.set()
+        t1.join(timeout=10)
+        self.assertFalse(t1.is_alive(), "Original worker thread must terminate")
+
+        # Finally block must remove active UUID
+        self.assertNotIn(jid, self.mgr._active_job_ids,
+                         "Finally block must remove active UUID after execution")
+
+        # A new schedule with the same UUID can now execute (old run finished)
+        self.mgr._schedules[jid] = {
+            "uuid": jid,
+            "url": "https://youtube.com/watch?v=delete-active-redo",
+            "mode": "mp3",
+            "scheduled_time": now_str,
+            "repeat_type": "One Time",
+            "enabled": True,
+            "max_retries": 0,
+            "state": "Scheduled",
+        }
+        call_count[0] = 0
+        release_event2 = threading.Event()
+
+        def blocking_send2(*args, **kwargs):
+            call_count[0] += 1
+            release_event2.wait(timeout=10)
+            return MagicMock(status_code=202, json=lambda: {"job_id": "fake-job2"})
+
+        self.mgr.backend._send_request = blocking_send2
+        t3 = threading.Thread(target=self.mgr._execute_job_thread, args=(jid,))
+        t3.start()
+        # Wait for the replacement job to actually dispatch /download
+        deadline = time.monotonic() + 10
+        while call_count[0] < 1:
+            if time.monotonic() > deadline:
+                self.fail("Replacement schedule with same UUID did not execute after old run finishes")
+            time.sleep(0.01)
+        self.assertEqual(call_count[0], 1,
+                         "Replacement schedule with same UUID must execute after old run finishes")
+        release_event2.set()
+        t3.join(timeout=10)
+        self.assertFalse(t3.is_alive(), "Replacement worker thread must terminate")
+        self.assertNotIn(jid, self.mgr._active_job_ids,
+                         "Finally block must remove active UUID after replacement execution")
+
 class TestSchedulerRefinements(unittest.TestCase):
     """Schema versioning migrations and statistics persistence / correctness tests."""
 
@@ -593,6 +1013,127 @@ class TestSchedulerRefinements(unittest.TestCase):
             self.assertEqual(stats["retries"], 7)
         finally:
             mgr2.shutdown()
+
+
+# ── Regression tests for Phase 3 fixes ──────────────────────────────────────
+
+class TestRunNowSchedulerEnabledGuard(unittest.TestCase):
+    """Fix #4: run_now() must respect scheduler_enabled setting."""
+
+    def setUp(self) -> None:
+        for f in (SCHEDULER_FILE, HISTORY_FILE, SCHEDULER_FILE + ".tmp", HISTORY_FILE + ".tmp"):
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        self.mgr = _make_scheduler()
+        self.mgr._schedules.clear()
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.mgr._schedules["test-id"] = {
+            "uuid": "test-id",
+            "url": "https://youtube.com/watch?v=guard",
+            "mode": "mp3",
+            "scheduled_time": now_str,
+            "repeat_type": "One Time",
+            "enabled": True,
+            "max_retries": 0,
+        }
+
+    def tearDown(self) -> None:
+        self.mgr.shutdown()
+        for f in (SCHEDULER_FILE, HISTORY_FILE, SCHEDULER_FILE + ".tmp", HISTORY_FILE + ".tmp"):
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+    def test_run_now_rejected_when_scheduler_disabled(self):
+        """run_now() must not execute a job when scheduler is disabled."""
+        self.mgr.settings["scheduler_enabled"] = False
+        with patch("settings_panel.read_local_settings", return_value=self.mgr.settings):
+            with patch.object(self.mgr, "_execute_job_thread") as mock_exec:
+                self.mgr.run_now("test-id")
+                mock_exec.assert_not_called()
+
+    def test_run_now_executes_when_scheduler_enabled(self):
+        """run_now() must execute a job when scheduler is enabled."""
+        self.mgr.settings["scheduler_enabled"] = True
+        self.mgr.backend._send_request.return_value = MagicMock(
+            status_code=200, json=lambda: {"job_id": "fake-job"}
+        )
+        with patch("settings_panel.read_local_settings", return_value=self.mgr.settings):
+            with patch.object(self.mgr, "_execute_job_thread", wraps=self.mgr._execute_job_thread):
+                self.mgr.run_now("test-id")
+                import time
+                time.sleep(0.3)
+                self.mgr.backend._send_request.assert_called()
+
+
+class TestPerRequestOutputFolder(unittest.TestCase):
+    """output_folder must be passed per-request in the download payload, not
+    set via global save_settings (and not restored via a deferred Timer)."""
+
+    def setUp(self) -> None:
+        for f in (SCHEDULER_FILE, HISTORY_FILE, SCHEDULER_FILE + ".tmp", HISTORY_FILE + ".tmp"):
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        self.mgr = _make_scheduler()
+        self.mgr._schedules.clear()
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.mgr._schedules["test-id"] = {
+            "uuid": "test-id",
+            "url": "https://youtube.com/watch?v=output-folder",
+            "mode": "mp3",
+            "output_folder": "C:/Custom/Folder",
+            "scheduled_time": now_str,
+            "repeat_type": "One Time",
+            "enabled": True,
+            "max_retries": 0,
+        }
+        self.mgr.backend.get_settings.return_value = {"download_folder": "C:/Original/Folder"}
+        self.mgr.backend._send_request.return_value = MagicMock(
+            status_code=200, json=lambda: {"job_id": "fake-job"}
+        )
+
+    def tearDown(self) -> None:
+        self.mgr.shutdown()
+        for f in (SCHEDULER_FILE, HISTORY_FILE, SCHEDULER_FILE + ".tmp", HISTORY_FILE + ".tmp"):
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+    def test_output_folder_passed_in_download_payload(self):
+        """The custom output_folder must be sent in the download POST payload."""
+        self.mgr.settings["scheduler_enabled"] = True
+        with patch("settings_panel.read_local_settings", return_value=self.mgr.settings), \
+             patch("os.path.isdir", return_value=True):
+            self.mgr._execute_job_thread("test-id")
+
+        # The download POST must have been made
+        self.assertTrue(self.mgr.backend._send_request.called)
+        payload = self.mgr.backend._send_request.call_args.kwargs.get("json")
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload.get("output_folder"), "C:/Custom/Folder")
+
+    def test_no_global_folder_mutation(self):
+        """The global download_folder setting must NOT be mutated via save_settings."""
+        self.mgr.settings["scheduler_enabled"] = True
+        with patch("settings_panel.read_local_settings", return_value=self.mgr.settings), \
+             patch("os.path.isdir", return_value=True):
+            self.mgr._execute_job_thread("test-id")
+
+        # save_settings must not be called to change download_folder at all
+        folder_calls = [c for c in self.mgr.backend.save_settings.call_args_list
+                        if "download_folder" in c[0][0]]
+        self.assertEqual(len(folder_calls), 0,
+                         "Global download_folder must not be mutated per job")
 
 
 if __name__ == "__main__":

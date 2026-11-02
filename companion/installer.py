@@ -23,6 +23,13 @@ class InstallerManager:
         self._install_root = self._resolve_install_root()
         self._events: list[str] = []
         self._is_portable = self._detect_portable_mode()
+        # Installer subprocess lifecycle (Phase 3 Section 5)
+        self._install_process: subprocess.Popen | None = None
+        self._install_exit_code: int | None = None
+        # Persistent installer status so the exit code survives parent
+        # process exit (the watcher is a daemon thread that may be killed
+        # when the window closes).
+        self._installer_status_file: str | None = None
 
     def _resolve_install_root(self) -> str:
         """Determine the project root directory where the ZIP should be extracted."""
@@ -43,7 +50,8 @@ class InstallerManager:
         *before* the update ZIP is extracted.
         """
         marker = os.path.join(self._install_root, "portable_settings.json")
-        exists = os.path.isfile(marker)
+        installed_marker = os.path.join(self._install_root, "installed_mode.marker")
+        exists = os.path.isfile(marker) and not os.path.isfile(installed_marker)
         self.logger.info(
             f"[Installer] Portable mode detection: "
             f"portable_settings.json {'exists' if exists else 'not found'} "
@@ -60,6 +68,14 @@ class InstallerManager:
                     self.updater._notify("Failed", 0.0, "Update ZIP not found.")
                     return
 
+                # Separate download cancellation from installer execution: never
+                # install while a download is still in progress (the ZIP may still
+                # be written to, and we must never remove it while a worker uses it).
+                if self.updater._download_running:
+                    self.logger.error("[Installer] Download still in progress — refusing to install.")
+                    self.updater._notify("Failed", 0.0, "Cannot install while a download is in progress.")
+                    return
+
                 # Calculate SHA-256 immediately before extraction to ensure atomic safety
                 self.logger.info("[Installer] Verifying checksum before launching updater...")
                 hasher = hashlib.sha256()
@@ -69,8 +85,10 @@ class InstallerManager:
                 actual_hash = hasher.hexdigest()
                 expected_hash = self.updater._installer_sha256
                 if not expected_hash:
-                    expected_hash = actual_hash  # fallback if no hash stored
-                
+                    self.logger.error("[Installer] No expected hash stored — cannot verify integrity.")
+                    self.updater._notify("Failed", 0.0, "Integrity check failed: no expected hash.")
+                    return
+
                 if actual_hash.lower() != expected_hash.lower():
                     raise ValueError(f"Integrity check failed (actual={actual_hash}, expected={expected_hash})")
 
@@ -89,6 +107,10 @@ class InstallerManager:
                 temp_dir = os.path.join(updates_dir, "temp_extraction")
                 log_file = os.path.join(updates_dir, "update_install.log")
                 parent_pid = os.getpid()
+                # Persistent installer status file.  The batch writes this
+                # independently, so status survives a Companion crash and
+                # does not depend on the daemon watcher thread.
+                self._installer_status_file = os.path.join(updates_dir, "installer_status.json")
 
                 if getattr(sys, "frozen", False):
                     # In frozen EXE mode, restart the compiled executable
@@ -125,6 +147,9 @@ set TEMP_DIR={temp_dir}
 set EXPECTED_HASH={expected_hash}
 set RESTART_CMD={restart_cmd}
 set LOG_FILE={log_file}
+set "STATUS_FILE={self._installer_status_file}"
+
+if exist "%STATUS_FILE%" del /f /q "%STATUS_FILE%" >NUL 2>&1
 
 echo [%DATE% %TIME%] [Updater] Starting update process... > "%LOG_FILE%"
 echo [Updater] Parent PID: %PARENT_PID% >> "%LOG_FILE%"
@@ -145,8 +170,9 @@ echo [%DATE% %TIME%] [Updater] Running SHA-256 verification... >> "%LOG_FILE%"
 powershell -Command "$h = (Get-FileHash -Path '%ZIP_PATH%' -Algorithm SHA256).Hash.ToLower(); if ($h -ne '%EXPECTED_HASH%'.ToLower()) {{ exit 1 }} else {{ exit 0 }}" >> "%LOG_FILE%" 2>&1
 if %ERRORLEVEL% neq 0 (
     echo [%DATE% %TIME%] [Updater] Checksum verification failed. Aborting installation. >> "%LOG_FILE%"
+    powershell -NoProfile -Command "$s = @{{ exit_code = 1; completed_at = (Get-Date).ToString('o') }} | ConvertTo-Json; Set-Content -LiteralPath '%STATUS_FILE%' -Value $s -Encoding UTF8"
     powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Update installation failed. Checksum verification failed. The current version is still usable.', 'MediaForge Update Failure', 'OK', 'Error')"
-    exit /b %ERRORLEVEL%
+    exit /b 1
 )
 
 :: Create clean temp extraction directory
@@ -160,8 +186,9 @@ powershell -Command "Expand-Archive -Path '%ZIP_PATH%' -DestinationPath '%TEMP_D
 if %ERRORLEVEL% neq 0 (
     echo [%DATE% %TIME%] [Updater] Extraction failed. Rollback initiated. >> "%LOG_FILE%"
     rmdir /s /q "%TEMP_DIR%" >NUL 2>&1
+    powershell -NoProfile -Command "$s = @{{ exit_code = 1; completed_at = (Get-Date).ToString('o') }} | ConvertTo-Json; Set-Content -LiteralPath '%STATUS_FILE%' -Value $s -Encoding UTF8"
     powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Update installation failed during extraction. Rollback complete, the current version is still usable.', 'MediaForge Update Failure', 'OK', 'Error')"
-    exit /b %ERRORLEVEL%
+    exit /b 1
 )
 
 :: Replace files atomically from temp directory
@@ -171,14 +198,17 @@ xcopy "%TEMP_DIR%\\*" "%TARGET_DIR%\\" /y /e /s /i /q >> "%LOG_FILE%" 2>&1
 if %ERRORLEVEL% neq 0 (
     echo [%DATE% %TIME%] [Updater] File replacement failed. Rollback initiated. >> "%LOG_FILE%"
     rmdir /s /q "%TEMP_DIR%" >NUL 2>&1
+    powershell -NoProfile -Command "$s = @{{ exit_code = 1; completed_at = (Get-Date).ToString('o') }} | ConvertTo-Json; Set-Content -LiteralPath '%STATUS_FILE%' -Value $s -Encoding UTF8"
     powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Update installation failed during file replacement. Rollback complete, the current version is still usable.', 'MediaForge Update Failure', 'OK', 'Error')"
-    exit /b %ERRORLEVEL%
+    exit /b 1
 )
 
 echo [%DATE% %TIME%] [Updater] Installation complete. Cleaning up... >> "%LOG_FILE%"
 rmdir /s /q "%TEMP_DIR%" >> "%LOG_FILE%" 2>&1
 del /f /q "%ZIP_PATH%" >> "%LOG_FILE%" 2>&1
 {cleanup_portable_marker}
+:: Persist completion independently of the Companion watcher.
+powershell -NoProfile -Command "$s = @{{ exit_code = 0; completed_at = (Get-Date).ToString('o') }} | ConvertTo-Json; Set-Content -LiteralPath '%STATUS_FILE%' -Value $s -Encoding UTF8"
 :: Clean up stale installation logs older than 7 days
 powershell -Command "Get-ChildItem -Path '%TARGET_DIR%\\updates' -Filter '*.log' | Where-Object {{ $_.LastWriteTime -lt (Get-Date).AddDays(-7) }} | Remove-Item -Force" >> "%LOG_FILE%" 2>&1
 
@@ -205,11 +235,61 @@ echo [%DATE% %TIME%] [Updater] Relaunching application... >> "%LOG_FILE%"
                 # Give locks a moment to release, then spawn updater and exit parent
                 def _launch_and_exit():
                     time.sleep(1.0)
-                    subprocess.Popen(
+                    proc = subprocess.Popen(
                         ["cmd.exe", "/c", batch_path],
                         creationflags=creation_flags,
                         close_fds=True
                     )
+                    # Track the installer Popen handle so its lifecycle can be
+                    # observed.  We deliberately never terminate() or kill() it:
+                    # the installer must be allowed to finish extracting and
+                    # replacing files (with its own rollback on failure).
+                    self._install_process = proc
+
+                    def _watch_installer(process: subprocess.Popen) -> None:
+                        """Wait for the installer to finish and record its exit code.
+
+                        Runs in a background daemon thread so it never blocks the
+                        parent's exit and never hard-kills the installer mid-job.
+                        The exit code is also persisted to a status file so it
+                        survives the watcher thread being terminated when the
+                        parent window closes.
+                        """
+                        try:
+                            exit_code = process.wait()
+                            self._install_exit_code = exit_code
+                            self.logger.info(
+                                f"[Installer] Updater process exited with code {exit_code}."
+                            )
+                            # Persist the exit code so it survives parent exit.
+                            if self._installer_status_file:
+                                try:
+                                    import json as _json
+                                    status = {
+                                        "exit_code": exit_code,
+                                        "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                    }
+                                    tmp = self._installer_status_file + ".tmp"
+                                    with open(tmp, "w", encoding="utf-8") as fh:
+                                        _json.dump(status, fh)
+                                        fh.flush()
+                                        os.fsync(fh.fileno())
+                                    os.replace(tmp, self._installer_status_file)
+                                except Exception:
+                                    pass
+                        except Exception as exc:
+                            self.logger.error(
+                                f"[Installer] Error waiting for updater process: {exc}"
+                            )
+                        finally:
+                            self._install_process = None
+
+                    threading.Thread(
+                        target=_watch_installer,
+                        args=(proc,),
+                        daemon=True,
+                        name="UpdaterWatcher",
+                    ).start()
                     self._window.after(0, self._window.destroy)
 
                 threading.Thread(target=_launch_and_exit, daemon=True, name="UpdaterLauncherThread").start()
@@ -238,3 +318,26 @@ echo [%DATE% %TIME%] [Updater] Relaunching application... >> "%LOG_FILE%"
 
     def get_recent_events(self) -> list[str]:
         return list(self._events)
+
+    def is_installer_running(self) -> bool:
+        """True while the installer Popen handle is still live."""
+        proc = self._install_process
+        return proc is not None and proc.poll() is None
+
+    def get_installer_exit_code(self) -> int | None:
+        """The installer's exit code once it has completed, else None.
+
+        Falls back to the persisted status file when the in-memory value was
+        not captured (e.g. the daemon watcher was terminated on parent exit).
+        """
+        if self._install_exit_code is not None:
+            return self._install_exit_code
+        if self._installer_status_file and os.path.exists(self._installer_status_file):
+            try:
+                import json as _json
+                with open(self._installer_status_file, "r", encoding="utf-8") as fh:
+                    data = _json.load(fh)
+                return int(data.get("exit_code", 0)) if data.get("exit_code") is not None else None
+            except Exception:
+                pass
+        return None

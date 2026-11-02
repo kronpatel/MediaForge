@@ -62,6 +62,9 @@ DEFAULT_PORT = 5000
 # Centralized timing configuration (no magic numbers)
 STARTUP_TIMEOUT = 8.0          # seconds to wait for backend HTTP 200 on start
 HEALTH_CHECK_INTERVAL = 3.0    # seconds between health-check polls
+HEALTH_FAILURE_THRESHOLD = 2   # consecutive failed checks before recovery
+MAX_RECOVERY_ATTEMPTS = 3      # restart attempts for one backend outage
+RECOVERY_RETRY_DELAY = 1.0     # seconds between restart attempts
 TERMINATE_TIMEOUT = 5.0        # seconds before SIGKILL
 HTTP_TIMEOUT = 2.0             # seconds per health-check request
 
@@ -141,6 +144,10 @@ class BackendManager:
         self._monitor_active = threading.Event()   # set = monitor runs
         self._monitor_thread: threading.Thread | None = None
         self._stop_event = threading.Event()       # set = thread should exit
+        self._recovery_lock = threading.Lock()
+        self._recovery_in_progress = False
+        self._health_failures = 0
+        self._lifecycle_generation = 0
 
         # Status callbacks registered by the UI
         self._status_callbacks: list[StatusCallback] = []
@@ -252,6 +259,7 @@ class BackendManager:
         with self._lock:
             self._process = proc
             self._is_managed = True
+            self._health_failures = 0
 
         # Wait for the backend to become responsive
         if self._wait_until_ready(proc):
@@ -299,6 +307,10 @@ class BackendManager:
 
         # Suspend the health monitor while we're intentionally stopping
         self._monitor_active.clear()
+        with self._lock:
+            # Invalidates any in-flight automatic recovery worker.  A normal
+            # user stop must never be undone by a crash-recovery restart.
+            self._lifecycle_generation += 1
 
         if proc is None:
             self._logger.warning(
@@ -387,7 +399,8 @@ class BackendManager:
             is_portable = True
         elif getattr(sys, "frozen", False):
             exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-            if os.path.exists(os.path.join(exe_dir, "portable_settings.json")):
+            if (not os.path.exists(os.path.join(exe_dir, "installed_mode.marker"))
+                    and os.path.exists(os.path.join(exe_dir, "portable_settings.json"))):
                 is_portable = True
         else:
             is_portable = True
@@ -524,7 +537,7 @@ class BackendManager:
                 if self._should_auto_start_backend():
                     self.start()
             except Exception as exc:
-                self._logger.error(f"Failed to auto-start backend: {exc}")
+                self._logger.exception("Failed to auto-start backend")
 
         with self._startup_lock:
             self._startup_done = True
@@ -538,7 +551,8 @@ class BackendManager:
             is_portable = True
         elif getattr(sys, "frozen", False):
             exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-            if os.path.exists(os.path.join(exe_dir, "portable_settings.json")):
+            if (not os.path.exists(os.path.join(exe_dir, "installed_mode.marker"))
+                    and os.path.exists(os.path.join(exe_dir, "portable_settings.json"))):
                 is_portable = True
         else:
             is_portable = True
@@ -577,7 +591,7 @@ class BackendManager:
                             return conn.pid
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
-        except (psutil.AccessDenied, PermissionError):
+        except (psutil.AccessDenied, PermissionError, RuntimeError):
             self._logger.warning("Cannot enumerate network connections — insufficient privileges.")
         
         # 2. Fallback: scan running Python processes for backend/app.py
@@ -835,17 +849,27 @@ class BackendManager:
     # ------------------------------------------------------------------
 
     def _launch_backend(self) -> subprocess.Popen:
-        """Launch the backend process (handles both source and frozen EXE modes)."""
+        """Launch the backend process (handles both source and frozen EXE modes).
+
+        In frozen mode the backend runs as a dedicated MediaForgeBackend.exe
+        shipped next to the companion EXE.  There is intentionally no system
+        Python fallback: if MediaForgeBackend.exe is missing, FileNotFoundError
+        is raised and start() reports a clean "executable not found" status.
+        """
         creation_flags = 0
         if sys.platform == "win32":
             creation_flags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
 
         if getattr(sys, "frozen", False):
-            # Frozen EXE: sys.executable is MediaForge.exe, not python.exe.
-            # Use system python from PATH to launch backend/app.py.
-            python_exe = "python"
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            backend_exe = os.path.join(exe_dir, "MediaForgeBackend.exe")
+            if not os.path.exists(backend_exe):
+                raise FileNotFoundError(
+                    f"MediaForgeBackend.exe not found at {backend_exe}"
+                )
+            cmd = [backend_exe]
         else:
-            python_exe = sys.executable
+            cmd = [sys.executable, "app.py"]
 
         env = os.environ.copy()
         # Propagate portable mode
@@ -854,7 +878,8 @@ class BackendManager:
             is_portable = True
         elif getattr(sys, "frozen", False):
             exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-            if os.path.exists(os.path.join(exe_dir, "portable_settings.json")):
+            if (not os.path.exists(os.path.join(exe_dir, "installed_mode.marker"))
+                    and os.path.exists(os.path.join(exe_dir, "portable_settings.json"))):
                 is_portable = True
         else:
             is_portable = True
@@ -865,7 +890,7 @@ class BackendManager:
             env["MEDIAFORGE_PORTABLE"] = "0"
 
         return subprocess.Popen(
-            [python_exe, "app.py"],
+            cmd,
             cwd=BACKEND_DIR,
             creationflags=creation_flags,
             env=env,
@@ -951,6 +976,80 @@ class BackendManager:
 
         return True
 
+    def _handle_health_failure(self) -> None:
+        """Publish a crash state and schedule bounded automatic recovery."""
+        self._monitor_active.clear()
+        with self._lock:
+            self._status = BackendStatus.CRASHED
+            generation = self._lifecycle_generation
+            is_managed = self._is_managed
+            callbacks = list(self._status_callbacks)
+
+        for cb in callbacks:
+            try:
+                cb(BackendStatus.CRASHED, "Unable to communicate with backend.")
+            except Exception:
+                pass
+
+        # An externally-owned backend may not be restarted by the Companion.
+        if not is_managed:
+            return
+
+        with self._recovery_lock:
+            if self._recovery_in_progress:
+                return
+            self._recovery_in_progress = True
+
+        threading.Thread(
+            target=self._recover_backend,
+            args=(generation,),
+            daemon=True,
+            name="BackendRecovery",
+        ).start()
+
+    def _recover_backend(self, generation: int) -> None:
+        """Restart a managed backend after a health failure.
+
+        Recovery is bounded so a permanently broken installation does not
+        create an infinite restart loop.  A user stop or manager shutdown
+        invalidates ``generation`` and cancels the worker.
+        """
+        try:
+            for attempt in range(1, MAX_RECOVERY_ATTEMPTS + 1):
+                with self._lock:
+                    cancelled = (
+                        self._stop_event.is_set()
+                        or generation != self._lifecycle_generation
+                    )
+                    proc = self._process
+                if cancelled:
+                    return
+
+                self._logger.warning(
+                    f"Backend health recovery attempt {attempt}/{MAX_RECOVERY_ATTEMPTS}."
+                )
+                if proc is not None:
+                    self._terminate_backend(proc)
+                with self._lock:
+                    self._process = None
+                    self._is_managed = False
+                    self._health_failures = 0
+                self._set_status(BackendStatus.STOPPED, "Backend recovery restarting.")
+
+                if attempt > 1:
+                    time.sleep(RECOVERY_RETRY_DELAY)
+                self.start(allow_adopt=False)
+                if self.status == BackendStatus.RUNNING:
+                    self._logger.info("Backend recovered automatically.")
+                    return
+
+            self._logger.error(
+                f"Backend recovery failed after {MAX_RECOVERY_ATTEMPTS} attempts."
+            )
+        finally:
+            with self._recovery_lock:
+                self._recovery_in_progress = False
+
     # ------------------------------------------------------------------
     # Health monitor (background thread)
     # ------------------------------------------------------------------
@@ -987,18 +1086,18 @@ class BackendManager:
                 continue
 
             if not self._check_health():
-                self._logger.warning("Unable to communicate with backend. Identity validation failed or port closed.")
-                self._monitor_active.clear()
-                callbacks: list[StatusCallback] = []
                 with self._lock:
-                    self._process = None
-                    self._status = BackendStatus.CRASHED
-                    callbacks = list(self._status_callbacks)
-                for cb in callbacks:
-                    try:
-                        cb(BackendStatus.CRASHED, "Unable to communicate with backend.")
-                    except Exception:
-                        pass
+                    self._health_failures += 1
+                    failures = self._health_failures
+                self._logger.warning(
+                    "Unable to communicate with backend. "
+                    f"Health check {failures}/{HEALTH_FAILURE_THRESHOLD}."
+                )
+                if failures >= HEALTH_FAILURE_THRESHOLD:
+                    self._handle_health_failure()
+            else:
+                with self._lock:
+                    self._health_failures = 0
 
             time.sleep(HEALTH_CHECK_INTERVAL)
 

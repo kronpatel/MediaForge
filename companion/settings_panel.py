@@ -38,6 +38,8 @@ def is_portable_mode() -> bool:
     if not getattr(sys, "frozen", False):
         return True
     exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    if os.path.exists(os.path.join(exe_dir, "installed_mode.marker")):
+        return False
     if os.path.exists(os.path.join(exe_dir, "portable_settings.json")):
         return True
     return False
@@ -141,9 +143,15 @@ def set_registry_autostart(enabled: bool) -> None:
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
         if enabled:
-            # Use sys.executable to run main.py
-            main_script = os.path.join(_COMPANION_DIR, "main.py")
-            cmd = f'"{sys.executable.replace("python.exe", "pythonw.exe")}" "{os.path.abspath(main_script)}"'
+            if getattr(sys, "frozen", False):
+                # Frozen mode: sys.executable IS the MediaForge.exe — launch it
+                # directly with no script argument.  Appending main.py would fail
+                # because there is no companion/main.py beside a frozen EXE.
+                cmd = f'"{sys.executable}"'
+            else:
+                # Source mode: launch the interpreter with the companion entry point.
+                main_script = os.path.join(_COMPANION_DIR, "main.py")
+                cmd = f'"{sys.executable}" "{os.path.abspath(main_script)}"'
             winreg.SetValueEx(key, "MediaForgeCompanion", 0, winreg.REG_SZ, cmd)
         else:
             try:
@@ -312,7 +320,7 @@ class SettingsPage(BasePage):
 
         self._update_info_lbl = ctk.CTkLabel(
             info_row,
-            text="Current: v1.3.1 | Latest: v—\nLast checked: Never",
+            text="Current: v2.0.0 | Latest: v—\nLast checked: Never",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color="#8b92a8",
             justify="left",

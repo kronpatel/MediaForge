@@ -497,7 +497,8 @@ class TestLastFailedField(unittest.TestCase):
                         self.page._save_click()
         self.assertIsNone(self.page._last_failed_field)
 
-    def test_last_failed_field_cleared_on_new_save_attempt(self):
+    def test_last_failed_field_retains_value_on_failed_save_attempt(self):
+        """A failed save attempt must not clear _last_failed_field."""
         self.page._last_failed_field = "download_folder"
         _set_widget_returns(self.page, download_folder="/nonexistent")
         with patch("settings_panel.os.path.isdir", return_value=False):

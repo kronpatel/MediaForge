@@ -1,5 +1,5 @@
 #define MyAppName "MediaForge"
-#define MyAppVersion "1.3.1"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "KERZOX"
 #define MyAppPublisherURL "https://github.com/kerzox/MediaForge"
 #define MyAppExeName "MediaForge.exe"
@@ -38,9 +38,18 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "dist\MediaForge.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\MediaForgeBackend.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "VERSION"; DestDir: "{app}"; Flags: ignoreversion
+Source: "installed_mode.marker"; DestDir: "{app}"; Flags: ignoreversion
 Source: "MediaForge Backend.bat"; DestDir: "{app}"; Flags: ignoreversion
-Source: "backend\*"; DestDir: "{app}\backend"; Flags: ignoreversion recursesubdirs createallsubdirs overwritereadonly; Excludes: "settings.json,queue_state.json,download_history.jsonl"
+; Ship only runtime backend modules.  Do not install tests, caches, or Python
+; bytecode from the source checkout into the production installation.
+Source: "backend\app.py"; DestDir: "{app}\backend"; Flags: ignoreversion
+Source: "backend\diagnostics.py"; DestDir: "{app}\backend"; Flags: ignoreversion
+Source: "backend\downloader.py"; DestDir: "{app}\backend"; Flags: ignoreversion
+Source: "backend\recovery.py"; DestDir: "{app}\backend"; Flags: ignoreversion
+Source: "backend\requirements.txt"; DestDir: "{app}\backend"; Flags: ignoreversion
+Source: "backend\startup_check.py"; DestDir: "{app}\backend"; Flags: ignoreversion
 Source: "extension\*"; DestDir: "{app}\extension"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "ffmpeg\*"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Documentation
@@ -57,11 +66,3 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
-
-[UninstallDelete]
-Type: filesandordirs; Name: "{app}\backend"
-Type: filesandordirs; Name: "{app}\cache"
-Type: filesandordirs; Name: "{app}\updates"
-Type: filesandordirs; Name: "{app}\logs"
-Type: files; Name: "{app}\settings.json"
-Type: filesandordirs; Name: "{localappdata}\MediaForge"

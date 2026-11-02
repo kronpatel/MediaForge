@@ -200,7 +200,7 @@ class LogsPage(BasePage):
                 self.logger.export_logs(path)
                 self.logger.info(f"Logs successfully exported to: {path}")
             except Exception as exc:
-                self.logger.error(f"Failed to export logs: {exc}")
+                self.logger.exception("Failed to export logs")
 
 
 # ---------------------------------------------------------------------------

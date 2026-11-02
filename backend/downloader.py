@@ -3,6 +3,7 @@ import logging
 import os
 import queue
 import re
+import sys
 import threading
 import uuid
 from dataclasses import asdict
@@ -20,7 +21,15 @@ from yt_dlp.utils import DownloadError
 def is_portable_mode() -> bool:
     if os.environ.get("MEDIAFORGE_PORTABLE") == "1":
         return True
-    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if getattr(sys, "frozen", False):
+        parent_dir = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # The installer leaves this marker in the application directory.  It
+    # prevents an interrupted portable update from changing an installed copy
+    # to local/portable storage on the next launch.
+    if os.path.exists(os.path.join(parent_dir, "installed_mode.marker")):
+        return False
     if os.path.exists(os.path.join(parent_dir, "portable_settings.json")):
         return True
     return False
@@ -188,6 +197,7 @@ class DownloadJob:
     queued_at: str = ""
     started_at: str = ""
     completed_at: str = ""
+    output_folder: str | None = None
 
 
 import time
@@ -213,6 +223,10 @@ _START_TIME = time.monotonic()
 _cancel_events: dict[str, threading.Event] = {}
 _cancel_events_lock = threading.Lock()
 
+# Per-job pause events — set when a running job should pause cooperatively
+_pause_events: dict[str, threading.Event] = {}
+_pause_events_lock = threading.Lock()
+
 # Queue save debounce
 _SAVE_DEBOUNCE_MS = 150
 _save_timer: threading.Timer | None = None
@@ -228,7 +242,7 @@ def default_settings() -> dict[str, Any]:
         "download_folder": DOWNLOAD_DIR,
         "ffmpeg_path": FFMPEG_PATH,
         "backend_url": "http://127.0.0.1:5000",
-        "version": "1.3.1",
+        "version": "2.0.0",
     }
 
 
@@ -452,8 +466,32 @@ def _is_job_cancelled(job_id: str) -> bool:
         return ev.is_set()
 
 
+def _get_pause_effect(job_id: str) -> threading.Event:
+    with _pause_events_lock:
+        if job_id not in _pause_events:
+            _pause_events[job_id] = threading.Event()
+        return _pause_events[job_id]
+
+
+def _remove_pause_effect(job_id: str) -> None:
+    with _pause_events_lock:
+        _pause_events.pop(job_id, None)
+
+
+def _is_job_paused(job_id: str) -> bool:
+    with _pause_events_lock:
+        ev = _pause_events.get(job_id)
+        if ev is None:
+            return False
+        return ev.is_set()
+
+
 class _CancelDownloadError(Exception):
     """Raised inside the progress hook to abort yt-dlp on cancel."""
+
+
+class _PauseDownloadError(Exception):
+    """Raised inside the progress hook to pause yt-dlp cooperatively."""
 
 
 def _cleanup_temp_files(job_id: str) -> None:
@@ -490,13 +528,26 @@ def _cancel_job_internal(job: DownloadJob, save_queue: bool = True) -> dict[str,
     cancel_ev = _get_cancel_event(job.id)
     cancel_ev.set()
 
+    # Remember whether the job was actively downloading before we mark it
+    # cancelled.  Running jobs keep their cancel event so the in-flight
+    # download thread can still observe the signal; execute_job's finally
+    # block removes it once the download has finished/aborted.  Queued jobs
+    # drop it here since nothing will run execute_job for them.
+    was_running = job.status in (
+        DownloadState.STARTING.value,
+        DownloadState.DOWNLOADING.value,
+    )
+    validate_transition(job.status, DownloadState.CANCELLED.value)
     job.status = DownloadState.CANCELLED.value
     job.message = "Cancelled by user"
     job.completed_at = now_iso()
     snapshot = job_snapshot(job)
 
     _cleanup_temp_files(job.id)
-    _remove_cancel_event(job.id)
+
+    if not was_running:
+        _remove_cancel_event(job.id)
+        _remove_pause_effect(job.id)
 
     return snapshot
 
@@ -508,6 +559,10 @@ def progress_hook_for(job_id: str) -> Callable[[dict[str, Any]], None]:
         # Check cancel signal — raise to abort yt-dlp
         if _is_job_cancelled(job_id):
             raise _CancelDownloadError("Download cancelled by user")
+
+        # Check pause signal — pause cooperatively (abort yt-dlp, resume later)
+        if _is_job_paused(job_id):
+            raise _PauseDownloadError("Download paused by user")
 
         download_status = status.get("status")
         filename = sanitize_filename(os.path.basename(status.get("filename") or ""))
@@ -542,6 +597,9 @@ def progress_hook_for(job_id: str) -> Callable[[dict[str, Any]], None]:
                         message = "8K not available. Downloading highest available quality."
 
             details = [part for part in (f"{progress:.1f}%", speed, f"ETA {eta}" if eta else "") if part]
+            # Never clobber a PAUSED job back to DOWNLOADING.
+            if _is_job_paused(job_id):
+                raise _PauseDownloadError("Download paused by user")
             update_job(
                 job_id,
                 status=DownloadState.DOWNLOADING.value,
@@ -627,34 +685,39 @@ def format_eta(value: int | float | None) -> str:
     return f"{remaining_minutes:02d}:{remaining_seconds:02d}"
 
 
-def build_output_template(playlist: bool = False) -> str:
-    download_dir = get_download_dir()
+def build_output_template(playlist: bool = False, download_dir: str | None = None) -> str:
+    dir_to_use = download_dir or get_download_dir()
 
     if playlist:
         return os.path.join(
-            download_dir,
+            dir_to_use,
             "%(playlist_title).180B",
             "%(playlist_index)03d - %(title).180B [%(id)s].%(ext)s",
         )
 
-    return os.path.join(download_dir, "%(title).180B [%(id)s].%(ext)s")
+    return os.path.join(dir_to_use, "%(title).180B [%(id)s].%(ext)s")
 
 
-def base_options(job_id: str | None = None, playlist: bool = False) -> dict[str, Any]:
-    os.makedirs(get_download_dir(), exist_ok=True)
+def base_options(job_id: str | None = None, playlist: bool = False, download_dir: str | None = None) -> dict[str, Any]:
+    target_dir = download_dir or get_download_dir()
+    os.makedirs(target_dir, exist_ok=True)
 
     options: dict[str, Any] = {
         "ffmpeg_location": FFMPEG_PATH,
         "ignoreerrors": False,
         "noplaylist": not playlist,
-        "outtmpl": build_output_template(playlist=playlist),
+        "outtmpl": build_output_template(playlist=playlist, download_dir=target_dir),
         "retries": 3,
         "fragment_retries": 3,
         "extractor_retries": 3,
         "restrictfilenames": False,
         "trim_file_name": 180,
         "windowsfilenames": True,
-        "extractor_args": {"youtube": {"player_client": ["ios", "tv"]}},
+        # Do not force a restricted YouTube player client here.  In particular,
+        # the Android client often exposes only one progressive 240p/360p
+        # format, which makes every MP4 request silently fall back to low
+        # quality.  Let yt-dlp negotiate its current default client set so
+        # adaptive 1080p/4K/8K video and audio streams remain available.
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
         }
@@ -666,10 +729,14 @@ def base_options(job_id: str | None = None, playlist: bool = False) -> dict[str,
     return options
 
 
-def mp3_options(job_id: str | None = None, playlist: bool = False) -> dict[str, Any]:
-    options = base_options(job_id=job_id, playlist=playlist)
+def mp3_options(job_id: str | None = None, playlist: bool = False, download_dir: str | None = None) -> dict[str, Any]:
+    options = base_options(job_id=job_id, playlist=playlist, download_dir=download_dir)
     options.update({
-        "format": "bestaudio",
+        # Some YouTube client responses expose only a progressive A/V format
+        # rather than a separate audio-only stream.  Keep the audio-only
+        # preference, but fall back to the best available combined format so
+        # MP3 extraction still works when that is all YouTube provides.
+        "format": "bestaudio/best",
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -686,13 +753,20 @@ def video_options(
     max_height: int | None = None,
     playlist: bool = False,
     format_selector: str | None = None,
+    download_dir: str | None = None,
 ) -> dict[str, Any]:
-    options = base_options(job_id=job_id, playlist=playlist)
+    options = base_options(job_id=job_id, playlist=playlist, download_dir=download_dir)
     
     if not format_selector:
-        format_selector = "bestvideo+bestaudio"
-        if max_height:
-            format_selector = f"bestvideo[height<={max_height}]+bestaudio"
+        # Prefer MP4 video + M4A audio so the merged result is broadly
+        # playable, then fall back to any separate streams and finally a
+        # progressive format when adaptive streams are unavailable.
+        height_filter = f"[height<={max_height}]" if max_height else ""
+        format_selector = (
+            f"bestvideo{height_filter}[ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo{height_filter}+bestaudio/"
+            f"best{height_filter}/best"
+        )
 
     options.update({
         "format": format_selector,
@@ -720,14 +794,17 @@ def check_8k_available(url: str, options: dict[str, Any]) -> bool:
     return False
 
 
-def mode_options(mode: str, job_id: str | None = None) -> tuple[str, dict[str, Any]]:
+def mode_options(mode: str, job_id: str | None = None, download_dir: str | None = None) -> tuple[str, dict[str, Any]]:
     modes: dict[str, tuple[str, dict[str, Any]]] = {
-        "mp3": ("MP3", mp3_options(job_id=job_id, playlist=False)),
-        "1080p": ("MP4 1080p", video_options(job_id=job_id, max_height=1080, playlist=False)),
-        "4k": ("MP4 4K", video_options(job_id=job_id, max_height=2160, playlist=False)),
-        "8k": ("MP4 8K", video_options(job_id=job_id, max_height=None, playlist=False, format_selector="bestvideo[height<=4320]+bestaudio/best[height<=4320]")),
-        "playlist_mp3": ("Playlist MP3", mp3_options(job_id=job_id, playlist=True)),
-        "playlist_video": ("Playlist Video", video_options(job_id=job_id, max_height=None, playlist=True)),
+        "mp3": ("MP3", mp3_options(job_id=job_id, playlist=False, download_dir=download_dir)),
+        "1080p": ("MP4 1080p", video_options(job_id=job_id, max_height=1080, playlist=False, download_dir=download_dir)),
+        "4k": ("MP4 4K", video_options(job_id=job_id, max_height=2160, playlist=False, download_dir=download_dir)),
+        "8k": (
+            "MP4 8K",
+            video_options(job_id=job_id, max_height=4320, playlist=False, download_dir=download_dir),
+        ),
+        "playlist_mp3": ("Playlist MP3", mp3_options(job_id=job_id, playlist=True, download_dir=download_dir)),
+        "playlist_video": ("Playlist Video", video_options(job_id=job_id, max_height=None, playlist=True, download_dir=download_dir)),
     }
 
     if mode not in modes:
@@ -752,6 +829,9 @@ def run_download(url: str, ydl_opts: dict[str, Any], label: str) -> str:
 
     except _CancelDownloadError:
         raise KerzoxDownloadError("Download cancelled by user")
+
+    except _PauseDownloadError:
+        raise KerzoxDownloadError("Download paused by user")
 
     except DownloadError as error:
         message = f"{label} download failed: {error}"
@@ -784,14 +864,29 @@ def execute_job(job: DownloadJob) -> None:
             pass
 
     with _jobs_lock:
+        # A removed job must not trigger any further work — check before
+        # touching _active_job_id, changing status, or running the 8K check.
+        if job.id not in _jobs:
+            return
         _active_job_id = job.id
+        if job.status != DownloadState.QUEUED.value:
+            # Job was cancelled/paused/removed after being dequeued
+            _active_job_id = None
+            _remove_cancel_event(job.id)
+            return
         validate_transition(job.status, DownloadState.STARTING.value)
         job.status = DownloadState.STARTING.value
 
     initial_message = f"Starting {job.label} download"
     if job.mode == "8k":
+        # Re-check the job still exists before the (potentially slow) 8K check.
+        with _jobs_lock:
+            if job.id not in _jobs:
+                _active_job_id = None
+                _remove_cancel_event(job.id)
+                return
         try:
-            _, options = mode_options(job.mode, job_id=job.id)
+            _, options = mode_options(job.mode, job_id=job.id, download_dir=job.output_folder)
             if not check_8k_available(job.url, options):
                 initial_message = "8K not available. Downloading highest available quality."
         except Exception as e:
@@ -806,11 +901,23 @@ def execute_job(job: DownloadJob) -> None:
 
     last_error = ""
     for attempt in range(1, job.max_retries + 2):
+        # Abort if the job was removed or cancelled before this attempt.  A
+        # removed job must never start downloading.
+        with _jobs_lock:
+            if job.id not in _jobs:
+                _active_job_id = None
+                _remove_cancel_event(job.id)
+                return
+            if job.status == DownloadState.CANCELLED.value:
+                _active_job_id = None
+                _remove_cancel_event(job.id)
+                return
+
         update_job(job.id, attempts=attempt)
         _set_job_status(job.id, DownloadState.DOWNLOADING.value)
 
         try:
-            label, options = mode_options(job.mode, job_id=job.id)
+            label, options = mode_options(job.mode, job_id=job.id, download_dir=job.output_folder)
             run_download(job.url, options, label)
 
             _set_job_status(job.id, DownloadState.COMPLETED.value)
@@ -838,15 +945,24 @@ def execute_job(job: DownloadJob) -> None:
 
             # If cancelled, don't retry
             if "cancelled by user" in last_error.lower():
-                _set_job_status(job.id, DownloadState.CANCELLED.value)
                 update_job(
                     job.id,
+                    status=DownloadState.CANCELLED.value,
                     completed_at=now_iso(),
                     message="Cancelled by user",
                     error=last_error,
                 )
                 _cleanup_temp_files(job.id)
                 _remove_cancel_event(job.id)
+                break
+
+            # If paused, keep it paused (cooperative) — do not retry or fail.
+            if "paused by user" in last_error.lower():
+                update_job(
+                    job.id,
+                    status=DownloadState.PAUSED.value,
+                    message="Paused",
+                )
                 break
 
             attempts_left = job.max_retries + 1 - attempt
@@ -870,8 +986,12 @@ def execute_job(job: DownloadJob) -> None:
             )
 
     with _jobs_lock:
-        finished_job = _jobs[job.id]
-        append_history(finished_job)
+        finished_job = _jobs.get(job.id)
+        if finished_job is not None and finished_job.status not in (
+            DownloadState.CANCELLED.value,
+            DownloadState.PAUSED.value,
+        ):
+            append_history(finished_job)
         _active_job_id = None
         _remove_cancel_event(job.id)
 
@@ -886,8 +1006,19 @@ def download_worker() -> None:
             with _jobs_lock:
                 job = _jobs.get(job_id)
 
-            if job:
-                execute_job(job)
+            if job is None:
+                # Job was removed from the queue while waiting
+                continue
+
+            if job.status in (
+                DownloadState.CANCELLED.value,
+                DownloadState.PAUSED.value,
+            ):
+                # Job was cancelled or paused while waiting in the queue.
+                # Skipping it is not a worker failure.
+                continue
+
+            execute_job(job)
 
         except Exception:
             logger.exception("[Queue] Unexpected queue worker failure")
@@ -909,7 +1040,46 @@ def ensure_worker_started() -> None:
         logger.info("[Queue] Download worker started")
 
 
-def queue_download(url: str, mode: str, retries: int = DEFAULT_RETRIES) -> dict[str, Any]:
+def validate_output_folder(output_folder: str | None) -> tuple[str | None, str | None]:
+    """Validate an output_folder path supplied via the /download API.
+
+    Returns (normalized_path, None) when acceptable (None path means use the
+    global default download folder).  Returns (None, error_message) when the
+    path is invalid and should be rejected.
+    """
+    # None -> use the global default.
+    if output_folder is None:
+        return None, None
+
+    # Must be a string — reject non-string JSON values (int, bool, list, etc.)
+    # before calling .strip() to avoid an AttributeError.
+    if not isinstance(output_folder, str):
+        return None, "Invalid output folder: must be a string."
+
+    folder = output_folder.strip()
+    if not folder:
+        return None, None  # Blank after stripping — use the global default.
+
+    # Reject null bytes.
+    if "\x00" in folder:
+        return None, "Invalid output folder: path contains null bytes."
+
+    # Normalize separators so both / and \ are handled on every platform.
+    normalized = folder.replace("/", "\\") if os.sep == "\\" else folder
+
+    # Reject path traversal components (check both separator styles).
+    if ".." in normalized.replace("/", "\\").split("\\"):
+        return None, "Invalid output folder: path traversal is not allowed."
+
+    # Must be an absolute path so concurrent jobs cannot collide on relative
+    # resolution against different working directories.
+    if not os.path.isabs(normalized):
+        return None, "Invalid output folder: must be an absolute path."
+
+    return normalized, None
+
+
+def queue_download(url: str, mode: str, retries: int = DEFAULT_RETRIES, output_folder: str | None = None) -> dict[str, Any]:
     if not url:
         raise KerzoxDownloadError("URL missing")
 
@@ -923,6 +1093,7 @@ def queue_download(url: str, mode: str, retries: int = DEFAULT_RETRIES) -> dict[
         label=label,
         max_retries=max(0, retries),
         queued_at=now_iso(),
+        output_folder=output_folder,
     )
 
     with _jobs_lock:
@@ -995,12 +1166,31 @@ def retry_job(job_id: str) -> dict[str, Any]:
 
 
 def remove_job(job_id: str) -> None:
-    """Remove a job from the queue."""
+    """Remove a job from the queue.
+
+    If the job is actively downloading, signal cancellation first so the
+    worker aborts the in-flight yt-dlp run and cleans up partial files
+    instead of leaving an orphaned download behind.
+    """
     with _jobs_lock:
         job = _jobs.get(job_id)
         if not job:
             raise KerzoxDownloadError(f"Job {job_id} not found")
+        was_running = job.status in (
+            DownloadState.STARTING.value,
+            DownloadState.DOWNLOADING.value,
+        )
+        if was_running:
+            _get_cancel_event(job_id).set()
+        else:
+            # Queued/paused removed jobs: nothing runs execute_job for them,
+            # so drop the cancel event here to avoid leaking it.
+            _remove_cancel_event(job_id)
         del _jobs[job_id]
+        # Drop the pause event so removed jobs don't leak one.  The cancel
+        # event (set above for in-flight downloads) is cleaned up by
+        # execute_job's finally/return path once the download aborts.
+        _remove_pause_effect(job_id)
     logger.info("[Queue] Removed job %s from queue", job_id)
     _schedule_save_queue_state()
 
@@ -1044,6 +1234,8 @@ def pause_job(job_id: str) -> None:
         validate_transition(job.status, DownloadState.PAUSED.value)
         job.status = DownloadState.PAUSED.value
         job.message = "Paused"
+        # Signal any in-flight download thread to pause cooperatively.
+        _get_pause_effect(job_id).set()
     logger.info("[Queue] Paused job %s", job_id)
     _schedule_save_queue_state()
 
@@ -1059,6 +1251,7 @@ def resume_job(job_id: str) -> None:
         validate_transition(DownloadState.PAUSED, DownloadState.QUEUED)
         job.status = DownloadState.QUEUED.value
         job.message = "Re-queued after pause"
+        _remove_pause_effect(job_id)
         _download_queue.put(job.id)
     logger.info("[Queue] Resumed job %s", job_id)
     _schedule_save_queue_state()

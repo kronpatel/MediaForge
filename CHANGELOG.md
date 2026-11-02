@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-11-03
+
+### Added
+- Phase 4 backend crash recovery with bounded automatic restart attempts.
+- Installer result persistence and startup recovery after interrupted updates.
+- Installed-mode marker protection for AppData storage paths.
+- Dashboard and tray auto-update status integration.
+
+### Fixed
+- MP4 quality selection now prefers adaptive MP4 video plus M4A audio.
+- 1080p, 4K, and 8K downloads no longer force YouTube's low-quality Android client.
+- FFmpeg MP4 merging verified with real 1080p output.
+
 ## [1.3.1] - 2026-09-20
 
 ### Fixed

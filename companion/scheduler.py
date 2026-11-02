@@ -4,6 +4,7 @@ import time
 import uuid
 import datetime
 import calendar
+import queue
 import threading
 from typing import Callable, Any
 
@@ -19,12 +20,12 @@ class SchedulerManager:
         self.backend = backend_manager
         self.window = window
         self._lock = threading.RLock()
-        self._execution_lock = threading.Lock()
-        
+
         # In-memory registers
         self._schedules: dict[str, dict] = {}
         self._listeners: list[Callable[[str, dict], None]] = []
         self._active_jobs: dict[str, str] = {}  # schedule_uuid -> backend job_id
+        self._active_job_ids: set[str] = set()  # schedule UUIDs currently executing
         self._stats: dict[str, Any] = {
             "total_schedules": 0,
             "enabled_schedules": 0,
@@ -46,6 +47,23 @@ class SchedulerManager:
         self._thread: threading.Thread | None = None
         self._last_tick_time = time.monotonic()
         self._last_system_time = datetime.datetime.now()
+
+        # Thread-safe UI event queue drained on the Tkinter main thread via
+        # window.after(100).  When a Tkinter window is attached, scheduler
+        # events are enqueued here and delivered to listeners on the UI
+        # thread (never on the scheduler background thread).  When there is
+        # no window (headless / test usage), _notify() delivers directly,
+        # synchronously, so callers that assert listener delivery right after
+        # _notify() keep working.
+        self._ui_event_queue: "queue.Queue[tuple[str, dict]]" = queue.Queue()
+        self._ui_poll_active: bool = False
+
+        # Start the recurring UI queue poll on the Tkinter main thread when a
+        # window is attached.  Background scheduler threads only enqueue
+        # events; the main-thread poll drains them and delivers to listeners
+        # on the UI thread.
+        if self.window is not None:
+            self._start_ui_poll()
 
     def deferred_startup(self) -> None:
         """Heavy startup work: runs in a daemon thread, never on the Tkinter thread."""
@@ -73,6 +91,8 @@ class SchedulerManager:
 
     def shutdown(self) -> None:
         self._stop_event.set()
+        with self._lock:
+            self._ui_poll_active = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
             self.logger.info("[Scheduler] Download engine stopped.")
@@ -91,15 +111,89 @@ class SchedulerManager:
                 self._listeners.remove(callback)
 
     def _notify(self, event_name: str, payload: dict) -> None:
-        listeners = []
+        # Headless / test usage: no Tkinter window attached, so deliver
+        # directly and synchronously.  Safe because there is no Tkinter to
+        # protect in this mode.
+        if self.window is None:
+            listeners = []
+            with self._lock:
+                listeners = list(self._listeners)
+            for cb in listeners:
+                try:
+                    cb(event_name, payload)
+                except Exception as e:
+                    self.logger.debug_log(f"Listener callback error: {e}")
+            return
+
+        # GUI mode: enqueue the event only.  Never call any Tkinter API from
+        # this (background) thread; the main-thread UI poll drains the queue
+        # and delivers events to listeners on the UI thread.
+        self._ui_event_queue.put((event_name, payload))
+
+    def _start_ui_poll(self) -> None:
+        """Start the recurring UI queue poll on the Tkinter main thread.
+
+        Must be called from the Tkinter main thread (e.g. from __init__ when a
+        window is attached).  The poll drains the event queue and reschedules
+        itself every 100 ms so events are delivered on the UI thread, never on
+        scheduler background threads.
+        """
+        with self._lock:
+            if self._ui_poll_active:
+                return
+            self._ui_poll_active = True
+        try:
+            self.window.after(100, self._ui_poll)
+        except Exception:
+            with self._lock:
+                self._ui_poll_active = False
+
+    def _ui_poll(self) -> None:
+        """Runs on the Tkinter main thread: drain queued events and reschedule.
+
+        Checks poll-active state *before* draining the queue so that a
+        callback fired after shutdown never delivers pending notifications.
+        A destroyed window still drains pending events but does not reschedule.
+        """
+        with self._lock:
+            active = self._ui_poll_active
+        if not active:
+            return
+        self._drain_ui_queue()
+        if self.window is None:
+            return
+        try:
+            if self.window.winfo_exists():
+                self.window.after(100, self._ui_poll)
+            else:
+                with self._lock:
+                    self._ui_poll_active = False
+        except Exception:
+            with self._lock:
+                self._ui_poll_active = False
+
+    def _drain_ui_queue(self) -> None:
+        """Pop every queued event and deliver to current listeners.
+
+        Runs on the Tkinter main thread only, via _ui_poll.  Background
+        scheduler threads only enqueue events and never drain the queue.
+        """
+        events = []
+        while True:
+            try:
+                events.append(self._ui_event_queue.get_nowait())
+            except queue.Empty:
+                break
+        if not events:
+            return
         with self._lock:
             listeners = list(self._listeners)
-            
-        for cb in listeners:
-            try:
-                cb(event_name, payload)
-            except Exception as e:
-                self.logger.debug_log(f"Listener callback error: {e}")
+        for event_name, payload in events:
+            for cb in listeners:
+                try:
+                    cb(event_name, payload)
+                except Exception as e:
+                    self.logger.debug_log(f"Listener callback error: {e}")
 
     # ------------------------------------------------------------------
     # Scheduler Loop & Time Jump (Component 10 / 11)
@@ -121,7 +215,7 @@ class SchedulerManager:
             try:
                 self._check_and_execute_schedules()
             except Exception as e:
-                self.logger.error(f"Error in scheduler check tick: {e}")
+                self.logger.exception("Error in scheduler check tick")
                 
             self._stop_event.wait(1.0)
 
@@ -165,48 +259,54 @@ class SchedulerManager:
             threading.Thread(target=self._execute_job_thread, args=(jid,), daemon=True).start()
 
     def _execute_job_thread(self, jid: str) -> None:
-        with self._execution_lock:
-            # Reload job with lock
-            with self._lock:
-                job = self._schedules.get(jid)
-                if not job or not job.get("enabled") or job.get("state") in ("Running", "Completed"):
-                    return
-                # Update status
-                job["state"] = "Running"
-                job["last_execution"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self._stats["last_execution"] = job["last_execution"]
-                self._save_schedules()
-            
+        # Atomic active-job-ID guard: the same job cannot run twice
+        # concurrently, but different jobs may execute in parallel.  The
+        # check-and-add happens under self._lock so there is no race between
+        # releasing a lock and removing the job from the tracking set.
+        with self._lock:
+            if jid in self._active_job_ids:
+                self.logger.info(
+                    f"[Scheduler] Job {jid} is already running; skipping duplicate execution."
+                )
+                return
+            self._active_job_ids.add(jid)
+            job = self._schedules.get(jid)
+            if not job or not job.get("enabled") or job.get("state") in ("Running", "Completed"):
+                self._active_job_ids.discard(jid)
+                return
+            # Update status
+            job["state"] = "Running"
+            job["last_execution"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._stats["last_execution"] = job["last_execution"]
+            self._save_schedules()
+
+        try:
             self._notify("Schedule Started", job)
             self.logger.info(f"Scheduled Job Started: {job['url']}")
-            
-            # Post Settings Dynamically if output folder is set
+
+            # Post the download job with a per-request output_folder.  The
+            # backend receives output_folder per request instead of mutating
+            # the global download_folder setting (and restoring it via a
+            # 5-second Timer), which was unsafe when multiple jobs run
+            # concurrently.
             success = True
             err_msg = ""
-            original_folder = None
-            
+
             try:
-                # 1. Fetch current settings from backend first to know original folder
-                curr_backend_settings = self.backend.get_settings()
-                original_folder = curr_backend_settings.get("download_folder")
-                
-                # 2. Modify folder if specified
                 custom_folder = job.get("output_folder", "").strip()
-                if custom_folder and os.path.isdir(custom_folder):
-                    self.backend.save_settings({"download_folder": custom_folder})
-                
-                # 3. Post download job
                 payload = {
                     "url": job["url"],
                     "mode": job["mode"],
-                    "retries": job.get("max_retries", 2)
+                    "retries": job.get("max_retries", 2),
                 }
-                
+                if custom_folder and os.path.isdir(custom_folder):
+                    payload["output_folder"] = custom_folder
+
                 resp = self.backend._send_request("POST", "/download", json=payload, timeout=5.0)
                 if resp and resp.status_code in (200, 202):
                     resp_data = resp.json()
                     backend_job_id = resp_data.get("job_id")
-                    
+
                     with self._lock:
                         self._active_jobs[jid] = backend_job_id
                         job["last_result"] = "success"
@@ -223,17 +323,13 @@ class SchedulerManager:
             except Exception as e:
                 success = False
                 err_msg = f"Network or execution error: {e}"
-            
-            # Restore original folder settings synchronously
-            if original_folder:
-                try:
-                    self.backend.save_settings({"download_folder": original_folder})
-                except Exception:
-                    pass
-            
+
             # If request dispatch failed, handle immediately
             if not success:
                 self._handle_job_failure(jid, err_msg)
+        finally:
+            with self._lock:
+                self._active_job_ids.discard(jid)
 
     # ------------------------------------------------------------------
     # Unified Poller State Interception
@@ -461,6 +557,11 @@ class SchedulerManager:
         with self._lock:
             job = self._schedules.pop(uuid_str, None)
             self._active_jobs.pop(uuid_str, None)
+            # NOTE: Do NOT remove uuid_str from _active_job_ids here.  If the
+            # schedule is currently executing, its finally block owns
+            # active-ID cleanup.  Premature removal would allow a replacement
+            # schedule with the same UUID to run concurrently with the
+            # original execution.
             self._save_schedules()
             if job:
                 self._notify("Schedule Deleted", job)
@@ -498,6 +599,11 @@ class SchedulerManager:
             self._save_schedules()
 
     def run_now(self, uuid_str: str) -> None:
+        from settings_panel import read_local_settings
+        settings = read_local_settings(self.logger)
+        if not settings.get("scheduler_enabled", True):
+            self.logger.info(f"[Scheduler] run_now rejected: scheduler is disabled.")
+            return
         threading.Thread(target=self._execute_job_thread, args=(uuid_str,), daemon=True).start()
 
     def get_schedules(self) -> list[dict]:
@@ -645,7 +751,7 @@ class SchedulerManager:
                     os.fsync(fh.fileno())
                 os.replace(tmp, SCHEDULER_FILE)
             except Exception as e:
-                self.logger.error(f"Failed to save schedules: {e}")
+                self.logger.exception("Failed to save schedules")
                 if os.path.exists(tmp):
                     try:
                         os.remove(tmp)
@@ -691,7 +797,7 @@ class SchedulerManager:
                 os.fsync(fh.fileno())
             os.replace(tmp, HISTORY_FILE)
         except Exception as e:
-            self.logger.error(f"Failed to save history: {e}")
+            self.logger.exception("Failed to save history")
             if os.path.exists(tmp):
                 try:
                     os.remove(tmp)

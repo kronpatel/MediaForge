@@ -38,6 +38,10 @@ Portable mode stores all data locally within its own directory:
 
 No registry keys are written. No system-wide installation is performed.
 
+Installed copies contain `installed_mode.marker`; this file is intentionally
+not included in the portable ZIP. It prevents an interrupted portable update
+from changing an installed copy's AppData storage into portable local storage.
+
 ## Upgrading
 
 To upgrade the portable edition:

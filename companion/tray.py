@@ -60,6 +60,7 @@ class TrayManager:
         # Notification state
         self._has_notified_background: bool = False
         self._last_notification: tuple[str, str, float] | None = None  # (title, message, timestamp)
+        self._notify_lock = threading.Lock()
         self._previous_status: BackendStatus | None = None
         self._is_restarting: bool = False
 
@@ -155,21 +156,23 @@ class TrayManager:
     def notify(self, title: str, message: str) -> None:
         """
         Display a system tray bubble notification with 5-second duplicate debouncing.
+        Thread-safe: uses _notify_lock to protect _last_notification from concurrent access.
         """
         if not self._icon:
             return
 
         current_time = time.monotonic()
-        if (
-            self._last_notification
-            and self._last_notification[0] == title
-            and self._last_notification[1] == message
-            and current_time - self._last_notification[2] < 5.0
-        ):
-            # Suppress duplicate notification
-            return
+        with self._notify_lock:
+            if (
+                self._last_notification
+                and self._last_notification[0] == title
+                and self._last_notification[1] == message
+                and current_time - self._last_notification[2] < 5.0
+            ):
+                # Suppress duplicate notification
+                return
 
-        self._last_notification = (title, message, current_time)
+            self._last_notification = (title, message, current_time)
 
         try:
             self._icon.notify(message, title)

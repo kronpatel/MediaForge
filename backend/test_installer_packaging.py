@@ -140,6 +140,26 @@ class TestPackagingValidation(unittest.TestCase):
     def test_pyinstaller_spec_exists(self):
         self.assertTrue(os.path.exists(os.path.join(PROJECT_ROOT, "MediaForge.spec")))
 
+    def test_installer_includes_runtime_backend_without_checkout_artifacts(self):
+        """Production installer must not copy tests or Python caches."""
+        installer_path = os.path.join(PROJECT_ROOT, "installer.iss")
+        with open(installer_path, encoding="utf-8") as f:
+            content = f.read()
+
+        self.assertIn('Source: "backend\\app.py"', content)
+        self.assertIn('Source: "backend\\downloader.py"', content)
+        self.assertIn('Source: "installed_mode.marker"', content)
+        self.assertNotIn('Source: "backend\\*"', content)
+        self.assertNotIn(".pytest_cache", content)
+        self.assertNotIn("test_*.py", content)
+
+    def test_portable_packager_excludes_pytest_cache(self):
+        """Portable archives must not contain local pytest cache directories."""
+        script = os.path.join(SCRIPTS_DIR, "package_portable.py")
+        with open(script, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn('".pytest_cache"', content)
+
     def test_logger_file_logging(self):
         """Test that AppLogger.enable_file_logging works without crashing."""
         sys.path.insert(0, os.path.join(PROJECT_ROOT, "companion"))

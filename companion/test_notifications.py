@@ -405,5 +405,60 @@ class TestNotificationManager(unittest.TestCase):
         self.assertEqual(n.title, "Return Value")
 
 
+# ── Regression tests for Phase 3 fixes ──────────────────────────────────────
+
+class TestRecentIdsBoundedGrowth(unittest.TestCase):
+    """Fix #9: _recent_ids must not grow unboundedly — stale entries are cleaned up."""
+
+    def setUp(self):
+        self.logger = DummyLogger()
+        self.tmp_history = os.path.join(
+            os.path.dirname(__file__),
+            "cache",
+            f"test_recent_ids_{int(time.time())}.json",
+        )
+        self.manager = NotificationManager(
+            logger=self.logger,
+            history_path=self.tmp_history,
+            history_max=10,
+            duplicate_window=5.0,
+        )
+        self.manager.start()
+
+    def tearDown(self):
+        self.manager.shutdown()
+        if os.path.exists(self.tmp_history):
+            try:
+                os.remove(self.tmp_history)
+            except OSError:
+                pass
+        tmp = self.tmp_history + ".tmp"
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    def test_recent_ids_is_dict_not_set(self):
+        """_recent_ids must be a dict with timestamps (not a plain set)."""
+        self.assertIsInstance(self.manager._recent_ids, dict)
+        self.assertNotIsInstance(self.manager._recent_ids, set)
+
+    def test_recent_ids_stale_entries_cleaned_up(self):
+        """Stale _recent_ids entries are removed when duplicate window expires."""
+        self.manager._duplicate_window = 0.1
+
+        n1 = self.manager.publish(category="t", title="A", message="First")
+        time.sleep(0.2)  # Let entry A age past the duplicate window
+
+        n2 = self.manager.publish(category="t", title="B", message="Second")
+        time.sleep(0.2)
+
+        # Only the most recent entry should remain in _recent_ids
+        self.assertEqual(len(self.manager._recent_ids), 1)
+        self.assertIn(n2.id, self.manager._recent_ids)
+        self.assertNotIn(n1.id, self.manager._recent_ids)
+
+
 if __name__ == "__main__":
     unittest.main()

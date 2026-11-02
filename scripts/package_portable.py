@@ -31,12 +31,13 @@ RECURSIVE_INCLUDES = {
 # Single-file includes (relative source path -> archive path)
 FILE_INCLUDES = {
     "dist/MediaForge.exe": "MediaForge.exe",
+    "dist/MediaForgeBackend.exe": "MediaForgeBackend.exe",
     "VERSION": "VERSION",
     "MediaForge Backend.bat": "MediaForge Backend.bat",
 }
 
 
-EXCLUDE_DIRS = {"__pycache__", "reports"}
+EXCLUDE_DIRS = {"__pycache__", ".pytest_cache", "reports"}
 EXCLUDE_PREFIXES = {"test_"}
 EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".pyd"}
 EXCLUDE_FILES = {"settings.json", "queue_state.json", "download_history.jsonl"}
@@ -84,7 +85,11 @@ start "" "%ROOT%\MediaForge.exe"
 
 :: Launch the backend
 echo Starting backend server...
-start "MediaForge Backend" cmd /c "python "%ROOT%\backend\app.py""
+if exist "%ROOT%\MediaForgeBackend.exe" (
+    start "MediaForge Backend" "%ROOT%\MediaForgeBackend.exe"
+) else (
+    start "MediaForge Backend" cmd /c "python "%ROOT%\backend\app.py""
+)
 
 echo MediaForge is running in the system tray.
 echo.

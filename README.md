@@ -42,6 +42,15 @@ Get up and running in 3 minutes:
 
 ---
 
+## Current Release (v2.0.0)
+
+*   Adaptive MP4 video plus M4A audio selection for reliable 1080p, 4K, and 8K downloads.
+*   FFmpeg MP4 merging verified with real high-resolution output.
+*   Backend crash recovery with bounded automatic restart attempts.
+*   Installer result persistence and Dashboard/tray auto-update integration.
+
+---
+
 ## Recent Improvements (v1.3.0)
 
 *   **Extension Manager**: Complete multi-browser extension management with Chromium detection, profile discovery, session tracking, and automated extension installation.

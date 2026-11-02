@@ -2,7 +2,7 @@ const DEFAULT_BACKEND_URL = "http://127.0.0.1:5000";
 const API_REQUEST_TIMEOUT_MS = 30000;
 
 chrome.runtime.onInstalled.addListener(() => {
-    console.log("MediaForge v1.3.1 installed");
+    console.log("MediaForge v2.0.0 installed");
 });
 
 async function getBackendUrl() {
@@ -16,7 +16,10 @@ async function getBackendUrl() {
 
 async function apiRequest(endpoint, method = "GET", body = null) {
     const baseUrl = await getBackendUrl();
-    const url = baseUrl + endpoint;
+    // Settings may contain a trailing slash while API endpoints start with
+    // one.  Normalize the join so requests never become //download or
+    // //status/<id>, which can trigger a redirect and break POST requests.
+    const url = `${baseUrl.replace(/\/+$/, "")}/${String(endpoint).replace(/^\/+/, "")}`;
 
     const fetchOptions = {
         method,

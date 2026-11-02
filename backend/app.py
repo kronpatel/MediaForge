@@ -15,6 +15,7 @@ from downloader import reset_download_folder
 from downloader import select_download_folder
 from downloader import write_settings
 from downloader import get_statistics
+from downloader import validate_output_folder
 from downloader import retry_job
 from downloader import remove_job
 from downloader import cancel_job
@@ -72,7 +73,7 @@ def home():
     return jsonify({
         "status": "running",
         "name": "MediaForge Backend",
-        "version": "1.3.1",
+        "version": "2.0.0",
     })
 
 
@@ -117,6 +118,7 @@ def download():
         url = data.get("url")
         mode = data.get("mode")
         retries = int(data.get("retries", 2))
+        output_folder = data.get("output_folder")
 
         if not url:
             return jsonify({
@@ -130,7 +132,16 @@ def download():
                 "message": "Download mode missing",
             }), 400
 
-        job = queue_download(url=url, mode=mode, retries=retries)
+        # Server-side validation of output_folder.  Reject invalid paths
+        # before queueing; None/empty falls back to the global default.
+        normalized_folder, folder_error = validate_output_folder(output_folder)
+        if folder_error:
+            return jsonify({
+                "success": False,
+                "message": folder_error,
+            }), 400
+
+        job = queue_download(url=url, mode=mode, retries=retries, output_folder=normalized_folder)
 
         return jsonify({
             "success": True,
@@ -372,7 +383,65 @@ def queue_reorder():
         return jsonify({"success": False, "message": f"Backend error: {error}"}), 500
 
 
+# ── Single-instance guard (TASK 5) ────────────────────────────────────────
+# Prevent a second MediaForgeBackend.exe from starting while one is already
+# running.  Uses a Windows named mutex owned by this process; the OS releases
+# it automatically on exit/crash (no stale lock files).  The existing running
+# instance is never killed.  Only enforced when run as __main__, never on
+# module import, so Flask test-client tests are unaffected.
+
+
+# Module-level handle to keep the single-instance mutex alive for the
+# process lifetime.  The OS releases it automatically on exit/crash.
+_single_instance_mutex_handle: "int | None" = None
+
+
+def _enforce_single_instance() -> bool:
+    """Return True if this instance may proceed, False if another instance
+    already owns the single-instance mutex.
+
+    Uses a Windows named mutex owned by this process; the OS releases it
+    automatically on exit/crash (no stale lock files).  The existing running
+    instance is never killed.  Only enforced when run as __main__, never on
+    module import, so Flask test-client tests are unaffected.
+    """
+    import ctypes
+    import ctypes.wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.argtypes = [
+        ctypes.c_void_p,        # LPSECURITY_ATTRIBUTES
+        ctypes.wintypes.BOOL,   # BOOL bInitialOwner
+        ctypes.wintypes.LPCWSTR,# LPCWSTR lpName
+    ]
+    kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
+    kernel32.GetLastError.argtypes = []
+    kernel32.GetLastError.restype = ctypes.wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+
+    MUTEX_NAME = "MediaForgeBackend_SingleInstance_v1_3_1"
+    global _single_instance_mutex_handle
+
+    mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    if not mutex:
+        # Mutex creation failed — do not allow unprotected startup
+        return False
+
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(mutex)
+        return False
+
+    # Retain the handle for the process lifetime; OS releases it on exit
+    _single_instance_mutex_handle = int(mutex)
+    return True
+
+
 if __name__ == "__main__":
+    if not _enforce_single_instance():
+        print("Another MediaForge Backend instance is already running. Exiting.")
+        sys.exit(0)
+
     from urllib.parse import urlparse
     settings = read_settings()
     url = settings.get("backend_url", "http://127.0.0.1:5000")

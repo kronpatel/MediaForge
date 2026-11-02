@@ -359,7 +359,7 @@ class HistoryPage(BasePage):
             try:
                 subprocess.Popen(["explorer", os.path.abspath(self._download_folder)])
             except Exception as exc:
-                self.logger.error(f"[History] Failed to open download folder: {exc}")
+                self.logger.exception("[History] Failed to open download folder")
         else:
             self.logger.warning("[History] Download folder is not set or does not exist.")
 
