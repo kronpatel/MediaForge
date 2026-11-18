@@ -10,39 +10,15 @@
     const STYLE_ID = "kerzox-download-style";
     const TITLE_SLOT_ID = "kerzox-title-download-slot";
     const FLOATING_ID = "kerzox-instagram-floating-download";
-
-    function apiRequest(endpoint, method = "GET", body = null) {
-        return new Promise((resolve) => {
-            chrome.runtime.sendMessage(
-                { type: "KERZOX_API_REQUEST", endpoint, method, body },
-                (response) => {
-                    if (chrome.runtime.lastError) {
-                        resolve({ success: false, error: chrome.runtime.lastError.message });
-                        return;
-                    }
-                    resolve(response || { success: false, error: "No response from background" });
-                }
-            );
-        });
-    }
-
-    const DOWNLOAD_OPTIONS = [
-        { mode: "mp3", label: "MP3", detail: "Audio, 320 kbps", icon: "music" },
-        { mode: "1080p", label: "MP4 1080p", detail: "Video capped at 1080p", icon: "video" },
-        { mode: "4k", label: "MP4 4K", detail: "Best available video", icon: "spark" },
-        { mode: "8k", label: "Download 8K", detail: "Best video up to 8K", icon: "spark" },
-        { mode: "playlist_mp3", label: "Playlist MP3", detail: "Full playlist audio", icon: "list" },
-        { mode: "playlist_video", label: "Playlist Video", detail: "Full playlist video", icon: "layers" }
-    ];
-
-    let currentPageKey = "";
-    let retryTimer = null;
+    let extensionContextInvalid = false;
     let statusTimer = null;
     let panelTimer = null;
+    let retryTimer = null;
+    let activeTimeouts = [];
+    let currentPageKey = "";
     let activeJobId = "";
     const activeJobs = new Set();
     const notifiedJobIds = new Set();
-    let activeTimeouts = [];
     let observer = null;
     let pollFailureCount = 0;
     const MAX_POLL_FAILURES = 5;
@@ -51,6 +27,126 @@
     let igPositionRafId = null;
     let igResizeObserver = null;
     let igTrackedVideo = null;
+
+    function isExtensionContextError(error) {
+        const message = String(error?.message || error || "").toLowerCase();
+        return message.includes("extension context invalidated")
+            || message.includes("could not establish connection")
+            || message.includes("receiving end does not exist")
+            || message.includes("message port closed")
+            || message.includes("runtime unavailable");
+    }
+
+    function stopExtensionContextWork() {
+        if (extensionContextInvalid) return;
+        extensionContextInvalid = true;
+        window.clearTimeout(statusTimer);
+        window.clearTimeout(panelTimer);
+        clearAllTimeouts();
+        if (typeof disconnectObserver === "function") disconnectObserver();
+        if (typeof teardownIgPositioning === "function") teardownIgPositioning();
+        if (typeof removeInjectedUi === "function") removeInjectedUi();
+    }
+
+    function safeRuntimeSendMessage(message, onResponse) {
+        if (extensionContextInvalid) return false;
+
+        try {
+            const runtime = typeof chrome !== "undefined" ? chrome.runtime : null;
+            if (!runtime || typeof runtime.sendMessage !== "function") {
+                stopExtensionContextWork();
+                return false;
+            }
+
+            runtime.sendMessage(message, (response) => {
+                let runtimeError = null;
+                try {
+                    runtimeError = runtime.lastError || null;
+                } catch (error) {
+                    runtimeError = error;
+                }
+
+                if (runtimeError) {
+                    if (isExtensionContextError(runtimeError)) {
+                        stopExtensionContextWork();
+                    }
+                    onResponse?.(null, runtimeError);
+                    return;
+                }
+                onResponse?.(response, null);
+            });
+            return true;
+        } catch (error) {
+            if (isExtensionContextError(error)) {
+                stopExtensionContextWork();
+            }
+            onResponse?.(null, error);
+            return false;
+        }
+    }
+
+    function apiRequest(endpoint, method = "GET", body = null) {
+        return new Promise((resolve) => {
+            const sent = safeRuntimeSendMessage(
+                { type: "KERZOX_API_REQUEST", endpoint, method, body },
+                (response, error) => {
+                    if (error) {
+                        resolve({
+                            success: false,
+                            error: error.message || "Extension context unavailable",
+                            contextInvalidated: isExtensionContextError(error) || extensionContextInvalid,
+                        });
+                        return;
+                    }
+                    resolve(response || { success: false, error: "No response from background" });
+                }
+            );
+            if (!sent) {
+                resolve({
+                    success: false,
+                    error: "Extension context unavailable",
+                    contextInvalidated: true,
+                });
+            }
+        });
+    }
+
+    const AUDIO_OPTIONS = [
+        { mode: "mp3", label: "MP3", detail: "Audio, 320 kbps", icon: "music" },
+        { mode: "flac", label: "FLAC Lossless", detail: "Lossless audio, source-dependent", icon: "music" },
+    ];
+
+    const DOWNLOAD_OPTIONS = [
+        {
+            group: "audio",
+            label: "MP3 / Lossless Audio",
+            detail: "MP3 320 kbps or FLAC lossless",
+            icon: "music",
+            options: AUDIO_OPTIONS,
+            open: true,
+        },
+        {
+            group: "video",
+            label: "Video Quality",
+            detail: "MP4 1080p, 4K and 8K",
+            icon: "video",
+            options: [
+                { mode: "1080p", label: "MP4 1080p", detail: "Video capped at 1080p", icon: "video" },
+                { mode: "4k", label: "MP4 4K", detail: "Best available video", icon: "spark" },
+                { mode: "8k", label: "Download 8K", detail: "Best video up to 8K", icon: "spark" },
+            ],
+        },
+        {
+            group: "playlist",
+            label: "Playlist Downloads",
+            detail: "Audio and video playlist formats",
+            icon: "list",
+            options: [
+                { mode: "playlist_mp3", label: "Playlist MP3", detail: "Full playlist audio", icon: "list" },
+                { mode: "playlist_flac", label: "Playlist FLAC", detail: "Lossless audio, source-dependent", icon: "list" },
+            ],
+        },
+    ];
 
     function clearAllTimeouts() {
         activeTimeouts.forEach((id) => window.clearTimeout(id));
@@ -325,11 +421,19 @@
             }
 
             #${MENU_ID} {
-                background: #101010;
-                border: 1px solid rgba(255, 255, 255, 0.14);
+                background:
+                    radial-gradient(circle at 12% 0%, rgba(79, 142, 247, 0.14), transparent 34%),
+                    linear-gradient(145deg, #1b1b1d 0%, #0c0c0e 58%, #151518 100%);
+                border: 1px solid rgba(255, 255, 255, 0.18);
                 border-radius: 14px;
-                box-shadow: 0 24px 70px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+                box-shadow:
+                    0 30px 80px rgba(0, 0, 0, 0.68),
+                    0 12px 28px rgba(0, 0, 0, 0.34),
+                    0 0 0 1px rgba(255, 255, 255, 0.04) inset,
+                    0 1px 0 rgba(255, 255, 255, 0.12) inset;
                 color: #fff;
+                backdrop-filter: blur(18px) saturate(125%);
+                -webkit-backdrop-filter: blur(18px) saturate(125%);
                 font: 400 13px/18px Roboto, Arial, sans-serif;
                 height: min(690px, calc(100vh - 24px));
                 max-width: calc(100vw - 24px);
@@ -404,17 +508,21 @@
                 display: grid;
                 gap: 12px;
                 grid-template-columns: 104px 1fr;
-                padding: 14px;
+                padding: 14px 14px 13px;
                 flex-shrink: 0;
+                background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0));
+                border-bottom: 1px solid rgba(255, 255, 255, 0.08);
             }
 
             .kerzox-thumb {
                 aspect-ratio: 16 / 9;
                 background: #222;
+                border: 1px solid rgba(255, 255, 255, 0.16);
                 border-radius: 10px;
                 object-fit: cover;
                 width: 104px;
                 flex-shrink: 0;
+                box-shadow: 0 8px 18px rgba(0, 0, 0, 0.36), 0 1px 0 rgba(255, 255, 255, 0.12) inset;
             }
 
             .kerzox-title {
@@ -437,18 +545,19 @@
             }
 
             .kerzox-tabs {
-                border-top: 1px solid rgba(255, 255, 255, 0.09);
+                border-bottom: 1px solid rgba(255, 255, 255, 0.08);
                 display: grid;
                 grid-template-columns: repeat(3, 1fr);
-                padding: 8px;
+                padding: 8px 8px 9px;
                 gap: 6px;
                 flex-shrink: 0;
+                background: rgba(0, 0, 0, 0.18);
             }
 
             .kerzox-tab {
                 align-items: center;
-                background: #1a1a1a;
-                border: 1px solid transparent;
+                background: linear-gradient(180deg, #27272a, #171719);
+                border: 1px solid rgba(255, 255, 255, 0.08);
                 border-radius: 9px;
                 color: #bdbdbd;
                 cursor: pointer;
@@ -458,12 +567,20 @@
                 gap: 6px;
                 height: 34px;
                 justify-content: center;
+                box-shadow: 0 3px 7px rgba(0, 0, 0, 0.25), 0 1px 0 rgba(255, 255, 255, 0.07) inset;
+                transition: transform 140ms ease, background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
             }
 
             .kerzox-tab.is-active {
-                background: #262626;
-                border-color: rgba(255, 255, 255, 0.14);
+                background: linear-gradient(180deg, #38547d, #243957);
+                border-color: rgba(125, 178, 255, 0.52);
                 color: #fff;
+                box-shadow: 0 5px 12px rgba(33, 82, 145, 0.32), 0 1px 0 rgba(255, 255, 255, 0.18) inset;
+            }
+
+            .kerzox-tab:hover {
+                transform: translateY(-1px);
+                border-color: rgba(125, 178, 255, 0.34);
             }
 
             .kerzox-panel {
@@ -472,8 +589,9 @@
                 flex: 1;
                 overflow-y: auto;
                 min-height: 0;
-                padding: 0 10px 10px;
+                padding: 0 10px 12px;
                 box-sizing: border-box;
+                scrollbar-gutter: stable;
             }
 
             .kerzox-section-header {
@@ -608,17 +726,49 @@
                 gap: 7px;
             }
 
+            .kerzox-download-heading {
+                align-items: flex-end;
+                display: flex;
+                justify-content: space-between;
+                margin: 2px 2px 8px;
+                padding: 0 2px;
+            }
+
+            .kerzox-download-heading-title {
+                color: #f5f5f5;
+                font-size: 12px;
+                font-weight: 800;
+                letter-spacing: 0.02em;
+                text-transform: uppercase;
+            }
+
+            .kerzox-download-heading-hint {
+                color: #777;
+                font-size: 11px;
+            }
+
             .kerzox-option,
             .kerzox-icon-action {
                 align-items: center;
-                background: #191919;
-                border: 1px solid rgba(255, 255, 255, 0.08);
+                background: linear-gradient(145deg, #29292b 0%, #18181a 72%);
+                border: 1px solid rgba(255, 255, 255, 0.11);
                 border-radius: 10px;
                 color: #fff;
                 cursor: pointer;
                 display: grid;
                 min-height: 48px;
-                transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+                position: relative;
+                overflow: hidden;
+                transition: background 140ms ease, border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+                box-shadow: 0 5px 12px rgba(0, 0, 0, 0.24), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+            }
+
+            .kerzox-option::before {
+                background: linear-gradient(105deg, rgba(255, 255, 255, 0.11), transparent 35%);
+                content: "";
+                inset: 0;
+                pointer-events: none;
+                position: absolute;
             }
 
             .kerzox-option {
@@ -628,11 +778,83 @@
                 text-align: left;
             }
 
+            .kerzox-option-group {
+                display: grid;
+                gap: 7px;
+            }
+
+            .kerzox-option-group-toggle {
+                background: linear-gradient(145deg, #303033, #171719 78%);
+                grid-template-columns: 32px minmax(0, 1fr) 22px;
+                width: 100%;
+            }
+
+            .kerzox-option-group-toggle .kerzox-option-label {
+                grid-column: 2;
+                grid-row: 1;
+            }
+
+            .kerzox-option-group-toggle .kerzox-option-detail {
+                grid-column: 2;
+                grid-row: 2;
+            }
+
+            .kerzox-option-group-toggle[aria-expanded="true"] {
+                border-color: rgba(79, 142, 247, 0.48);
+                box-shadow: 0 7px 16px rgba(24, 65, 121, 0.25), 0 0 0 1px rgba(79, 142, 247, 0.08) inset;
+            }
+
+            .kerzox-option-group-toggle .kerzox-option-icon {
+                grid-row: span 2;
+            }
+
+            .kerzox-option-group-chevron {
+                align-self: center;
+                color: #aaa;
+                grid-column: 3;
+                grid-row: 1 / span 2;
+                justify-self: center;
+                transition: transform 140ms ease;
+            }
+
+            .kerzox-option-group-chevron svg {
+                height: 16px;
+                width: 16px;
+            }
+
+            .kerzox-option-group.is-open .kerzox-option-group-chevron {
+                transform: rotate(180deg);
+            }
+
+            .kerzox-option-group-children {
+                display: grid;
+                gap: 7px;
+                margin: 0 0 2px 14px;
+                padding-left: 8px;
+                border-left: 1px solid rgba(125, 178, 255, 0.24);
+            }
+
+            .kerzox-option-group-children .kerzox-option {
+                background: linear-gradient(145deg, #242426, #131315 78%);
+                min-height: 44px;
+            }
+
+            .kerzox-option-group-children[hidden] {
+                display: none;
+            }
+
             .kerzox-option:hover,
             .kerzox-icon-action:hover {
-                background: #252525;
-                border-color: rgba(255, 255, 255, 0.16);
-                transform: translateY(-1px);
+                background: linear-gradient(145deg, #36363a, #1d1d20 78%);
+                border-color: rgba(125, 178, 255, 0.38);
+                transform: translateY(-2px);
+                box-shadow: 0 9px 18px rgba(0, 0, 0, 0.34), 0 1px 0 rgba(255, 255, 255, 0.12) inset;
+            }
+
+            .kerzox-option:active,
+            .kerzox-icon-action:active,
+            .kerzox-tab:active {
+                transform: translateY(0);
             }
 
             .kerzox-option:disabled {
@@ -643,13 +865,15 @@
 
             .kerzox-option-icon {
                 align-items: center;
-                background: #2b2b2b;
+                background: linear-gradient(145deg, #3b3b40, #202024);
+                border: 1px solid rgba(255, 255, 255, 0.09);
                 border-radius: 9px;
                 display: inline-flex;
                 grid-row: span 2;
                 height: 32px;
                 justify-content: center;
                 width: 32px;
+                box-shadow: 0 4px 9px rgba(0, 0, 0, 0.28), 0 1px 0 rgba(255, 255, 255, 0.12) inset;
             }
 
             .kerzox-option-label {
@@ -665,12 +889,13 @@
             }
 
             .kerzox-progress-card {
-                background: #151515;
-                border: 1px solid rgba(255, 255, 255, 0.1);
+                background: linear-gradient(145deg, #242426, #121214 78%);
+                border: 1px solid rgba(255, 255, 255, 0.12);
                 border-radius: 12px;
                 margin-top: 10px;
                 padding: 12px;
                 flex-shrink: 0;
+                box-shadow: 0 8px 18px rgba(0, 0, 0, 0.28), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
             }
 
             .kerzox-status-row {
@@ -706,14 +931,34 @@
                 overflow-wrap: anywhere;
             }
 
+            .kerzox-progress-cancel {
+                background: rgba(239, 68, 68, 0.12);
+                border: 1px solid rgba(248, 113, 113, 0.34);
+                border-radius: 6px;
+                color: #ffb4b4;
+                cursor: pointer;
+                font-size: 10px;
+                font-weight: 800;
+                padding: 4px 8px;
+            }
+
+            .kerzox-progress-cancel:hover {
+                background: rgba(239, 68, 68, 0.24);
+                border-color: rgba(248, 113, 113, 0.64);
+                color: #fff;
+            }
+
             .kerzox-progress-percent {
-                font-size: 22px;
+                color: #f7f9ff;
+                font-size: 24px;
                 font-weight: 900;
                 line-height: 26px;
+                text-shadow: 0 2px 8px rgba(125, 178, 255, 0.24);
             }
 
             .kerzox-progress-track {
-                background: #2a2a2a;
+                background: #0b0b0d;
+                border: 1px solid rgba(255, 255, 255, 0.08);
                 border-radius: 999px;
                 height: 9px;
                 margin: 8px 0 10px;
@@ -721,11 +966,12 @@
             }
 
             .kerzox-progress-fill {
-                background: linear-gradient(90deg, #fff, #bcbcbc);
+                background: linear-gradient(90deg, #5b9cff, #a9d3ff 52%, #f2f7ff);
                 border-radius: inherit;
                 height: 100%;
                 transition: width 220ms ease;
                 width: 0%;
+                box-shadow: 0 0 12px rgba(91, 156, 255, 0.62);
             }
 
             .kerzox-progress-meta {
@@ -760,10 +1006,48 @@
             }
 
             .kerzox-list-item {
-                background: #171717;
-                border: 1px solid rgba(255, 255, 255, 0.08);
+                background: linear-gradient(145deg, #252527, #151517 78%);
+                border: 1px solid rgba(255, 255, 255, 0.1);
                 border-radius: 10px;
                 padding: 10px;
+                box-shadow: 0 5px 12px rgba(0, 0, 0, 0.22), 0 1px 0 rgba(255, 255, 255, 0.07) inset;
+            }
+
+            .kerzox-list-item-header {
+                align-items: flex-start;
+                display: flex;
+                gap: 8px;
+                justify-content: space-between;
+            }
+
+            .kerzox-list-item-header .kerzox-list-title {
+                min-width: 0;
+            }
+
+            .kerzox-cancel-button {
+                background: rgba(239, 68, 68, 0.12);
+                border: 1px solid rgba(248, 113, 113, 0.34);
+                border-radius: 6px;
+                color: #ffb4b4;
+                cursor: pointer;
+                flex: 0 0 auto;
+                font-size: 10px;
+                font-weight: 800;
+                padding: 4px 8px;
+                transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
+            }
+
+            .kerzox-cancel-button:hover {
+                background: rgba(239, 68, 68, 0.24);
+                border-color: rgba(248, 113, 113, 0.64);
+                color: #fff;
+                transform: translateY(-1px);
+            }
+
+            .kerzox-cancel-button:disabled {
+                cursor: wait;
+                opacity: 0.6;
+                transform: none;
             }
 
             .kerzox-list-title {
@@ -794,15 +1078,18 @@
 
             .kerzox-footer {
                 align-items: center;
-                border-top: 1px solid rgba(255, 255, 255, 0.09);
+                border-top: 1px solid rgba(255, 255, 255, 0.1);
                 display: flex;
                 gap: 8px;
                 justify-content: space-between;
-                padding: 10px;
+                padding: 11px 10px 10px;
                 flex-shrink: 0;
+                background: linear-gradient(180deg, rgba(0, 0, 0, 0.04), rgba(0, 0, 0, 0.24));
             }
 
             .kerzox-icon-action {
+                background: linear-gradient(180deg, #303034, #1b1b1e);
+                border: 1px solid rgba(255, 255, 255, 0.12);
                 display: inline-flex;
                 font-size: 12px;
                 font-weight: 800;
@@ -915,11 +1202,16 @@
                     <button class="kerzox-tab" type="button" data-tab="history">${icon("history")}History</button>
                 </div>
                 <div class="kerzox-panel is-active" data-panel="downloads">
+                    <div class="kerzox-download-heading">
+                        <span class="kerzox-download-heading-title">Choose a format</span>
+                        <span class="kerzox-download-heading-hint">Tap a category to expand</span>
+                    </div>
                     <div class="kerzox-actions"></div>
                     <div class="kerzox-progress-card">
                         <div class="kerzox-status-row">
                             <span class="kerzox-spinner"></span>
                             <span class="kerzox-status-text">Ready</span>
+                            <button class="kerzox-progress-cancel" type="button" hidden>Cancel</button>
                         </div>
                         <div class="kerzox-progress-percent">0%</div>
                         <div class="kerzox-progress-track"><div class="kerzox-progress-fill"></div></div>
@@ -970,6 +1262,7 @@
         const clearHistoryBtn = menu.querySelector("#kerzox-clear-history");
         const confirmCancelBtn = menu.querySelector("#kerzox-confirm-cancel");
         const confirmClearBtn = menu.querySelector("#kerzox-confirm-clear");
+        const progressCancelBtn = menu.querySelector(".kerzox-progress-cancel");
 
         clearHistoryBtn?.addEventListener("click", () => {
             if (confirmModal) confirmModal.hidden = false;
@@ -980,9 +1273,19 @@
         });
 
         confirmClearBtn?.addEventListener("click", clearHistory);
+        progressCancelBtn?.addEventListener("click", (event) => {
+            event.stopPropagation();
+            cancelDownload(activeJobId, progressCancelBtn);
+        });
 
         const actions = menu.querySelector(".kerzox-actions");
-        DOWNLOAD_OPTIONS.forEach((option) => actions.appendChild(createDownloadAction(option)));
+        DOWNLOAD_OPTIONS.forEach((option) => {
+            if (option.options) {
+                actions.appendChild(createDownloadGroup(option));
+            } else {
+                actions.appendChild(createDownloadAction(option));
+            }
+        });
 
         document.body.appendChild(menu);
         applyTheme(menu);
@@ -1004,6 +1307,45 @@
         action.querySelector(".kerzox-option-detail").textContent = option.detail;
         action.addEventListener("click", () => startDownload(option.mode));
         return action;
+    }
+
+    function createDownloadGroup(group) {
+        const wrapper = document.createElement("div");
+        wrapper.className = "kerzox-option-group";
+
+        const toggle = document.createElement("button");
+        toggle.className = "kerzox-option kerzox-option-group-toggle";
+        toggle.type = "button";
+        const initiallyOpen = Boolean(group.open);
+        toggle.setAttribute("aria-expanded", String(initiallyOpen));
+        toggle.innerHTML = `
+            <span class="kerzox-option-icon">${icon(group.icon)}</span>
+            <span class="kerzox-option-label"></span>
+            <span class="kerzox-option-detail"></span>
+            <span class="kerzox-option-group-chevron">${icon("chevron")}</span>
+        `;
+        toggle.querySelector(".kerzox-option-label").textContent = group.label;
+        toggle.querySelector(".kerzox-option-detail").textContent = group.detail;
+
+        const children = document.createElement("div");
+        children.className = "kerzox-option-group-children";
+        children.id = `kerzox-${group.group}-options`;
+        children.hidden = !initiallyOpen;
+        toggle.setAttribute("aria-controls", children.id);
+        group.options.forEach((option) => children.appendChild(createDownloadAction(option)));
+
+        if (initiallyOpen) wrapper.classList.add("is-open");
+
+        toggle.addEventListener("click", () => {
+            const isOpen = !children.hidden;
+            children.hidden = isOpen;
+            toggle.setAttribute("aria-expanded", String(!isOpen));
+            wrapper.classList.toggle("is-open", !isOpen);
+        });
+
+        wrapper.appendChild(toggle);
+        wrapper.appendChild(children);
+        return wrapper;
     }
 
     function findActionContainer() {
@@ -1339,6 +1681,8 @@
         try {
             const result = await apiRequest("/download", "POST", { url, mode });
 
+            if (result.contextInvalidated || extensionContextInvalid) return;
+
             if (!result.success || !result.data?.success) {
                 showToast(result.error || result.data?.message || "Download request failed.", true);
                 return;
@@ -1349,6 +1693,10 @@
             showToast("Successfully added to download queue!");
             pollStatus();
         } catch (error) {
+            if (isExtensionContextError(error) || extensionContextInvalid) {
+                stopExtensionContextWork();
+                return;
+            }
             console.error("Kerzox backend error:", error);
             showToast("Backend not reachable.", true);
         }
@@ -1479,8 +1827,15 @@
         const speed = menu.querySelector("[data-progress-speed]");
         const eta = menu.querySelector("[data-progress-eta]");
         const size = menu.querySelector("[data-progress-size]");
+        const cancelButton = menu.querySelector(".kerzox-progress-cancel");
 
         const targetMessage = job?.message || "Ready";
+        if (cancelButton) {
+            const terminal = ["completed", "failed", "cancelled"].includes(job?.status);
+            cancelButton.hidden = !activeJobId || terminal;
+            cancelButton.disabled = false;
+            cancelButton.textContent = "Cancel";
+        }
         if (statusText && statusText.textContent !== targetMessage) {
             statusText.textContent = targetMessage;
         }
@@ -1611,6 +1966,8 @@
         try {
             const result = await apiRequest("/download", "POST", { url, mode });
 
+            if (result.contextInvalidated || extensionContextInvalid) return;
+
             if (!result.success || !result.data?.success) {
                 setStatus(result.error || result.data?.message || "Download request failed.", false, true);
                 return;
@@ -1624,18 +1981,26 @@
             refreshPanels();
             pollStatus();
         } catch (error) {
+            if (isExtensionContextError(error) || extensionContextInvalid) {
+                stopExtensionContextWork();
+                return;
+            }
             console.error("Kerzox backend error:", error);
             setStatus("Backend not reachable.", false, true);
         }
     }
 
     async function pollStatus() {
-        if (!activeJobId) return;
+        if (!activeJobId || extensionContextInvalid) return;
 
         window.clearTimeout(statusTimer);
 
         try {
             const result = await apiRequest(`/status/${activeJobId}`);
+
+            if (result.contextInvalidated || extensionContextInvalid) {
+                return;
+            }
 
             if (!result.success || !result.data?.success || !result.data?.job) {
                 throw new Error(result.error || result.data?.message || "Invalid status response");
@@ -1681,6 +2046,10 @@
 
             statusTimer = window.setTimeout(pollStatus, 1200);
         } catch (error) {
+            if (isExtensionContextError(error) || extensionContextInvalid) {
+                stopExtensionContextWork();
+                return;
+            }
             console.error("Kerzox status error:", error);
             pollFailureCount++;
 
@@ -1703,6 +2072,9 @@
 
         try {
             const result = await apiRequest("/queue");
+            if (result.contextInvalidated || extensionContextInvalid) {
+                return;
+            }
             const queueData = result.data?.queue || {};
 
             renderQueue(queueData);
@@ -1732,6 +2104,10 @@
                 });
             }
         } catch (error) {
+            if (isExtensionContextError(error) || extensionContextInvalid) {
+                stopExtensionContextWork();
+                return;
+            }
             console.error("Kerzox panel refresh error:", error);
         }
 
@@ -1744,8 +2120,8 @@
         if (!list) return;
 
         const items = [];
-        if (queueData.active) items.push({ ...queueData.active, queueLabel: "Active" });
-        (queueData.queued || []).forEach((job) => items.push({ ...job, queueLabel: "Pending" }));
+        if (queueData.active) items.push({ ...queueData.active, queueLabel: "Active", canCancel: true });
+        (queueData.queued || []).forEach((job) => items.push({ ...job, queueLabel: "Pending", canCancel: true }));
         (queueData.failed || []).slice(0, 3).forEach((job) => items.push({ ...job, queueLabel: "Failed" }));
 
         if (!items.length) {
@@ -1756,7 +2132,9 @@
         list.innerHTML = "";
         items.slice(0, 8).forEach((job) => list.appendChild(createListItem({
             title: job.filename || job.label || job.mode,
-            meta: [job.queueLabel, job.status, `${Math.round(Number(job.progress || 0))}%`]
+            meta: [job.queueLabel, job.status, `${Math.round(Number(job.progress || 0))}%`],
+            jobId: job.id,
+            canCancel: Boolean(job.canCancel)
         })));
     }
 
@@ -1776,11 +2154,14 @@
         })));
     }
 
-    function createListItem({ title, meta }) {
+    function createListItem({ title, meta, jobId = "", canCancel = false }) {
         const item = document.createElement("div");
         item.className = "kerzox-list-item";
         item.innerHTML = `
-            <div class="kerzox-list-title"></div>
+            <div class="kerzox-list-item-header">
+                <div class="kerzox-list-title"></div>
+                ${canCancel ? '<button class="kerzox-cancel-button" type="button">Cancel</button>' : ""}
+            </div>
             <div class="kerzox-list-meta"></div>
         `;
         item.querySelector(".kerzox-list-title").textContent = title || "MediaForge download";
@@ -1790,7 +2171,47 @@
             span.textContent = value;
             metaNode.appendChild(span);
         });
+        const cancelButton = item.querySelector(".kerzox-cancel-button");
+        cancelButton?.addEventListener("click", () => cancelDownload(jobId, cancelButton));
         return item;
+    }
+
+    async function cancelDownload(jobId, button) {
+        if (!jobId || extensionContextInvalid || button?.disabled) return;
+        if (button) {
+            button.disabled = true;
+            button.textContent = "Cancelling...";
+        }
+
+        try {
+            const result = await apiRequest("/queue/cancel", "POST", { job_id: jobId });
+            if (result.contextInvalidated || extensionContextInvalid) return;
+
+            if (!result.success || !result.data?.success) {
+                throw new Error(result.error || result.data?.message || "Download could not be cancelled.");
+            }
+
+            const job = result.data.job || { id: jobId, status: "cancelled", message: "Cancelled by user" };
+            activeJobs.delete(jobId);
+            if (activeJobId === jobId) {
+                activeJobId = "";
+                window.clearTimeout(statusTimer);
+                updateProgress(job);
+                setLoading(false);
+            }
+            showToast("Download cancelled");
+            await refreshPanels();
+        } catch (error) {
+            if (isExtensionContextError(error) || extensionContextInvalid) {
+                stopExtensionContextWork();
+                return;
+            }
+            if (button) {
+                button.disabled = false;
+                button.textContent = "Cancel";
+            }
+            showToast(error.message || "Download could not be cancelled.", true);
+        }
     }
 
     function formatDate(value) {
@@ -1807,7 +2228,7 @@
         if (!jobId || notifiedJobIds.has(jobId)) return;
         notifiedJobIds.add(jobId);
 
-        chrome.runtime?.sendMessage?.({
+        safeRuntimeSendMessage({
             type: "KERZOX_NOTIFY",
             title,
             message
@@ -1815,7 +2236,7 @@
     }
 
     function openSettings() {
-        chrome.runtime?.sendMessage?.({ type: "KERZOX_OPEN_OPTIONS" });
+        safeRuntimeSendMessage({ type: "KERZOX_OPEN_OPTIONS" });
     }
 
     let isClearingHistory = false;
@@ -1828,6 +2249,8 @@
 
         try {
             const result = await apiRequest("/history/clear", "POST");
+
+            if (result.contextInvalidated || extensionContextInvalid) return;
 
             if (!result.success || !result.data?.success) {
                 const errorMsg = result.error || result.data?.message || "Failed to clear history.";
@@ -1846,6 +2269,10 @@
             }
             await refreshPanels();
         } catch (error) {
+            if (isExtensionContextError(error) || extensionContextInvalid) {
+                stopExtensionContextWork();
+                return;
+            }
             console.error("Kerzox clear history error:", error);
             setStatus("Backend not reachable. Could not clear history.");
             const list = document.querySelector(`#${MENU_ID} [data-history-list]`);
@@ -1858,24 +2285,34 @@
     }
 
     async function applyTheme(menu = document.getElementById(MENU_ID)) {
-        if (!menu || !chrome.storage?.local) return;
+        if (!menu || extensionContextInvalid) return;
 
         try {
+            if (typeof chrome === "undefined" || !chrome.storage?.local) {
+                stopExtensionContextWork();
+                return;
+            }
             const stored = await chrome.storage.local.get(["kerzoxTheme"]);
             menu.dataset.theme = stored.kerzoxTheme || "dark";
-        } catch {
+        } catch (error) {
+            if (isExtensionContextError(error) || extensionContextInvalid) {
+                stopExtensionContextWork();
+                return;
+            }
             menu.dataset.theme = "dark";
         }
     }
 
     function scheduleInject() {
+        if (extensionContextInvalid) return;
         clearAllTimeouts();
         const id = window.setTimeout(() => {
+            if (extensionContextInvalid) return;
             if (injectButton()) return;
 
-            const t1 = window.setTimeout(() => { if (injectButton()) clearAllTimeouts(); }, 500);
-            const t2 = window.setTimeout(() => { if (injectButton()) clearAllTimeouts(); }, 1500);
-            const t3 = window.setTimeout(() => { if (injectButton()) clearAllTimeouts(); }, 3000);
+            const t1 = window.setTimeout(() => { if (!extensionContextInvalid && injectButton()) clearAllTimeouts(); }, 500);
+            const t2 = window.setTimeout(() => { if (!extensionContextInvalid && injectButton()) clearAllTimeouts(); }, 1500);
+            const t3 = window.setTimeout(() => { if (!extensionContextInvalid && injectButton()) clearAllTimeouts(); }, 3000);
             activeTimeouts.push(t1, t2, t3);
         }, 120);
         activeTimeouts.push(id);
@@ -1883,6 +2320,7 @@
 
     function watchNavigation() {
         const onNavigate = () => {
+            if (extensionContextInvalid) return;
             currentPageKey = "";
             clearAllTimeouts();
 
@@ -1918,6 +2356,7 @@
     }
 
     function start() {
+        if (extensionContextInvalid) return;
         watchNavigation();
         if (isSupportedPage()) {
             connectObserver();

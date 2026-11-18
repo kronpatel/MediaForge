@@ -1,0 +1,9 @@
+{
+  "name": "mediaforge-extension",
+  "version": "2.0.0",
+  "description": "MediaForge browser extension unit and regression test suite",
+  "scripts": {
+    "test": "node test_content_tdz.js",
+    "test:tdz": "node --test test_content_tdz.js"
+  }
+}

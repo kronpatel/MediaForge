@@ -1,4 +1,5 @@
 import re
+import sys
 
 from flask import Flask, jsonify, send_file
 from flask import request
@@ -405,6 +406,9 @@ def _enforce_single_instance() -> bool:
     instance is never killed.  Only enforced when run as __main__, never on
     module import, so Flask test-client tests are unaffected.
     """
+    if sys.platform != "win32":
+        return True
+
     import ctypes
     import ctypes.wintypes
 

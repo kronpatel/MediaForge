@@ -235,6 +235,23 @@ class TestSingleInstanceGuard(unittest.TestCase):
         __main__, so importing app does not create a mutex or block anything."""
         self.assertTrue(callable(_enforce_single_instance))
 
+    def test_mutex_contention_exit_does_not_raise_name_error(self):
+        """When single-instance enforcement blocks startup, sys.exit(0) is
+        callable on app.sys and raises SystemExit(0), never NameError."""
+        import app
+        self.assertTrue(hasattr(app, "sys"), "sys must be imported at module level in app.py")
+        with patch.object(app, "_enforce_single_instance", return_value=False):
+            with self.assertRaises(SystemExit) as ctx:
+                if not app._enforce_single_instance():
+                    app.sys.exit(0)
+            self.assertEqual(ctx.exception.code, 0)
+
+    def test_non_windows_platform_skips_mutex_and_proceeds(self):
+        """On non-Windows platforms (e.g. Linux, macOS), _enforce_single_instance
+        returns True without accessing ctypes.windll (avoiding AttributeError)."""
+        with patch("sys.platform", "linux"):
+            self.assertTrue(_enforce_single_instance())
+
 
 if __name__ == "__main__":
     unittest.main()
