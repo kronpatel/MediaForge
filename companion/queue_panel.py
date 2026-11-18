@@ -1407,6 +1407,7 @@ class QueuePage(BasePage):
         return hash(str([
             (
                 j.get("id"), j.get("status"),
+                j.get("priority", "normal"),
                 round(float(j.get("progress") or 0.0), 1),
                 j.get("speed"), j.get("eta"), j.get("label"),
                 round(float(j.get("downloaded_bytes") or 0.0), 0),

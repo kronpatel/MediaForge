@@ -140,18 +140,21 @@ class TestQueueLifecycleIntegration(unittest.TestCase):
 
         status = downloader.get_download_status("priority-test-001")
         self.assertIn("Priority: high", status["message"])
+        self.assertEqual(status["priority"], "high")
 
         # Change to low
         downloader.set_job_priority("priority-test-001", "low")
         status = downloader.get_download_status("priority-test-001")
         self.assertIn("Priority: low", status["message"])
+        self.assertEqual(status["priority"], "low")
 
     def test_queue_ordering_restored(self):
-        """Verify queue ordering after reorder operations (in-memory only)."""
+        """Verify queue ordering after reorder operations (in-memory and worker queue)."""
         j1 = self._make_job("order-1")
         j2 = self._make_job("order-2")
         j3 = self._make_job("order-3")
         j4 = self._make_job("order-4")
+        downloader._rebuild_download_queue_locked()
 
         # Move last to first
         downloader.set_job_position("order-4", 0)
@@ -159,6 +162,7 @@ class TestQueueLifecycleIntegration(unittest.TestCase):
         ordered_ids = list(downloader._jobs.keys())
         self.assertEqual(ordered_ids[0], "order-4")
         self.assertEqual(ordered_ids[-1], "order-3")
+        self.assertEqual(list(downloader._download_queue.queue)[0], "order-4")
 
     def test_cancelled_job_restores_correctly(self):
         """Cancelled jobs are persisted in history."""
@@ -542,6 +546,110 @@ class TestQueueStatusGrouping(unittest.TestCase):
                 self.assertIn(state.value, status, f"Key '{state.value}' must exist in get_queue_status()")
                 job_ids = [j["id"] for j in status[state.value]]
                 self.assertIn(f"job-{state.value}", job_ids)
+
+
+class TestQueuePriorityAndExecutionOrder(unittest.TestCase):
+    """Regression tests for BUG-05: Priority and reordering affect actual worker queue."""
+
+    def setUp(self):
+        downloader._jobs.clear()
+        downloader._download_queue.queue.clear()
+        downloader._active_job_id = None
+
+    def tearDown(self):
+        downloader._jobs.clear()
+        downloader._download_queue.queue.clear()
+        downloader._active_job_id = None
+
+    def _make_job(self, job_id: str, priority: str = "normal") -> downloader.DownloadJob:
+        job = downloader.DownloadJob(
+            id=job_id,
+            url="https://example.com/video",
+            mode="1080p",
+            label="Test Video",
+            status="queued",
+            priority=priority,
+        )
+        downloader._jobs[job_id] = job
+        downloader._download_queue.put(job_id)
+        return job
+
+    def test_high_priority_job_executes_before_normal(self):
+        """Setting priority=high promotes the job ahead of earlier normal-priority jobs in the worker queue."""
+        self._make_job("job-normal-1", priority="normal")
+        self._make_job("job-normal-2", priority="normal")
+        self._make_job("job-to-promote", priority="normal")
+
+        # Promote job-to-promote to high
+        downloader.set_job_priority("job-to-promote", "high")
+
+        # The worker queue must pop the high-priority job first
+        first_job_id = downloader._download_queue.get(timeout=1.0)
+        self.assertEqual(first_job_id, "job-to-promote")
+        second_job_id = downloader._download_queue.get(timeout=1.0)
+        self.assertEqual(second_job_id, "job-normal-1")
+
+    def test_reorder_position_affects_worker_queue_execution(self):
+        """Moving position to 0 promotes the job to the head of the worker queue."""
+        self._make_job("pos-1")
+        self._make_job("pos-2")
+        self._make_job("pos-3")
+
+        downloader.set_job_position("pos-3", 0)
+
+        first_job_id = downloader._download_queue.get(timeout=1.0)
+        self.assertEqual(first_job_id, "pos-3")
+
+    def test_priority_persists_across_save_and_restore(self):
+        """Job priority persists in queue_state.json across restart."""
+        self._make_job("persist-prio", priority="high")
+        downloader._do_save_queue_state()
+
+        downloader._jobs.clear()
+        downloader._download_queue.queue.clear()
+
+        restored_count = downloader._restore_queue_state()
+        self.assertEqual(restored_count, 1)
+        self.assertEqual(downloader._jobs["persist-prio"].priority, "high")
+
+    def test_legacy_queue_state_without_priority_defaults_to_normal(self):
+        """Backward compatibility: legacy queue_state.json without priority loads as 'normal'."""
+        import json
+        legacy_state = {
+            "schema_version": downloader.QUEUE_STATE_SCHEMA_VERSION,
+            "active_job_id": None,
+            "queue_order": ["legacy-01"],
+            "jobs": [
+                {
+                    "id": "legacy-01",
+                    "url": "https://example.com/legacy",
+                    "mode": "1080p",
+                    "label": "Legacy Video",
+                    "status": "queued",
+                }
+            ],
+            "saved_at": downloader.now_iso(),
+        }
+        with open(downloader.QUEUE_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(legacy_state, f)
+
+        downloader._jobs.clear()
+        downloader._download_queue.queue.clear()
+
+        restored_count = downloader._restore_queue_state()
+        self.assertEqual(restored_count, 1)
+        self.assertEqual(downloader._jobs["legacy-01"].priority, "normal")
+
+    def test_job_to_dict_includes_priority(self):
+        """_job_to_dict and job_snapshot serialize priority."""
+        job = self._make_job("dict-job", priority="high")
+        job_dict = downloader._job_to_dict(job)
+        self.assertIn("priority", job_dict)
+        self.assertEqual(job_dict["priority"], "high")
+
+        snapshot = downloader.job_snapshot(job)
+        self.assertIn("priority", snapshot)
+        self.assertEqual(snapshot["priority"], "high")
 
 
 if __name__ == "__main__":

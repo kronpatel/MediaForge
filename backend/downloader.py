@@ -198,6 +198,7 @@ class DownloadJob:
     started_at: str = ""
     completed_at: str = ""
     output_folder: str | None = None
+    priority: str = "normal"
 
 
 import time
@@ -1272,15 +1273,50 @@ def resume_job(job_id: str) -> None:
     _schedule_save_queue_state()
 
 
+_PRIORITY_ORDER = {"high": 0, "normal": 1, "low": 2}
+
+
+def _rebuild_download_queue_locked() -> None:
+    """Rebuild the FIFO worker queue to match the current in-memory job sequence."""
+    _download_queue.queue.clear()
+    for jid, job in _jobs.items():
+        if job.status == DownloadState.QUEUED.value and jid != _active_job_id:
+            _download_queue.put(jid)
+
+
 def set_job_priority(job_id: str, priority: str) -> None:
-    """Set the priority level of a job (high/normal/low). Stored as job metadata."""
+    """Set the priority level of a job (high/normal/low) and update queue order."""
     with _jobs_lock:
         job = _jobs.get(job_id)
         if not job:
             raise KerzoxDownloadError(f"Job {job_id} not found")
-        if priority not in ("high", "normal", "low"):
+        if priority not in _PRIORITY_ORDER:
             raise KerzoxDownloadError(f"Invalid priority: {priority}")
+
+        job.priority = priority
         job.message = f"Priority: {priority}"
+
+        queued_entries = [
+            (jid, j)
+            for jid, j in _jobs.items()
+            if j.status == DownloadState.QUEUED.value and jid != _active_job_id
+        ]
+        queued_entries.sort(key=lambda item: _PRIORITY_ORDER.get(item[1].priority, 1))
+
+        new_ordered: list[tuple[str, DownloadJob]] = []
+        q_iter = iter(queued_entries)
+        for jid, j in _jobs.items():
+            if j.status == DownloadState.QUEUED.value and jid != _active_job_id:
+                new_ordered.append(next(q_iter))
+            else:
+                new_ordered.append((jid, j))
+
+        _jobs.clear()
+        for jid, j in new_ordered:
+            _jobs[jid] = j
+
+        _rebuild_download_queue_locked()
+
     logger.info("[Queue] Set priority of job %s to %s", job_id, priority)
     _schedule_save_queue_state()
 
@@ -1304,6 +1340,9 @@ def set_job_position(job_id: str, new_index: int) -> None:
         _jobs.clear()
         for jid, j in ordered:
             _jobs[jid] = j
+
+        _rebuild_download_queue_locked()
+
     logger.info("[Queue] Moved job %s to position %s", job_id, new_index)
     _schedule_save_queue_state()
 
