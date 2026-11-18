@@ -1014,8 +1014,9 @@ def download_worker() -> None:
             if job.status in (
                 DownloadState.CANCELLED.value,
                 DownloadState.PAUSED.value,
+                DownloadState.COMPLETED.value,
             ):
-                # Job was cancelled or paused while waiting in the queue.
+                # Job was cancelled, paused, or already completed.
                 # Skipping it is not a worker failure.
                 continue
 

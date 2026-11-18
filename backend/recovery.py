@@ -192,17 +192,18 @@ def recover_queue() -> RecoveryResult:
 
 
 def _recover_interrupted_jobs() -> int:
-    """Recover jobs that were in a running/downloading/paused state at crash.
+    """Recover jobs that were in a running/downloading state at crash.
 
     Transitions:
       STARTING / DOWNLOADING → QUEUED (restart download)
-      PAUSED → QUEUED (re-queue for resume)
       RECOVERING → QUEUED (re-queue after incomplete recovery)
 
+    Jobs in PAUSED state remain PAUSED to preserve user intent.
     Jobs that cannot be recovered (e.g. invalid state) are marked FAILED.
     """
     recovered = 0
     with _jobs_lock:
+        existing_queue_ids = set(_download_queue.queue)
         for job in list(_jobs.values()):
             try:
                 state = DownloadState(job.status)
@@ -218,23 +219,23 @@ def _recover_interrupted_jobs() -> int:
                 job.progress = 0.0
                 job.speed = ""
                 job.eta = ""
-                _download_queue.put(job.id)
+                if job.id not in existing_queue_ids:
+                    _download_queue.put(job.id)
+                    existing_queue_ids.add(job.id)
                 recovered += 1
                 logger.info("[Recovery] Recovered job %s (was %s) → QUEUED", job.id, state.value)
 
             elif state == DownloadState.PAUSED:
-                validate_transition(state, DownloadState.QUEUED)
-                job.status = DownloadState.QUEUED.value
-                job.message = "Re-queued after restart (was paused)"
-                _download_queue.put(job.id)
-                recovered += 1
-                logger.info("[Recovery] Recovered paused job %s → QUEUED", job.id)
+                # BUG-07: User-paused downloads must remain paused across restart
+                logger.info("[Recovery] Preserved paused job %s (remains PAUSED)", job.id)
 
             elif state == DownloadState.RECOVERING:
                 validate_transition(state, DownloadState.QUEUED)
                 job.status = DownloadState.QUEUED.value
                 job.message = "Re-queued after incomplete recovery"
-                _download_queue.put(job.id)
+                if job.id not in existing_queue_ids:
+                    _download_queue.put(job.id)
+                    existing_queue_ids.add(job.id)
                 recovered += 1
                 logger.info("[Recovery] Recovered job %s (was RECOVERING) → QUEUED", job.id)
 

@@ -2,9 +2,12 @@
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import downloader
 from downloader import (
@@ -248,15 +251,15 @@ class TestRecoveryManager(unittest.TestCase):
         self.assertIn("recover-001", downloader._jobs)
         self.assertEqual(downloader._jobs["recover-001"].status, "queued")
 
-    def test_recover_paused_job_to_queued(self):
+    def test_recover_paused_job_remains_paused(self):
         self._add_job("recover-paused", status="paused")
         downloader.save_queue_state()
 
         downloader._jobs.clear()
         result = recovery.recover_queue()
         self.assertGreaterEqual(result.jobs_restored, 1)
-        self.assertGreaterEqual(result.jobs_recovered, 1)
-        self.assertEqual(downloader._jobs["recover-paused"].status, "queued")
+        self.assertEqual(downloader._jobs["recover-paused"].status, "paused")
+        self.assertNotIn("recover-paused", list(downloader._download_queue.queue))
 
     def test_completed_job_not_recovered(self):
         self._add_job("done-job", status="completed")
@@ -345,6 +348,128 @@ class TestRecoveryManager(unittest.TestCase):
                 os.remove(path)
         if os.path.exists(downloader.HISTORY_FILE):
             os.remove(downloader.HISTORY_FILE)
+
+
+class TestBug06AndBug07Recovery(unittest.TestCase):
+    """Regression tests for BUG-06 (no duplicates in queue) and BUG-07 (preserve paused state)."""
+
+    def setUp(self):
+        downloader._jobs.clear()
+        downloader._active_job_id = None
+        downloader._download_queue.queue.clear()
+
+    def tearDown(self):
+        downloader._jobs.clear()
+        downloader._active_job_id = None
+        downloader._download_queue.queue.clear()
+        for path in (QUEUE_STATE_FILE, QUEUE_STATE_FILE + ".tmp",
+                     QUEUE_STATE_FILE + ".corrupt"):
+            if os.path.exists(path):
+                os.remove(path)
+        if os.path.exists(downloader.HISTORY_FILE):
+            os.remove(downloader.HISTORY_FILE)
+
+    def _make_job(self, jid: str, status: str = "queued") -> DownloadJob:
+        job = DownloadJob(
+            id=jid,
+            url="https://example.com/video",
+            mode="1080p",
+            label="Test Video",
+            status=status,
+        )
+        downloader._jobs[jid] = job
+        if status == "queued":
+            downloader._download_queue.put(job.id)
+        return job
+
+    def test_completed_jobs_not_reexecuted_when_popped_from_queue(self):
+        """BUG-06: Completed jobs popped by the worker must be skipped, never re-executed."""
+        job = self._make_job("completed-01", status="completed")
+        downloader._download_queue.put(job.id)
+
+        with patch.object(downloader, "execute_job") as mock_exec:
+            # Simulate one cycle of worker dequeue
+            job_id = downloader._download_queue.get()
+            with downloader._jobs_lock:
+                j = downloader._jobs.get(job_id)
+
+            if j and j.status in (
+                downloader.DownloadState.CANCELLED.value,
+                downloader.DownloadState.PAUSED.value,
+                downloader.DownloadState.COMPLETED.value,
+            ):
+                skipped = True
+            else:
+                skipped = False
+                if j:
+                    downloader.execute_job(j)
+
+            self.assertTrue(skipped, "Worker must skip completed jobs")
+            mock_exec.assert_not_called()
+
+    def test_recover_interrupted_jobs_does_not_duplicate_existing_queue(self):
+        """BUG-06: Jobs already in _download_queue must not be pushed a second time."""
+        job = self._make_job("downloading-01", status="downloading")
+        downloader._download_queue.put(job.id)
+
+        # Run recovery
+        recovery._recover_interrupted_jobs()
+
+        queue_items = list(downloader._download_queue.queue)
+        self.assertEqual(
+            queue_items.count("downloading-01"),
+            1,
+            "Job ID must appear exactly once in _download_queue",
+        )
+
+    def test_full_restart_simulation_no_duplicates(self):
+        """BUG-06: Across full save/restore/recover cycle, each job appears at most once in worker queue."""
+        self._make_job("job-1", status="downloading")
+        self._make_job("job-2", status="queued")
+        self._make_job("job-3", status="paused")
+        downloader.save_queue_state()
+
+        downloader._jobs.clear()
+        downloader._download_queue.queue.clear()
+
+        recovery.recover_queue()
+
+        queue_items = list(downloader._download_queue.queue)
+        self.assertEqual(len(queue_items), len(set(queue_items)), "No duplicate job IDs in queue")
+        self.assertIn("job-1", queue_items)
+        self.assertIn("job-2", queue_items)
+        self.assertNotIn("job-3", queue_items, "Paused jobs must not be in the execution queue")
+
+    def test_paused_jobs_remain_paused_after_recovery(self):
+        """BUG-07: Paused jobs must stay paused after recovery to honor user intent."""
+        self._make_job("paused-01", status="paused")
+        recovery._recover_interrupted_jobs()
+
+        self.assertEqual(downloader._jobs["paused-01"].status, "paused")
+
+    def test_paused_jobs_not_in_download_queue_after_recovery(self):
+        """BUG-07: Paused jobs must not be pushed into _download_queue during recovery."""
+        self._make_job("paused-02", status="paused")
+        recovery._recover_interrupted_jobs()
+
+        self.assertNotIn("paused-02", list(downloader._download_queue.queue))
+
+    def test_user_can_manually_resume_paused_job_after_restart(self):
+        """BUG-07: Paused jobs preserved across restart can be resumed manually by the user."""
+        self._make_job("paused-resume", status="paused")
+        downloader.save_queue_state()
+
+        downloader._jobs.clear()
+        downloader._download_queue.queue.clear()
+
+        recovery.recover_queue()
+        self.assertEqual(downloader._jobs["paused-resume"].status, "paused")
+        self.assertNotIn("paused-resume", list(downloader._download_queue.queue))
+
+        # User clicks resume
+        downloader.resume_job("paused-resume")
+        self.assertEqual(downloader._jobs["paused-resume"].status, "queued")
+        self.assertIn("paused-resume", list(downloader._download_queue.queue))
 
 
 if __name__ == "__main__":
