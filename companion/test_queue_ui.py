@@ -20,10 +20,16 @@ Covers:
 
 from __future__ import annotations
 
+import os
 import sys
+import threading
 import types as _types
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+_COMPANION_DIR = os.path.dirname(os.path.abspath(__file__))
+if _COMPANION_DIR not in sys.path:
+    sys.path.insert(0, _COMPANION_DIR)
 
 # Stub base_page module
 _mock_base = _types.ModuleType("base_page")
@@ -406,13 +412,17 @@ class TestBatchPauseResume(unittest.TestCase):
             self.page._row_widgets.append(row)
 
     def test_pause_selected_calls_manager(self):
-        self.page.pause_selected()
+        t = self.page.pause_selected()
+        if t:
+            t.join(timeout=2.0)
         self.assertEqual(self.page.manager.pause_download.call_count, 2)
         self.page.manager.pause_download.assert_any_call("id1")
         self.page.manager.pause_download.assert_any_call("id2")
 
     def test_resume_selected_calls_manager(self):
-        self.page.resume_selected()
+        t = self.page.resume_selected()
+        if t:
+            t.join(timeout=2.0)
         self.assertEqual(self.page.manager.resume_download.call_count, 2)
         self.page.manager.resume_download.assert_any_call("id1")
         self.page.manager.resume_download.assert_any_call("id2")
@@ -430,7 +440,9 @@ class TestBatchRetry(unittest.TestCase):
             self.page._row_widgets.append(row)
 
     def test_retry_all_failed_only_failed_jobs(self):
-        self.page.retry_all_failed()
+        t = self.page.retry_all_failed()
+        if t:
+            t.join(timeout=2.0)
         self.assertEqual(self.page.manager.retry_download.call_count, 2)
         self.page.manager.retry_download.assert_any_call("id0")
         self.page.manager.retry_download.assert_any_call("id1")
@@ -448,19 +460,25 @@ class TestBatchRemove(unittest.TestCase):
 
     def test_remove_selected_calls_manager_for_each(self):
         self.page._confirm_remove = MagicMock(return_value=True)
-        self.page.remove_selected()
+        t = self.page.remove_selected()
+        if t:
+            t.join(timeout=2.0)
         self.assertEqual(self.page.manager.remove_download.call_count, 2)
         self.page.manager.remove_download.assert_any_call("id0")
         self.page.manager.remove_download.assert_any_call("id1")
 
     def test_remove_selected_skips_if_cancelled(self):
         self.page._confirm_remove = MagicMock(return_value=False)
-        self.page.remove_selected()
+        t = self.page.remove_selected()
+        if t:
+            t.join(timeout=2.0)
         self.page.manager.remove_download.assert_not_called()
 
     def test_remove_selected_clears_selection(self):
         self.page._confirm_remove = MagicMock(return_value=True)
-        self.page.remove_selected()
+        t = self.page.remove_selected()
+        if t:
+            t.join(timeout=2.0)
         self.assertEqual(len(self.page._selected_ids), 0)
 
 
@@ -476,26 +494,34 @@ class TestBatchCancel(unittest.TestCase):
 
     def test_cancel_selected_calls_manager_for_each(self):
         self.page._confirm_cancel = MagicMock(return_value=True)
-        self.page.cancel_selected()
+        t = self.page.cancel_selected()
+        if t:
+            t.join(timeout=2.0)
         self.assertEqual(self.page.manager.cancel_download.call_count, 2)
         self.page.manager.cancel_download.assert_any_call("id0")
         self.page.manager.cancel_download.assert_any_call("id1")
 
     def test_cancel_selected_skips_if_cancelled(self):
         self.page._confirm_cancel = MagicMock(return_value=False)
-        self.page.cancel_selected()
+        t = self.page.cancel_selected()
+        if t:
+            t.join(timeout=2.0)
         self.page.manager.cancel_download.assert_not_called()
 
     def test_cancel_selected_clears_selection(self):
         self.page._confirm_cancel = MagicMock(return_value=True)
-        self.page.cancel_selected()
+        t = self.page.cancel_selected()
+        if t:
+            t.join(timeout=2.0)
         self.assertEqual(len(self.page._selected_ids), 0)
 
     def test_cancel_selected_skips_when_no_ids(self):
         self.page._selected_ids = set()
         self.page._row_widgets = []
         self.page._confirm_cancel = MagicMock()
-        self.page.cancel_selected()
+        t = self.page.cancel_selected()
+        if t:
+            t.join(timeout=2.0)
         self.page._confirm_cancel.assert_not_called()
 
 
@@ -526,7 +552,9 @@ class TestPriorityOrdering(unittest.TestCase):
         self.page._row_widgets = [row]
         self.page._selected_ids = {"id0"}
         self.page.manager.change_priority = MagicMock()
-        self.page.increase_priority()
+        t = self.page.increase_priority()
+        if t:
+            t.join(timeout=2.0)
         self.page.manager.change_priority.assert_called_with("id0", "normal")
 
     def test_decrease_priority_calls_manager(self):
@@ -536,8 +564,101 @@ class TestPriorityOrdering(unittest.TestCase):
         self.page._row_widgets = [row]
         self.page._selected_ids = {"id0"}
         self.page.manager.change_priority = MagicMock()
-        self.page.decrease_priority()
+        t = self.page.decrease_priority()
+        if t:
+            t.join(timeout=2.0)
         self.page.manager.change_priority.assert_called_with("id0", "normal")
+
+
+class TestAsyncBatchOperations(unittest.TestCase):
+    """Regression tests for BUG-09: Batch operations offload to background threads."""
+
+    def setUp(self):
+        self.page = _make_page()
+        self.page._row_widgets = []
+        for i in range(3):
+            row = MagicMock()
+            row.job_id = f"job-{i}"
+            row._job_data = {"status": "failed", "priority": "normal"}
+            self.page._row_widgets.append(row)
+        self.page._selected_ids = {"job-0", "job-1", "job-2"}
+
+    def test_batch_retry_runs_on_background_thread(self):
+        """Batch operation launches a daemon threading.Thread and returns immediately."""
+        with patch("queue_panel.threading.Thread", wraps=threading.Thread) as mock_thread:
+            t = self.page.retry_all_failed()
+            self.assertTrue(mock_thread.called)
+            self.assertEqual(mock_thread.call_args[1]["daemon"], True)
+            if t:
+                t.join(timeout=2.0)
+
+    def test_batch_retry_dispatches_ui_update_via_after(self):
+        """Batch completion dispatches UI update via self.after(0, ...)."""
+        after_calls = []
+        self.page.after = MagicMock(side_effect=lambda delay, fn: after_calls.append((delay, fn)))
+        t = self.page.retry_all_failed()
+        if t:
+            t.join(timeout=2.0)
+        self.assertTrue(any(call[0] == 0 for call in after_calls), "Must call after(0, ...)")
+
+    def test_batch_retry_handles_per_job_exception(self):
+        """One failing job does not abort processing of remaining jobs."""
+        def side_effect(jid):
+            if jid == "job-1":
+                raise RuntimeError("Network error")
+            return True
+
+        self.page.manager.retry_download = MagicMock(side_effect=side_effect)
+        t = self.page.retry_all_failed()
+        if t:
+            t.join(timeout=2.0)
+        self.assertEqual(self.page.manager.retry_download.call_count, 3)
+
+    def test_batch_button_disabled_during_operation(self):
+        """Button state is set to disabled when async batch starts."""
+        button = MagicMock()
+        button.configure = MagicMock()
+        self.page._retry_failed_btn = button
+        t = self.page.retry_all_failed()
+        button.configure.assert_any_call(state="disabled")
+        if t:
+            t.join(timeout=2.0)
+
+    def test_batch_button_re_enabled_on_complete(self):
+        """Button state is restored to normal in after(0) completion callback."""
+        button = MagicMock()
+        configure_calls = []
+        button.configure = MagicMock(side_effect=lambda **kw: configure_calls.append(kw.get("state")))
+        self.page._retry_failed_btn = button
+
+        self.page.after = MagicMock(side_effect=lambda delay, fn: fn())
+
+        t = self.page.retry_all_failed()
+        if t:
+            t.join(timeout=2.0)
+        self.assertIn("disabled", configure_calls)
+        self.assertIn("normal", configure_calls)
+
+    def test_batch_results_aggregated_correctly(self):
+        """Success and failure counts are aggregated and logged."""
+        def side_effect(jid):
+            if jid == "job-1":
+                raise RuntimeError("Fail")
+            return True
+
+        self.page.manager.retry_download = MagicMock(side_effect=side_effect)
+        info_logs = []
+        self.page.logger.info = MagicMock(side_effect=lambda msg: info_logs.append(msg))
+        self.page.after = MagicMock(side_effect=lambda delay, fn: fn())
+
+        t = self.page.retry_all_failed()
+        if t:
+            t.join(timeout=2.0)
+
+        complete_logs = [msg for msg in info_logs if "complete" in str(msg).lower()]
+        self.assertTrue(len(complete_logs) > 0)
+        self.assertIn("success: 2", complete_logs[0])
+        self.assertIn("failed: 1", complete_logs[0])
 
 
 class TestContextMenu(unittest.TestCase):

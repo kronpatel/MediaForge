@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from typing import TYPE_CHECKING, Any, Callable
 
 import tkinter as tk
@@ -733,68 +734,115 @@ class QueuePage(BasePage):
         self._increase_prio_btn.configure(state=state)
         self._decrease_prio_btn.configure(state=state)
 
-    # ── Batch Operations ──────────────────────────────────────────────────
+    # ── Batch Operations (Async / Non-Blocking) ───────────────────────────
 
-    def pause_selected(self) -> None:
-        ids = self.get_selected_job_ids()
-        for jid in ids:
+    def _run_batch_async(
+        self,
+        job_ids: list[str] | set[str],
+        operation: Callable[[str], Any],
+        label: str,
+        button: ctk.CTkButton | None = None,
+    ) -> threading.Thread | None:
+        """Execute a batch of job operations on a background worker thread.
+        Dispatches UI update and button re-enabling via self.after(0, ...)
+        to guarantee Tkinter main-thread safety. Returns the Thread object or None."""
+        target_ids = list(job_ids)
+        if not target_ids:
+            return None
+
+        if button:
             try:
-                self.manager.pause_download(jid)
-            except Exception as exc:
-                self.logger.error(f"[Queue] Pause failed — job: {jid}, error: {exc}")
-        self.logger.info(f"[Queue] Paused {len(ids)} job(s)")
-        self._trigger_refresh()
+                button.configure(state="disabled")
+            except Exception:
+                pass
 
-    def resume_selected(self) -> None:
-        ids = self.get_selected_job_ids()
-        for jid in ids:
+        def _worker() -> None:
+            results: list[tuple[str, Any, Exception | None]] = []
+            for jid in target_ids:
+                try:
+                    res = operation(jid)
+                    results.append((jid, res, None))
+                except Exception as exc:
+                    self.logger.error(f"[Queue] {label} failed — job: {jid}, error: {exc}")
+                    results.append((jid, None, exc))
+
+            def _on_finish() -> None:
+                if button:
+                    try:
+                        button.configure(state="normal")
+                    except Exception:
+                        pass
+                successes = sum(1 for _, res, err in results if err is None and res is not False)
+                failures = len(results) - successes
+                self.logger.info(
+                    f"[Queue] {label} complete — success: {successes}, failed: {failures}"
+                )
+                self._trigger_refresh()
+
             try:
-                self.manager.resume_download(jid)
-            except Exception as exc:
-                self.logger.error(f"[Queue] Resume failed — job: {jid}, error: {exc}")
-        self.logger.info(f"[Queue] Resumed {len(ids)} job(s)")
-        self._trigger_refresh()
+                self.after(0, _on_finish)
+            except Exception:
+                _on_finish()
 
-    def retry_all_failed(self) -> None:
+        thread = threading.Thread(
+            target=_worker,
+            name=f"QueueBatch_{label.replace(' ', '_')}",
+            daemon=True,
+        )
+        thread.start()
+        return thread
+
+    def pause_selected(self) -> threading.Thread | None:
+        ids = self.get_selected_job_ids()
+        if not ids:
+            return None
+        button = getattr(self, "_pause_sel_btn", None)
+        return self._run_batch_async(ids, self.manager.pause_download, "Pause Selected", button=button)
+
+    def resume_selected(self) -> threading.Thread | None:
+        ids = self.get_selected_job_ids()
+        if not ids:
+            return None
+        button = getattr(self, "_resume_sel_btn", None)
+        return self._run_batch_async(ids, self.manager.resume_download, "Resume Selected", button=button)
+
+    def retry_all_failed(self) -> threading.Thread | None:
         failed_ids = [r.job_id for r in self._row_widgets
                       if r.job_id and r._job_data.get("status") == "failed"]
-        for jid in failed_ids:
-            try:
-                self.manager.retry_download(jid)
-            except Exception as exc:
-                self.logger.error(f"[Queue] Retry failed — job: {jid}, error: {exc}")
-        self.logger.info(f"[Queue] Retried {len(failed_ids)} job(s)")
-        self._trigger_refresh()
+        if not failed_ids:
+            return None
+        button = getattr(self, "_retry_failed_btn", None)
+        return self._run_batch_async(failed_ids, self.manager.retry_download, "Retry Failed", button=button)
 
-    def cancel_selected(self) -> None:
+    def cancel_selected(self) -> threading.Thread | None:
         ids = self.get_selected_job_ids()
         if not ids:
-            return
+            return None
         if not self._confirm_cancel(len(ids)):
-            return
-        for jid in ids:
-            try:
-                self.manager.cancel_download(jid)
-            except Exception as exc:
-                self.logger.error(f"[Queue] Cancel failed — job: {jid}, error: {exc}")
+            return None
         self._selected_ids.clear()
-        self.logger.info(f"[Queue] Cancelled {len(ids)} job(s)")
-        self._trigger_refresh()
+        button = getattr(self, "_cancel_sel_btn", None)
+        return self._run_batch_async(
+            ids,
+            self.manager.cancel_download,
+            "Cancel Selected",
+            button=button,
+        )
 
-    def remove_selected(self) -> None:
+    def remove_selected(self) -> threading.Thread | None:
         ids = self.get_selected_job_ids()
         if not ids:
-            return
+            return None
         if not self._confirm_remove(len(ids)):
-            return
-        for jid in ids:
-            try:
-                self.manager.remove_download(jid)
-            except Exception as exc:
-                self.logger.error(f"[Queue] Remove failed — job: {jid}, error: {exc}")
+            return None
         self._selected_ids.clear()
-        self.logger.info(f"[Queue] Removed {len(ids)} job(s)")
-        self._trigger_refresh()
+        button = getattr(self, "_remove_sel_btn", None)
+        return self._run_batch_async(
+            ids,
+            self.manager.remove_download,
+            "Remove Selected",
+            button=button,
+        )
 
     def _confirm_cancel(self, count: int) -> bool:
         dialog = ctk.CTkToplevel(self)
@@ -882,35 +930,45 @@ class QueuePage(BasePage):
 
     # ── Priority Operations ───────────────────────────────────────────────
 
-    def increase_priority(self) -> None:
+    def increase_priority(self) -> threading.Thread | None:
         ids = self.get_selected_job_ids()
+        if not ids:
+            return None
+        prio_map: dict[str, str] = {}
         for jid in ids:
             row = next((r for r in self._row_widgets if r.job_id == jid), None)
             if not row:
                 continue
             cur = row._job_data.get("priority", "normal")
-            newp = {"high": "high", "normal": "high", "low": "normal"}.get(cur, "normal")
-            try:
-                self.manager.change_priority(jid, newp)
-            except Exception as exc:
-                self.logger.error(f"[Queue] Priority change failed — job: {jid}, error: {exc}")
-        self.logger.info("[Queue] Priority changed")
-        self._trigger_refresh()
+            prio_map[jid] = {"high": "high", "normal": "high", "low": "normal"}.get(cur, "normal")
 
-    def decrease_priority(self) -> None:
+        button = getattr(self, "_increase_prio_btn", None)
+        return self._run_batch_async(
+            list(prio_map.keys()),
+            lambda jid: self.manager.change_priority(jid, prio_map[jid]),
+            "Increase Priority",
+            button=button,
+        )
+
+    def decrease_priority(self) -> threading.Thread | None:
         ids = self.get_selected_job_ids()
+        if not ids:
+            return None
+        prio_map: dict[str, str] = {}
         for jid in ids:
             row = next((r for r in self._row_widgets if r.job_id == jid), None)
             if not row:
                 continue
             cur = row._job_data.get("priority", "normal")
-            newp = {"high": "normal", "normal": "low", "low": "low"}.get(cur, "normal")
-            try:
-                self.manager.change_priority(jid, newp)
-            except Exception as exc:
-                self.logger.error(f"[Queue] Priority change failed — job: {jid}, error: {exc}")
-        self.logger.info("[Queue] Priority changed")
-        self._trigger_refresh()
+            prio_map[jid] = {"high": "normal", "normal": "low", "low": "low"}.get(cur, "normal")
+
+        button = getattr(self, "_decrease_prio_btn", None)
+        return self._run_batch_async(
+            list(prio_map.keys()),
+            lambda jid: self.manager.change_priority(jid, prio_map[jid]),
+            "Decrease Priority",
+            button=button,
+        )
 
     def move_to_top(self, job_id: str) -> None:
         try:
