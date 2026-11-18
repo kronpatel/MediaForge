@@ -8,9 +8,12 @@ race (the daemon worker immediately picks up real queues).
 """
 
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import downloader
 
@@ -484,6 +487,61 @@ class TestYouTubeDownloadCompatibility(unittest.TestCase):
             "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
             "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
         )
+
+
+class TestQueueStatusGrouping(unittest.TestCase):
+    """Regression tests for BUG-04: get_queue_status() preserves all non-terminal states."""
+
+    def setUp(self):
+        downloader._jobs.clear()
+        downloader._active_job_id = None
+
+    def tearDown(self):
+        downloader._jobs.clear()
+        downloader._active_job_id = None
+
+    def _make_job(self, job_id: str, status: str = "queued") -> downloader.DownloadJob:
+        job = downloader.DownloadJob(
+            id=job_id,
+            url="https://example.com/video",
+            mode="1080p",
+            label="Test Video",
+            status=status,
+        )
+        downloader._jobs[job_id] = job
+        return job
+
+    def test_paused_job_appears_in_queue_status(self):
+        """Paused jobs must not vanish from get_queue_status()."""
+        self._make_job("paused-001", status="paused")
+        status = downloader.get_queue_status()
+        self.assertIn("paused", status)
+        paused_ids = [j["id"] for j in status["paused"]]
+        self.assertIn("paused-001", paused_ids)
+        self.assertEqual(status["paused_count"], 1)
+
+    def test_starting_and_retrying_jobs_appear_in_queue_status(self):
+        """Starting and retrying jobs must appear in their respective status lists."""
+        self._make_job("starting-001", status="starting")
+        self._make_job("retrying-001", status="retrying")
+        status = downloader.get_queue_status()
+        self.assertIn("starting", status)
+        self.assertIn("retrying", status)
+        self.assertIn("starting-001", [j["id"] for j in status["starting"]])
+        self.assertIn("retrying-001", [j["id"] for j in status["retrying"]])
+
+    def test_all_download_states_map_to_keys_in_queue_status(self):
+        """Every active/queued DownloadState enum value must map to a key in get_queue_status()."""
+        for state in downloader.DownloadState:
+            if state in (downloader.DownloadState.COMPLETED, downloader.DownloadState.CANCELLED):
+                continue
+            with self.subTest(state=state.value):
+                downloader._jobs.clear()
+                self._make_job(f"job-{state.value}", status=state.value)
+                status = downloader.get_queue_status()
+                self.assertIn(state.value, status, f"Key '{state.value}' must exist in get_queue_status()")
+                job_ids = [j["id"] for j in status[state.value]]
+                self.assertIn(f"job-{state.value}", job_ids)
 
 
 if __name__ == "__main__":

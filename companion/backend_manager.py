@@ -700,11 +700,27 @@ class BackendManager:
                     raw_jobs = []
                     if isinstance(qdata, dict):
                         # Flatten get_queue_status() dictionary into a single list of jobs
+                        seen_ids = set()
                         active = qdata.get("active")
-                        if active:
+                        if active and isinstance(active, dict):
                             raw_jobs.append(active)
-                        raw_jobs.extend(qdata.get("queued", []))
-                        raw_jobs.extend(qdata.get("failed", []))
+                            if active.get("id"):
+                                seen_ids.add(active["id"])
+
+                        # Include all status buckets without dropping unknown or future status keys
+                        for key, val in qdata.items():
+                            if key in ("active", "history") or key.endswith("_count"):
+                                continue
+                            if isinstance(val, list):
+                                for item in val:
+                                    if isinstance(item, dict):
+                                        jid = item.get("id")
+                                        if jid:
+                                            if jid not in seen_ids:
+                                                seen_ids.add(jid)
+                                                raw_jobs.append(item)
+                                        else:
+                                            raw_jobs.append(item)
                     elif isinstance(qdata, list):
                         raw_jobs = qdata
                     

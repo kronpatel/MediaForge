@@ -1050,6 +1050,32 @@
                 transform: none;
             }
 
+            .kerzox-resume-button {
+                background: rgba(34, 197, 94, 0.16);
+                border: 1px solid rgba(74, 222, 128, 0.44);
+                border-radius: 6px;
+                color: #86efac;
+                cursor: pointer;
+                flex: 0 0 auto;
+                font-size: 10px;
+                font-weight: 800;
+                padding: 4px 8px;
+                transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
+            }
+
+            .kerzox-resume-button:hover {
+                background: rgba(34, 197, 94, 0.28);
+                border-color: rgba(74, 222, 128, 0.7);
+                color: #fff;
+                transform: translateY(-1px);
+            }
+
+            .kerzox-resume-button:disabled {
+                cursor: wait;
+                opacity: 0.6;
+                transform: none;
+            }
+
             .kerzox-list-title {
                 color: #fff;
                 font-size: 12px;
@@ -2121,7 +2147,10 @@
 
         const items = [];
         if (queueData.active) items.push({ ...queueData.active, queueLabel: "Active", canCancel: true });
+        (queueData.starting || []).forEach((job) => items.push({ ...job, queueLabel: "Starting", canCancel: true, isSpinner: true }));
         (queueData.queued || []).forEach((job) => items.push({ ...job, queueLabel: "Pending", canCancel: true }));
+        (queueData.retrying || []).forEach((job) => items.push({ ...job, queueLabel: "Retrying", canCancel: true, isSpinner: true }));
+        (queueData.paused || []).forEach((job) => items.push({ ...job, queueLabel: "Paused", canCancel: true, canResume: true }));
         (queueData.failed || []).slice(0, 3).forEach((job) => items.push({ ...job, queueLabel: "Failed" }));
 
         if (!items.length) {
@@ -2134,7 +2163,9 @@
             title: job.filename || job.label || job.mode,
             meta: [job.queueLabel, job.status, `${Math.round(Number(job.progress || 0))}%`],
             jobId: job.id,
-            canCancel: Boolean(job.canCancel)
+            canCancel: Boolean(job.canCancel),
+            canResume: Boolean(job.canResume),
+            isSpinner: Boolean(job.isSpinner)
         })));
     }
 
@@ -2154,17 +2185,23 @@
         })));
     }
 
-    function createListItem({ title, meta, jobId = "", canCancel = false }) {
+    function createListItem({ title, meta, jobId = "", canCancel = false, canResume = false, isSpinner = false }) {
         const item = document.createElement("div");
         item.className = "kerzox-list-item";
         item.innerHTML = `
             <div class="kerzox-list-item-header">
-                <div class="kerzox-list-title"></div>
-                ${canCancel ? '<button class="kerzox-cancel-button" type="button">Cancel</button>' : ""}
+                <div class="kerzox-list-title">
+                    ${isSpinner ? '<span class="kerzox-spinner" style="visibility:visible;opacity:1;display:inline-block;height:12px;width:12px;margin-right:6px;vertical-align:middle;"></span>' : ""}
+                    <span class="kerzox-title-text"></span>
+                </div>
+                <div class="kerzox-list-actions" style="display:flex;gap:4px;">
+                    ${canResume ? '<button class="kerzox-resume-button" type="button">Resume</button>' : ""}
+                    ${canCancel ? '<button class="kerzox-cancel-button" type="button">Cancel</button>' : ""}
+                </div>
             </div>
             <div class="kerzox-list-meta"></div>
         `;
-        item.querySelector(".kerzox-list-title").textContent = title || "MediaForge download";
+        item.querySelector(".kerzox-title-text").textContent = title || "MediaForge download";
         const metaNode = item.querySelector(".kerzox-list-meta");
         meta.filter(Boolean).forEach((value) => {
             const span = document.createElement("span");
@@ -2173,7 +2210,35 @@
         });
         const cancelButton = item.querySelector(".kerzox-cancel-button");
         cancelButton?.addEventListener("click", () => cancelDownload(jobId, cancelButton));
+        const resumeButton = item.querySelector(".kerzox-resume-button");
+        resumeButton?.addEventListener("click", () => resumeDownload(jobId, resumeButton));
         return item;
+    }
+
+    async function resumeDownload(jobId, button) {
+        if (!jobId || extensionContextInvalid || button?.disabled) return;
+        if (button) {
+            button.disabled = true;
+            button.textContent = "Resuming...";
+        }
+
+        try {
+            const result = await apiRequest("/queue/resume", "POST", { job_id: jobId });
+            if (result.contextInvalidated || extensionContextInvalid) return;
+
+            if (!result.success || !result.data?.success) {
+                throw new Error(result.error || result.data?.message || "Download could not be resumed.");
+            }
+
+            showToast("Download resumed");
+            await refreshPanels();
+        } catch (error) {
+            if (button) {
+                button.disabled = false;
+                button.textContent = "Resume";
+            }
+            showToast(error.message || "Could not resume download", true);
+        }
     }
 
     async function cancelDownload(jobId, button) {

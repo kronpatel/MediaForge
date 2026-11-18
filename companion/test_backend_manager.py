@@ -180,5 +180,45 @@ class TestPhase4BackendRecovery(unittest.TestCase):
         self.assertFalse(self.mgr._recovery_in_progress)
 
 
+class TestGetQueueStatusContract(unittest.TestCase):
+    """Regression test for BUG-04: get_queue() includes all status buckets."""
+
+    def setUp(self):
+        self.mgr = BackendManager(DummyLogger())
+
+    def test_get_queue_includes_paused_starting_retrying_and_unknown_keys(self):
+        payload = {
+            "success": True,
+            "queue": {
+                "active": {"id": "job-active", "status": "downloading", "url": "https://example.com/1"},
+                "queued": [{"id": "job-queued", "status": "queued", "url": "https://example.com/2"}],
+                "paused": [{"id": "job-paused", "status": "paused", "url": "https://example.com/3"}],
+                "starting": [{"id": "job-starting", "status": "starting", "url": "https://example.com/4"}],
+                "retrying": [{"id": "job-retrying", "status": "retrying", "url": "https://example.com/5"}],
+                "custom_bucket": [{"id": "job-custom", "status": "custom", "url": "https://example.com/6"}],
+                "queued_count": 1,
+                "paused_count": 1,
+                "history": [{"id": "job-completed", "status": "completed", "url": "https://example.com/7"}],
+            },
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = payload
+
+        with patch.object(self.mgr, "_send_request", return_value=mock_resp):
+            jobs = self.mgr.get_queue()
+
+        returned_ids = [j["id"] for j in jobs]
+        self.assertIn("job-active", returned_ids)
+        self.assertIn("job-queued", returned_ids)
+        self.assertIn("job-paused", returned_ids)
+        self.assertIn("job-starting", returned_ids)
+        self.assertIn("job-retrying", returned_ids)
+        self.assertIn("job-custom", returned_ids)
+        self.assertNotIn("job-completed", returned_ids, "history items must not leak into active queue")
+        self.assertEqual(len(jobs), 6)
+
+
 if __name__ == "__main__":
     unittest.main()

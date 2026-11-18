@@ -197,6 +197,94 @@ test("BUG-03: Pre-fix buggy layout throws ReferenceError on early context invali
   );
 });
 
+test("BUG-04: renderQueue() renders paused jobs with Resume button, and starting/retrying with spinner", () => {
+  const content = fs.readFileSync(CONTENT_JS_PATH, "utf8");
+
+  // Instrument content.js to expose renderQueue on window for test verification
+  const testCode = content.replace(
+    "function renderQueue(queueData) {",
+    "window.__testRenderQueue = renderQueue;\nfunction renderQueue(queueData) {"
+  );
+
+  const appendedItems = [];
+  const mockList = {
+    innerHTML: "",
+    appendChild: (el) => appendedItems.push(el),
+  };
+
+  const { mockWindow, mockChrome, mockDocument, mockHistory, MockMutationObserver } =
+    createMockEnvironment();
+
+  mockDocument.querySelector = (sel) => {
+    if (sel.includes("[data-queue-list]")) return mockList;
+    return null;
+  };
+  mockDocument.getElementById = (id) => {
+    if (id === "kerzox-download-menu") return { hidden: false };
+    return null;
+  };
+  mockDocument.createElement = (tag) => {
+    const el = {
+      tagName: tag,
+      className: "",
+      innerHTML: "",
+      children: [],
+      textContent: "",
+      setAttribute: () => {},
+      appendChild: (child) => el.children.push(child),
+      addEventListener: () => {},
+      querySelector: (sel) => {
+        if (sel === ".kerzox-title-text") {
+          return {
+            set textContent(v) {
+              el.titleText = v;
+              el.innerHTML += v;
+            },
+            get textContent() {
+              return el.titleText || "";
+            },
+          };
+        }
+        if (sel === ".kerzox-list-meta") return el;
+        return null;
+      },
+    };
+    return el;
+  };
+
+  const fn = new Function(
+    "window", "chrome", "document", "history", "MutationObserver", "URL",
+    testCode
+  );
+  fn(mockWindow, mockChrome, mockDocument, mockHistory, MockMutationObserver, URL);
+
+  assert.strictEqual(typeof mockWindow.__testRenderQueue, "function", "renderQueue must be exposed");
+
+  // Call renderQueue with paused, starting, and retrying jobs
+  mockWindow.__testRenderQueue({
+    active: null,
+    queued: [],
+    starting: [{ id: "start-1", filename: "Starting.mp4", status: "starting", progress: 0 }],
+    retrying: [{ id: "retry-1", filename: "Retrying.mp4", status: "retrying", progress: 15 }],
+    paused: [{ id: "pause-1", filename: "Paused.mp4", status: "paused", progress: 50 }],
+    failed: [],
+  });
+
+  assert.strictEqual(appendedItems.length, 3, "All 3 non-terminal jobs must be rendered in queue list");
+
+  const startingItem = appendedItems.find((item) => item.innerHTML.includes("Starting.mp4"));
+  const retryingItem = appendedItems.find((item) => item.innerHTML.includes("Retrying.mp4"));
+  const pausedItem = appendedItems.find((item) => item.innerHTML.includes("Paused.mp4"));
+
+  assert.ok(startingItem, "Starting job item must be rendered");
+  assert.ok(retryingItem, "Retrying job item must be rendered");
+  assert.ok(pausedItem, "Paused job item must be rendered");
+
+  assert.ok(startingItem.innerHTML.includes("kerzox-spinner"), "Starting job must display spinner indicator");
+  assert.ok(retryingItem.innerHTML.includes("kerzox-spinner"), "Retrying job must display spinner indicator");
+  assert.ok(pausedItem.innerHTML.includes("Resume"), "Paused job must display Resume button");
+});
+
 // Direct execution summary
 if (require.main === module) {
   console.log("[test_content_tdz] All TDZ regression checks passed successfully.");

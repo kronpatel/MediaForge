@@ -1120,26 +1120,41 @@ def get_download_status(job_id: str) -> dict[str, Any] | None:
 
 def get_queue_status() -> dict[str, Any]:
     with _jobs_lock:
-        queued_jobs = [
-            job_snapshot(job)
-            for job in _jobs.values()
-            if job.status == DownloadState.QUEUED.value
-        ]
-        failed_jobs = [
-            job_snapshot(job)
-            for job in _jobs.values()
-            if job.status == DownloadState.FAILED.value
-        ]
         active_job = job_snapshot(_jobs[_active_job_id]) if _active_job_id and _active_job_id in _jobs else None
 
-    return {
+        by_status: dict[str, list[dict[str, Any]]] = {
+            state.value: []
+            for state in DownloadState
+            if state not in (DownloadState.COMPLETED, DownloadState.CANCELLED)
+        }
+
+        for job in _jobs.values():
+            if job.status in (DownloadState.COMPLETED.value, DownloadState.CANCELLED.value):
+                continue
+            by_status.setdefault(job.status, []).append(job_snapshot(job))
+
+    result: dict[str, Any] = {
         "active": active_job,
-        "queued": queued_jobs,
-        "failed": failed_jobs,
-        "queued_count": len(queued_jobs),
-        "failed_count": len(failed_jobs),
+        "queued": by_status.get(DownloadState.QUEUED.value, []),
+        "paused": by_status.get(DownloadState.PAUSED.value, []),
+        "starting": by_status.get(DownloadState.STARTING.value, []),
+        "downloading": by_status.get(DownloadState.DOWNLOADING.value, []),
+        "retrying": by_status.get(DownloadState.RETRYING.value, []),
+        "verifying": by_status.get(DownloadState.VERIFYING.value, []),
+        "recovering": by_status.get(DownloadState.RECOVERING.value, []),
+        "failed": by_status.get(DownloadState.FAILED.value, []),
+        "queued_count": len(by_status.get(DownloadState.QUEUED.value, [])),
+        "paused_count": len(by_status.get(DownloadState.PAUSED.value, [])),
+        "failed_count": len(by_status.get(DownloadState.FAILED.value, [])),
         "history": read_history(),
     }
+
+    for status, jobs in by_status.items():
+        if status not in result:
+            result[status] = jobs
+            result[f"{status}_count"] = len(jobs)
+
+    return result
 
 
 def retry_job(job_id: str) -> dict[str, Any]:
