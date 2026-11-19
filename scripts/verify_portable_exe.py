@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 import zipfile
 
 import psutil
@@ -176,7 +177,16 @@ echo MediaForge is running.
     print(f"\n  ZIP created: {VERIFICATION_ZIP} ({zip_size / (1024*1024):.1f} MB)")
 
 
-def extract_and_test():
+def find_free_port(start: int = 15990, end: int = 16050) -> int:
+    import socket
+    for port in range(start, end):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    return 15999
+
+
+def extract_and_test(test_port: int | None = None):
     # Extract to isolated temp directory
     extract_dir = tempfile.mkdtemp(prefix="mf_portable_verify_")
     print(f"\n[verify_portable_exe] Extracting to isolated dir: {extract_dir}")
@@ -188,83 +198,90 @@ def extract_and_test():
     assert os.path.exists(exe_path), f"MediaForgeBackend.exe not found at {exe_path}"
     print(f"  MediaForgeBackend.exe found at {exe_path}")
 
-    # Start the backend EXE directly
-    print("  Starting MediaForgeBackend.exe...")
+    port = test_port or find_free_port()
+    health_url = f"http://127.0.0.1:{port}/api/health"
+
+    # Write isolated settings.json so the backend binds to isolated port & local directory
+    settings_path = os.path.join(extract_dir, "settings.json")
+    with open(settings_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "backend_url": f"http://127.0.0.1:{port}",
+            "download_folder": os.path.join(extract_dir, "Downloads"),
+        }, f, indent=2)
+    print(f"  Isolated settings path: {settings_path}")
+
+    env = os.environ.copy()
+    env["MEDIAFORGE_PORT"] = str(port)
+    env["MEDIAFORGE_PORTABLE"] = "1"
+
+    # Start the backend EXE directly on isolated port
+    print(f"  Starting MediaForgeBackend.exe on isolated port {port}...")
     proc = subprocess.Popen(
         [exe_path],
         cwd=extract_dir,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
 
-    # Wait for /api/health to respond
-    health_url = "http://127.0.0.1:5000/api/health"
     health_ok = False
-    for attempt in range(30):
-        try:
-            import urllib.request
-            req = urllib.request.Request(health_url)
-            with urllib.request.urlopen(req, timeout=2) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode())
-                    print(f"  /api/health responded: {data}")
-                    health_ok = True
-                    break
-        except Exception:
-            time.sleep(1)
+    second_instance_ok = False
 
-    if not health_ok:
-        _stop_process_tree(proc)
-        print("  FAIL: /api/health did not respond")
-        shutil.rmtree(extract_dir, ignore_errors=True)
-        return False
+    try:
+        # Wait for /api/health to respond
+        for attempt in range(30):
+            try:
+                req = urllib.request.Request(health_url)
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode())
+                        print(f"  /api/health responded: {data}")
+                        health_ok = True
+                        break
+            except Exception:
+                time.sleep(1)
 
-    # Test isolated environment: check that MEDIAFORGE_PORTABLE is set
-    # (The EXE itself may not expose this directly via API, but we can check
-    #  that settings files are local to the extracted dir)
-    settings_path = os.path.join(extract_dir, "settings.json")
-    print(f"  Isolated settings path: {settings_path}")
+        if not health_ok:
+            print("  FAIL: /api/health did not respond")
+            return False
 
-    # Test single instance: try starting a second backend
-    print("  Testing single backend instance (attempting second start)...")
-    proc2 = subprocess.Popen(
-        [exe_path],
-        cwd=extract_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-        text=True,
-    )
-    second_instance_ok = _wait_for_exit(proc2)
-    if second_instance_ok:
-        stdout, stderr = proc2.communicate()
-        output = f"{stdout or ''}\n{stderr or ''}"
-        if "Another MediaForge Backend instance is already running" in output:
-            print("  Second instance blocked by mutex and exited: OK")
+        # Test single instance: try starting a second backend
+        print("  Testing single backend instance (attempting second start)...")
+        proc2 = subprocess.Popen(
+            [exe_path],
+            cwd=extract_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            text=True,
+        )
+        second_instance_ok = _wait_for_exit(proc2)
+        if second_instance_ok:
+            stdout, stderr = proc2.communicate()
+            output = f"{stdout or ''}\n{stderr or ''}"
+            if "Another MediaForge Backend instance is already running" in output:
+                print("  Second instance blocked by mutex and exited: OK")
+            else:
+                print(f"  Second instance exited with code {proc2.returncode}: OK")
         else:
-            print(f"  Second instance exited with code {proc2.returncode}: OK")
-    else:
-        print("  FAIL: Second instance did not exit after mutex rejection timeout")
-        _stop_process_tree(proc2)
+            print("  FAIL: Second instance did not exit after mutex rejection timeout")
+            _stop_process_tree(proc2)
 
-    # Test paths with spaces: create a download folder with spaces
-    spaced_dir = os.path.join(extract_dir, "My Downloads Folder")
-    os.makedirs(spaced_dir, exist_ok=True)
-    print(f"  Created spaced download dir: {spaced_dir}")
+        # Test paths with spaces: create a download folder with spaces
+        spaced_dir = os.path.join(extract_dir, "My Downloads Folder")
+        os.makedirs(spaced_dir, exist_ok=True)
+        print(f"  Created spaced download dir: {spaced_dir}")
 
-    # Stop the backend
-    _stop_process_tree(proc)
-    print("  Backend stopped")
-
-    # Cleanup
-    shutil.rmtree(extract_dir, ignore_errors=True)
-    print(f"  Cleaned up isolated dir: {extract_dir}")
-
-    if health_ok and second_instance_ok:
-        print("\n[TASK 5] Portable EXE verification: PASSED")
-        return True
-    return False
+        return bool(health_ok and second_instance_ok)
+    finally:
+        _stop_process_tree(proc)
+        print("  Backend stopped")
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        print(f"  Cleaned up isolated dir: {extract_dir}")
+        if health_ok and second_instance_ok:
+            print("\n[TASK 5] Portable EXE verification: PASSED")
 
 
 def main():

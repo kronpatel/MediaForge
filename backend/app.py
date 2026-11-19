@@ -1,3 +1,4 @@
+import os
 import re
 import sys
 
@@ -441,6 +442,14 @@ def _enforce_single_instance() -> bool:
     return True
 
 
+def resolve_port(default: int = 5000) -> int:
+    """Return the port from MEDIAFORGE_PORT if set and numeric, else `default`."""
+    env_port = os.environ.get("MEDIAFORGE_PORT")
+    if env_port and env_port.isdigit():
+        return int(env_port)
+    return default
+
+
 if __name__ == "__main__":
     if not _enforce_single_instance():
         print("Another MediaForge Backend instance is already running. Exiting.")
@@ -459,6 +468,8 @@ if __name__ == "__main__":
             port = parsed.port
     except Exception:
         pass
+
+    port = resolve_port(default=port)
 
     app.run(
         host=host,

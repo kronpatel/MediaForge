@@ -14,11 +14,14 @@ Covers:
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import types as _types
 import unittest
 from unittest.mock import MagicMock, patch
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Stub base_page module so SettingsPage can inherit BasePage cleanly
 _mock_base = _types.ModuleType("base_page")

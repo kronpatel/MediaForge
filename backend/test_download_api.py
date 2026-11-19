@@ -260,6 +260,18 @@ class TestSingleInstanceGuard(unittest.TestCase):
         self.assertNotIn("_v1_3_1", app.MUTEX_NAME)
         self.assertNotIn("_v1_", app.MUTEX_NAME)
 
+    def test_mediaforge_port_env_var_override(self):
+        """BUG-20: MEDIAFORGE_PORT overrides the default port via resolve_port()."""
+        import app
+        self.assertTrue(callable(getattr(app, "resolve_port", None)),
+                        "resolve_port must be a callable in app.py")
+        with patch.dict(os.environ, {"MEDIAFORGE_PORT": "15999"}):
+            self.assertEqual(app.resolve_port(default=5000), 15999)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(app.resolve_port(default=5000), 5000)
+        with patch.dict(os.environ, {"MEDIAFORGE_PORT": "not-a-number"}):
+            self.assertEqual(app.resolve_port(default=5000), 5000)
+
 
 if __name__ == "__main__":
     unittest.main()
