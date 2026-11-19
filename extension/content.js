@@ -177,7 +177,7 @@
         const shortsMatch = url.pathname.match(/^\/shorts\/([^/?#]+)/);
 
         const isInstagram = url.hostname.includes("instagram.com");
-        const instagramMatch = url.pathname.match(/^\/(reel|reels|p)\/([^/?#]+)/);
+        const instagramMatch = url.pathname.match(/^\/(reel|reels|p|tv)\/([^/?#]+)/);
 
         let titleNode = findTitleContainer();
 

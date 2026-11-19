@@ -252,6 +252,14 @@ class TestSingleInstanceGuard(unittest.TestCase):
         with patch("sys.platform", "linux"):
             self.assertTrue(_enforce_single_instance())
 
+    def test_mutex_name_is_version_independent(self):
+        """BUG-14: Mutex name must be version-independent and not hardcoded to _v1_3_1."""
+        import app
+        self.assertTrue(hasattr(app, "MUTEX_NAME"), "MUTEX_NAME must be exposed as module-level constant")
+        self.assertEqual(app.MUTEX_NAME, "MediaForgeBackend_SingleInstance")
+        self.assertNotIn("_v1_3_1", app.MUTEX_NAME)
+        self.assertNotIn("_v1_", app.MUTEX_NAME)
+
 
 if __name__ == "__main__":
     unittest.main()

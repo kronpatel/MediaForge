@@ -395,6 +395,7 @@ def queue_reorder():
 # Module-level handle to keep the single-instance mutex alive for the
 # process lifetime.  The OS releases it automatically on exit/crash.
 _single_instance_mutex_handle: "int | None" = None
+MUTEX_NAME = "MediaForgeBackend_SingleInstance"
 
 
 def _enforce_single_instance() -> bool:
@@ -424,7 +425,6 @@ def _enforce_single_instance() -> bool:
     kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
     kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
 
-    MUTEX_NAME = "MediaForgeBackend_SingleInstance_v1_3_1"
     global _single_instance_mutex_handle
 
     mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)

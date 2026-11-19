@@ -10,7 +10,8 @@
   "host_permissions": [
     "https://www.youtube.com/*",
     "https://www.instagram.com/*",
-    "http://127.0.0.1:*/*"
+    "http://127.0.0.1:*/*",
+    "http://localhost:*/*"
   ],
   "background": {
     "service_worker": "background.js"
