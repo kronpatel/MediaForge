@@ -3,9 +3,11 @@
   "version": "2.0.0",
   "description": "MediaForge browser extension unit and regression test suite",
   "scripts": {
-    "test": "node --test test_content_tdz.js test_manifest.js test_instagram_url.js",
+    "test": "node --test test_content_tdz.js test_manifest.js test_instagram_url.js test_background_notify.js test_content_no_false_invalidation.js",
     "test:tdz": "node --test test_content_tdz.js",
     "test:manifest": "node --test test_manifest.js",
-    "test:instagram": "node --test test_instagram_url.js"
+    "test:instagram": "node --test test_instagram_url.js",
+    "test:notify": "node --test test_background_notify.js",
+    "test:invalidation": "node --test test_content_no_false_invalidation.js"
   }
 }

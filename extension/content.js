@@ -29,12 +29,15 @@
     let igTrackedVideo = null;
 
     function isExtensionContextError(error) {
+        if (typeof chrome === "undefined" || !chrome?.runtime?.id) {
+            return true;
+        }
         const message = String(error?.message || error || "").toLowerCase();
-        return message.includes("extension context invalidated")
-            || message.includes("could not establish connection")
-            || message.includes("receiving end does not exist")
-            || message.includes("message port closed")
-            || message.includes("runtime unavailable");
+        return message.includes("extension context invalidated");
+    }
+
+    if (typeof window !== "undefined") {
+        window.__mf_isExtensionContextError = isExtensionContextError;
     }
 
     function stopExtensionContextWork() {

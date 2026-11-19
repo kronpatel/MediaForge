@@ -104,6 +104,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             // Notifications are optional; a blocked or unavailable notification
             // provider must not affect downloads or the service worker.
         }
+        sendResponse({ success: true });
+        return false;
     }
 
     if (message?.type === "KERZOX_OPEN_OPTIONS") {
@@ -112,5 +114,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         } catch {
             // The options page may be unavailable while the extension reloads.
         }
+        sendResponse({ success: true });
+        return false;
     }
 });
