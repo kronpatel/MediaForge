@@ -162,20 +162,32 @@ async function chooseFolder() {
 }
 
 async function loadLocalTheme(fallbackTheme = "dark") {
-    const stored = await chrome.storage.local.get(["kerzoxTheme"]);
-    theme.value = stored.kerzoxTheme || fallbackTheme || "dark";
+    try {
+        const stored = await chrome.storage.local.get(["kerzoxTheme"]);
+        theme.value = stored.kerzoxTheme || fallbackTheme || "dark";
+    } catch {
+        theme.value = fallbackTheme || "dark";
+    }
     document.body.dataset.theme = theme.value;
 }
 
 async function loadLocalFolder() {
-    const stored = await chrome.storage.local.get(["kerzoxDownloadFolder"]);
-    if (stored.kerzoxDownloadFolder) {
-        downloadFolder.value = stored.kerzoxDownloadFolder;
+    try {
+        const stored = await chrome.storage.local.get(["kerzoxDownloadFolder"]);
+        if (stored.kerzoxDownloadFolder) {
+            downloadFolder.value = stored.kerzoxDownloadFolder;
+        }
+    } catch {
+        // Local fallback is optional when the extension storage is unavailable.
     }
 }
 
 async function saveTheme() {
-    await chrome.storage.local.set({ kerzoxTheme: theme.value });
+    try {
+        await chrome.storage.local.set({ kerzoxTheme: theme.value });
+    } catch {
+        // Continue saving the backend setting even if local storage is blocked.
+    }
     document.body.dataset.theme = theme.value;
 
     try {

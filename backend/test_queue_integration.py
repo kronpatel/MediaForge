@@ -480,9 +480,67 @@ class TestYouTubeDownloadCompatibility(unittest.TestCase):
         options = downloader.base_options()
         self.assertNotIn("extractor_args", options)
 
+    def test_ffmpeg_path_uses_runtime_directory_when_frozen(self):
+        original_frozen = getattr(downloader.sys, "frozen", None)
+        original_executable = downloader.sys.executable
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = os.path.abspath(temp_dir)
+            dist_dir = os.path.join(root, "dist")
+            ffmpeg_dir = os.path.join(root, "ffmpeg")
+            os.makedirs(dist_dir)
+            os.makedirs(ffmpeg_dir)
+            with open(os.path.join(ffmpeg_dir, "ffmpeg.exe"), "wb") as handle:
+                handle.write(b"test")
+            try:
+                downloader.sys.frozen = True
+                downloader.sys.executable = os.path.join(dist_dir, "MediaForgeBackend.exe")
+                self.assertEqual(
+                    downloader.get_ffmpeg_path(),
+                    ffmpeg_dir,
+                )
+            finally:
+                downloader.sys.executable = original_executable
+                if original_frozen is None:
+                    del downloader.sys.frozen
+                else:
+                    downloader.sys.frozen = original_frozen
+
     def test_mp3_format_falls_back_to_progressive_video(self):
         options = downloader.mp3_options()
         self.assertEqual(options["format"], "bestaudio/best")
+
+    def test_audio_formats_use_ffmpeg_extraction(self):
+        expected_codecs = {"mp3", "flac"}
+        for codec in expected_codecs:
+            with self.subTest(codec=codec):
+                options = downloader.audio_options(codec)
+                self.assertEqual(options["format"], "bestaudio/best")
+                self.assertEqual(
+                    options["postprocessors"][0]["preferredcodec"], codec
+                )
+
+    def test_audio_modes_include_single_and_playlist_variants(self):
+        for mode in ("mp3", "flac", "playlist_mp3", "playlist_flac"):
+            with self.subTest(mode=mode):
+                label, options = downloader.mode_options(mode)
+                self.assertTrue(label)
+                self.assertIn("postprocessors", options)
+
+    def test_playlist_audio_modes_enable_playlist_processing(self):
+        for mode in ("playlist_mp3", "playlist_flac"):
+            with self.subTest(mode=mode):
+                _, options = downloader.mode_options(mode)
+                self.assertFalse(options["noplaylist"])
+                self.assertTrue(options["ignoreerrors"])
+                self.assertIn("%(playlist_title)", options["outtmpl"])
+
+        self.assertFalse(downloader.mode_options("mp3")[1]["ignoreerrors"])
+
+    def test_removed_audio_modes_are_rejected(self):
+        for mode in ("wav", "m4a", "aac", "playlist_wav", "playlist_m4a", "playlist_aac", "playlist_video"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(downloader.KerzoxDownloadError):
+                    downloader.mode_options(mode)
 
     def test_video_formats_fall_back_when_separate_streams_missing(self):
         options = downloader.video_options(max_height=1080)

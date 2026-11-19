@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 # Ensure companion/ is on the path so imports resolve
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from backend_manager import BackendManager, BackendStatus  # noqa: E402
+from backend_manager import BackendManager, BackendStatus, HTTP_TIMEOUT  # noqa: E402
 
 
 class DummyLogger:
@@ -275,6 +275,84 @@ class TestBug13ProcessDiscoveryFallback(unittest.TestCase):
                 patch("psutil.process_iter", side_effect=RuntimeError("boom")):
             pid = self.mgr._discover_backend_pid()
         self.assertIsNone(pid)
+
+
+# ---------------------------------------------------------------------------
+# queue_download (Direct URL Paste / Drag-and-Drop)
+# ---------------------------------------------------------------------------
+
+class TestQueueDownload(unittest.TestCase):
+    """queue_download() must POST to /download and translate results."""
+
+    def setUp(self):
+        self.mgr = BackendManager(DummyLogger())
+
+    def _mock_response(self, status_code=202, payload=None):
+        mock = MagicMock()
+        mock.status_code = status_code
+        mock.json.return_value = payload or {
+            "success": True,
+            "job": {"id": "job-1", "url": "https://youtu.be/x", "mode": "mp3"},
+        }
+        return mock
+
+    def test_queue_download_posts_correct_payload(self):
+        mock = self._mock_response()
+        with patch.object(self.mgr, "_send_request", return_value=mock) as send:
+            job, error = self.mgr.queue_download("https://youtu.be/x", mode="mp3", retries=3)
+
+        self.assertIsNone(error)
+        self.assertEqual(job["id"], "job-1")
+        self.assertEqual(send.call_args.args, ("POST", "/download"))
+        self.assertEqual(send.call_args.kwargs["timeout"], HTTP_TIMEOUT)
+        self.assertEqual(
+            send.call_args.kwargs["json"],
+            {"url": "https://youtu.be/x", "mode": "mp3", "retries": 3, "output_folder": None},
+        )
+
+    def test_queue_download_defaults_mode_and_retries(self):
+        mock = self._mock_response()
+        with patch.object(self.mgr, "_send_request", return_value=mock) as send:
+            self.mgr.queue_download("https://youtu.be/x")
+        payload = send.call_args.kwargs["json"]
+        self.assertEqual(payload["mode"], "1080p")
+        self.assertEqual(payload["retries"], 2)
+
+    def test_queue_download_transport_error_returns_message(self):
+        with patch.object(self.mgr, "_send_request", return_value=None):
+            job, error = self.mgr.queue_download("https://youtu.be/x")
+        self.assertIsNone(job)
+        self.assertIsInstance(error, str)
+        self.assertIn("backend", error.lower())
+
+    def test_queue_download_invalid_json_returns_message(self):
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.json.side_effect = ValueError("not json")
+        with patch.object(self.mgr, "_send_request", return_value=mock):
+            job, error = self.mgr.queue_download("https://youtu.be/x")
+        self.assertIsNone(job)
+        self.assertEqual(error, "Invalid response from the backend.")
+
+    def test_queue_download_backend_rejects_with_message(self):
+        mock = self._mock_response(
+            status_code=400,
+            payload={
+                "success": False,
+                "message": "Please select a download quality or format.",
+            },
+        )
+        with patch.object(self.mgr, "_send_request", return_value=mock):
+            job, error = self.mgr.queue_download("https://youtu.be/x")
+        self.assertIsNone(job)
+        self.assertEqual(error, "Please select a download quality or format.")
+
+    def test_queue_download_accepted_but_no_job(self):
+        mock = self._mock_response(status_code=202, payload={"success": True})
+        with patch.object(self.mgr, "_send_request", return_value=mock):
+            job, error = self.mgr.queue_download("https://youtu.be/x")
+        self.assertIsNone(job)
+        self.assertEqual(error, "Backend accepted the download but returned no job.")
 
 
 if __name__ == "__main__":

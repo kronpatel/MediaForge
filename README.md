@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Chrome-lightgrey?style=flat-square" alt="Platform"/>
 </p>
 
-Fast, modern, and powerful media downloader with support for MP3, 1080p, 4K, 8K, playlist downloads, download history management, and a clean browser extension interface.
+Fast, modern, and powerful media downloader with support for MP3, FLAC, 1080p, 4K, 8K, playlist downloads, download history management, and a clean browser extension interface.
 
 ---
 
@@ -30,6 +30,7 @@ Get up and running in 3 minutes:
 ## Features
 
 *   **MP3 Downloads** (High quality 320kbps audio extraction)
+*   **FLAC Lossless Downloads** (Highest-quality output, source-dependent)
 *   **1080p Video Downloads**
 *   **4K Video Downloads**
 *   **8K Video Downloads** with automatic fallback if 8K is not available
@@ -39,6 +40,11 @@ Get up and running in 3 minutes:
 *   **Modern UI** with dark, midnight, and high contrast themes
 *   **FFmpeg Integration** for seamless post-processing and merging
 *   **yt-dlp Powered** for fast, reliable, and up-to-date video extraction
+*   **Automatic Backend Updates** with safe queue checks, integrity verification,
+    and rollback if the backend restart fails
+*   **Clear API Errors** with actionable messages and stable error codes
+*   **Local Backend Security** restricted to the current computer
+*   **Windows Background Service** option using a per-user logon task
 
 ---
 
@@ -151,6 +157,11 @@ The **MediaForge Companion Application** runs silently in the Windows system tra
 *   **Notification Manager**: Enqueues desktop notifications, respects custom quiet hours settings, prevents duplicates, and keeps an active local logs history.
 *   **Self-Updater & Installer**: Background polling check for GitHub releases, checksum verification, secure update downloading, and clean app hot-reloading via portable ZIP workflow.
 *   **System Tray Control**: Quick access to options panels, active logs view, download status indicators, and clean shutdown bindings.
+
+To keep the backend running automatically after Windows sign-in, run
+`MediaForge Service.bat install` once. This creates a per-user Task Scheduler
+task; use `start`, `stop`, `status`, or `remove` with the same launcher to
+manage it.
 
 ---
 

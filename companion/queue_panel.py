@@ -17,10 +17,10 @@ import tkinter as tk
 import customtkinter as ctk
 
 from base_page import BasePage
-
-if TYPE_CHECKING:
-    from backend_manager import BackendManager
-    from logger import AppLogger
+from backend_manager import BackendManager, BackendStatus
+from logger import AppLogger
+from notifications import CATEGORY_INFO, SOURCE_UI, get_notification_manager
+from url_paste import extract_urls, MODE_LABELS, normalize_mode
 
 
 _EMPTY_ICON = "\u2b07"
@@ -292,6 +292,19 @@ class QueueRow(ctk.CTkFrame):
         )
         self._open_btn.pack(side="right", padx=(4, 0))
 
+        self._row_cancel_btn = ctk.CTkButton(
+            top_row, text="✕", width=26, height=26,
+            fg_color="#20232f", hover_color="#ef4444", text_color="#ef4444", corner_radius=6,
+            command=self._row_cancel_click,
+        )
+        self._row_cancel_btn.pack(side="right", padx=(4, 0))
+
+        self._row_retry_btn = ctk.CTkButton(
+            top_row, text="↺", width=26, height=26,
+            fg_color="#20232f", hover_color="#f59e0b", text_color="#f59e0b", corner_radius=6,
+            command=self._row_retry_click,
+        )
+
         prog_row = ctk.CTkFrame(outer, fg_color="transparent")
         prog_row.pack(fill="x", pady=(6, 3))
 
@@ -351,17 +364,15 @@ class QueueRow(ctk.CTkFrame):
             text="\u23f3",
             font=ctk.CTkFont(family="Segoe UI", size=10),
             text_color="#f59e0b",
-            padx=(8, 0), pady=2,
         )
-        self._badge_icon_lbl.pack(side="left")
+        self._badge_icon_lbl.pack(side="left", padx=(8, 0), pady=2)
         self._status_lbl = ctk.CTkLabel(
             self._badge_frame,
             text="Queued",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             text_color="#f59e0b",
-            padx=(2, 8), pady=2,
         )
-        self._status_lbl.pack(side="left")
+        self._status_lbl.pack(side="left", padx=(2, 8), pady=2)
 
         try:
             self._context_menu = ctk.CTkMenu(self, tearoff=False)
@@ -590,6 +601,12 @@ class QueueRow(ctk.CTkFrame):
             self._priority_lbl.configure(text=ptext)
             self._cached_values["priority"] = priority
 
+        if hasattr(self, "_row_retry_btn"):
+            if status == "failed":
+                self._row_retry_btn.pack(side="right", padx=(4, 0))
+            else:
+                self._row_retry_btn.pack_forget()
+
         return True
 
     def _copy_click(self) -> None:
@@ -598,6 +615,17 @@ class QueueRow(ctk.CTkFrame):
 
     def _open_click(self) -> None:
         self._on_open_folder()
+
+    def _row_cancel_click(self) -> None:
+        status = (self._job_data.get("status") or "").lower()
+        if status in ("failed", "completed") and self._on_remove and self.job_id:
+            self._on_remove(self.job_id)
+        elif self._on_cancel and self.job_id:
+            self._on_cancel(self.job_id)
+
+    def _row_retry_click(self) -> None:
+        if self._on_retry and self.job_id:
+            self._on_retry(self.job_id)
 
     def reset_cache(self) -> None:
         self._cached_values.clear()
@@ -724,6 +752,24 @@ class QueuePage(BasePage):
         for r in self._row_widgets:
             r.selected = r.job_id in self._selected_ids if r.job_id else False
 
+    def clear_all_failed(self) -> threading.Thread | None:
+        """Remove all failed jobs from queue asynchronously."""
+        failed_jobs: list[str] = [str(r.job_id) for r in self._row_widgets
+                                 if r.job_id and r._job_data.get("status") == "failed"]
+        if not failed_jobs and hasattr(self, "_queue_data"):
+            failed_jobs = [str(j.get("id")) for j in self._queue_data
+                          if j.get("id") and j.get("status") == "failed"]
+        if not failed_jobs:
+            return None
+        self._selected_ids.difference_update(failed_jobs)
+        button = getattr(self, "_clear_failed_btn", None)
+        return self._run_batch_async(
+            failed_jobs,
+            self.manager.remove_download,
+            "Clear Failed",
+            button=button,
+        )
+
     def _update_toolbar_buttons(self) -> None:
         has_sel = len(self._selected_ids) > 0
         state = "normal" if has_sel else "disabled"
@@ -733,6 +779,12 @@ class QueuePage(BasePage):
         self._remove_sel_btn.configure(state=state)
         self._increase_prio_btn.configure(state=state)
         self._decrease_prio_btn.configure(state=state)
+        if hasattr(self, "_clear_failed_btn") and hasattr(self, "_queue_data"):
+            has_failed = any(j.get("status") == "failed" for j in self._queue_data)
+            self._clear_failed_btn.configure(state="normal" if has_failed else "disabled")
+        if hasattr(self, "_retry_failed_btn") and hasattr(self, "_queue_data"):
+            has_failed = any(j.get("status") == "failed" for j in self._queue_data)
+            self._retry_failed_btn.configure(state="normal" if has_failed else "disabled")
 
     # ── Batch Operations (Async / Non-Blocking) ───────────────────────────
 
@@ -1035,130 +1087,154 @@ class QueuePage(BasePage):
         ).pack(anchor="w", pady=(4, 0))
 
         toolbar = ctk.CTkFrame(header_frame, fg_color="transparent")
-        toolbar.pack(side="right")
+        toolbar.pack(side="right", anchor="e")
 
-        self._pause_sel_btn = ctk.CTkButton(
-            toolbar,
-            text="\u23f8 Pause Sel.",
-            width=90,
-            height=30,
-            fg_color="#20232f",
-            hover_color="#2e3347",
-            text_color="#e8eaf0",
-            corner_radius=8,
-            state="disabled",
-            command=self.pause_selected,
-        )
-        self._pause_sel_btn.pack(side="right", padx=2)
+        toolbar_row1 = ctk.CTkFrame(toolbar, fg_color="transparent")
+        toolbar_row1.pack(anchor="e", pady=(0, 4))
 
-        self._resume_sel_btn = ctk.CTkButton(
-            toolbar,
-            text="\u25b6 Resume Sel.",
-            width=90,
-            height=30,
-            fg_color="#20232f",
-            hover_color="#2e3347",
-            text_color="#e8eaf0",
-            corner_radius=8,
-            state="disabled",
-            command=self.resume_selected,
-        )
-        self._resume_sel_btn.pack(side="right", padx=2)
+        toolbar_row2 = ctk.CTkFrame(toolbar, fg_color="transparent")
+        toolbar_row2.pack(anchor="e")
 
-        self._cancel_sel_btn = ctk.CTkButton(
-            toolbar,
-            text=f"{_CANCEL_ICON} Cancel Sel.",
-            width=100,
-            height=30,
-            fg_color="#f59e0b",
-            hover_color="#d98300",
-            text_color="#ffffff",
-            corner_radius=8,
-            state="disabled",
-            command=self.cancel_selected,
-        )
-        self._cancel_sel_btn.pack(side="right", padx=2)
-
-        self._retry_failed_btn = ctk.CTkButton(
-            toolbar,
-            text="\u21ba Retry Failed",
-            width=100,
-            height=30,
-            fg_color="#f59e0b",
-            hover_color="#d98300",
-            text_color="#ffffff",
-            corner_radius=8,
-            command=self.retry_all_failed,
-        )
-        self._retry_failed_btn.pack(side="right", padx=2)
-
-        self._remove_sel_btn = ctk.CTkButton(
-            toolbar,
-            text="\u2716 Remove",
-            width=90,
-            height=30,
-            fg_color="#ef4444",
-            hover_color="#b91c1c",
-            text_color="#ffffff",
-            corner_radius=8,
-            state="disabled",
-            command=self.remove_selected,
-        )
-        self._remove_sel_btn.pack(side="right", padx=2)
-
-        self._increase_prio_btn = ctk.CTkButton(
-            toolbar,
-            text="\u2b06 Priority",
-            width=80,
-            height=30,
-            fg_color="#20232f",
-            hover_color="#2e3347",
-            text_color="#e8eaf0",
-            corner_radius=8,
-            state="disabled",
-            command=self.increase_priority,
-        )
-        self._increase_prio_btn.pack(side="right", padx=2)
-
-        self._decrease_prio_btn = ctk.CTkButton(
-            toolbar,
-            text="\u2b07 Priority",
-            width=80,
-            height=30,
-            fg_color="#20232f",
-            hover_color="#2e3347",
-            text_color="#e8eaf0",
-            corner_radius=8,
-            state="disabled",
-            command=self.decrease_priority,
-        )
-        self._decrease_prio_btn.pack(side="right", padx=2)
-
+        # Row 1: Queue Controls
         self._pause_btn = ctk.CTkButton(
-            toolbar,
+            toolbar_row1,
             text="\u23f8 Pause Queue",
-            width=130,
-            height=30,
+            width=110,
+            height=28,
             fg_color="#f59e0b",
             hover_color="#d98300",
             text_color="#ffffff",
             corner_radius=8,
             command=self.toggle_pause,
         )
-        self._pause_btn.pack(side="right", padx=2)
+        self._pause_btn.pack(side="left", padx=2)
+
+        self._retry_failed_btn = ctk.CTkButton(
+            toolbar_row1,
+            text="\u21ba Retry Failed",
+            width=95,
+            height=28,
+            fg_color="#f59e0b",
+            hover_color="#d98300",
+            text_color="#ffffff",
+            corner_radius=8,
+            command=self.retry_all_failed,
+        )
+        self._retry_failed_btn.pack(side="left", padx=2)
+
+        self._clear_failed_btn = ctk.CTkButton(
+            toolbar_row1,
+            text="🗑 Clear Failed",
+            width=95,
+            height=28,
+            fg_color="#20232f",
+            hover_color="#ef4444",
+            text_color="#ef4444",
+            corner_radius=8,
+            command=self.clear_all_failed,
+        )
+        self._clear_failed_btn.pack(side="left", padx=2)
 
         self._open_dir_btn = ctk.CTkButton(
-            toolbar,
+            toolbar_row1,
             text="Open Folder",
-            width=100,
-            height=30,
+            width=95,
+            height=28,
             fg_color="#20232f",
             hover_color="#2e3347",
             text_color="#e8eaf0",
             corner_radius=8,
             command=self._open_download_dir,
         )
-        self._open_dir_btn.pack(side="right", padx=2)
+        self._open_dir_btn.pack(side="left", padx=2)
+
+        # Row 2: Selection Controls
+        self._pause_sel_btn = ctk.CTkButton(
+            toolbar_row2,
+            text="\u23f8 Pause Sel.",
+            width=85,
+            height=24,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            corner_radius=6,
+            state="disabled",
+            command=self.pause_selected,
+        )
+        self._pause_sel_btn.pack(side="left", padx=2)
+
+        self._resume_sel_btn = ctk.CTkButton(
+            toolbar_row2,
+            text="\u25b6 Resume Sel.",
+            width=85,
+            height=24,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            corner_radius=6,
+            state="disabled",
+            command=self.resume_selected,
+        )
+        self._resume_sel_btn.pack(side="left", padx=2)
+
+        self._cancel_sel_btn = ctk.CTkButton(
+            toolbar_row2,
+            text=f"{_CANCEL_ICON} Cancel Sel.",
+            width=90,
+            height=24,
+            fg_color="#f59e0b",
+            hover_color="#d98300",
+            text_color="#ffffff",
+            corner_radius=6,
+            state="disabled",
+            command=self.cancel_selected,
+        )
+        self._cancel_sel_btn.pack(side="left", padx=2)
+
+        self._remove_sel_btn = ctk.CTkButton(
+            toolbar_row2,
+            text="\u2716 Remove",
+            width=75,
+            height=24,
+            fg_color="#ef4444",
+            hover_color="#b91c1c",
+            text_color="#ffffff",
+            corner_radius=6,
+            state="disabled",
+            command=self.remove_selected,
+        )
+        self._remove_sel_btn.pack(side="left", padx=2)
+
+        self._increase_prio_btn = ctk.CTkButton(
+            toolbar_row2,
+            text="\u2b06 Priority",
+            width=70,
+            height=24,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            corner_radius=6,
+            state="disabled",
+            command=self.increase_priority,
+        )
+        self._increase_prio_btn.pack(side="left", padx=2)
+
+        self._decrease_prio_btn = ctk.CTkButton(
+            toolbar_row2,
+            text="\u2b07 Priority",
+            width=70,
+            height=24,
+            fg_color="#20232f",
+            hover_color="#2e3347",
+            text_color="#e8eaf0",
+            corner_radius=6,
+            state="disabled",
+            command=self.decrease_priority,
+        )
+        self._decrease_prio_btn.pack(side="left", padx=2)
+
+        # Direct URL paste / drag-and-drop entry point
+        self._build_direct_download_panel()
 
         # Statistics card
         self._stats_frame = ctk.CTkFrame(self, fg_color="#1a1d27",
@@ -1262,6 +1338,152 @@ class QueuePage(BasePage):
 
         self._build_overall_progress()
         self._show_empty_state()
+
+    # ── Direct download panel (paste / drag-and-drop entry point) ──────
+
+    def _build_direct_download_panel(self) -> None:
+        """Add a URL entry + mode selector above the queue statistics."""
+        panel = ctk.CTkFrame(
+            self,
+            fg_color="#1a1d27",
+            border_color="#2e3347",
+            border_width=1,
+            corner_radius=10,
+        )
+        inner = ctk.CTkFrame(panel, fg_color="transparent")
+        inner.pack(fill="x", padx=14, pady=12)
+
+        ctk.CTkLabel(
+            inner,
+            text="➕ Add Download",
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            text_color="#e8eaf0",
+        ).pack(side="left", padx=(0, 10))
+
+        self._url_entry = ctk.CTkEntry(
+            inner,
+            placeholder_text="Paste a video/playlist URL…",
+            width=300,
+        )
+        self._url_entry.pack(side="left", padx=(0, 8))
+        self._url_entry.bind(
+            "<Return>", lambda _event: self._start_direct_download()
+        )
+
+        self._mode_combo = ctk.CTkComboBox(
+            inner,
+            values=list(MODE_LABELS.keys()),
+            width=130,
+            state="readonly",
+        )
+        self._mode_combo.set("MP4 1080p")
+        self._mode_combo.pack(side="left", padx=(0, 8))
+
+        self._direct_start_btn = ctk.CTkButton(
+            inner,
+            text="Start Download",
+            width=110,
+            fg_color="#4f8ef7",
+            hover_color="#3a76e8",
+            command=self._start_direct_download,
+        )
+        self._direct_start_btn.pack(side="left", padx=(0, 12))
+
+        self._direct_status = ctk.CTkLabel(
+            inner,
+            text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color="#8b92a8",
+        )
+        self._direct_status.pack(side="left")
+
+        panel.pack(fill="x", padx=20, pady=(0, 8))
+
+    def _set_direct_status(self, text: str, color: str = "#8b92a8") -> None:
+        self._direct_status.configure(text=text, text_color=color)
+
+    def set_detected_url(self, url: str) -> None:
+        """Pre-fill the URL entry with a detected clipboard media URL."""
+        if hasattr(self, "_url_entry") and url:
+            self._url_entry.delete(0, "end")
+            self._url_entry.insert(0, url)
+            self._set_direct_status("Link detected from clipboard! Ready to download.", "#22c55e")
+
+    def _start_direct_download(self) -> None:
+        raw = (self._url_entry.get() or "").strip()
+        if not raw:
+            self._set_direct_status("Please paste a URL first.", "#ef4444")
+            return
+        urls = extract_urls(raw)
+        if not urls:
+            self._set_direct_status("No valid URL found.", "#ef4444")
+            return
+        mode = normalize_mode(self._mode_combo.get())
+        self._enqueue_urls(urls, mode=mode)
+
+    def _enqueue_urls(self, urls: list[str], mode: str | None = None) -> None:
+        """Queue one or more downloads off the UI thread, marshal results back."""
+        if not urls:
+            return
+        if self.manager.status != BackendStatus.RUNNING:
+            self._set_direct_status(
+                "Backend is not running — start it first.", "#ef4444"
+            )
+            return
+
+        if not mode:
+            mode = normalize_mode(self._mode_combo.get()) if hasattr(self, "_mode_combo") else "1080p"
+        self._direct_start_btn.configure(state="disabled")
+        self._set_direct_status("Queueing download(s)…", "#8b92a8")
+
+        def _worker() -> None:
+            results = []
+            for url in urls:
+                job, error = self.manager.queue_download(url, mode=mode)
+                results.append((url, job, error))
+            self.after(0, lambda: self._on_enqueue_done(results))
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="DirectDownloadEnqueuer").start()
+
+    def _on_enqueue_done(
+        self, results: list[tuple[str, Any, str | None]]
+    ) -> None:
+        self._direct_start_btn.configure(state="normal")
+        succeeded = [(url, job) for url, job, error in results if job is not None]
+        failed = [(url, error) for url, job, error in results if job is None]
+
+        if succeeded and not failed:
+            self._set_direct_status(
+                f"Queued {len(succeeded)} download(s)", "#22c55e"
+            )
+            self._url_entry.delete(0, "end")
+            self._trigger_refresh()
+            self._notify_and_show_queue(len(succeeded))
+        elif succeeded:
+            self._set_direct_status(
+                f"Queued {len(succeeded)}, {len(failed)} failed", "#f59e0b"
+            )
+            self._trigger_refresh()
+            self._notify_and_show_queue(len(succeeded))
+        else:
+            message = failed[0][1] or "Unknown error"
+            self._set_direct_status(f"Failed: {message}", "#ef4444")
+
+    def _notify_and_show_queue(self, count: int) -> None:
+        try:
+            notif_manager = get_notification_manager()
+            notif_manager.publish(
+                category=CATEGORY_INFO,
+                title="MediaForge Companion",
+                message=f"Queued {count} download(s) from pasted URL.",
+                source=SOURCE_UI,
+            )
+        except Exception:
+            pass
+        master = self.master.master
+        if hasattr(master, "show_page"):
+            master.show_page("Queue")
 
     def _open_dashboard(self) -> None:
         master = self.master.master
@@ -1386,15 +1608,24 @@ class QueuePage(BasePage):
             self._overall_filename_lbl.configure(text=filename)
             self._cached_overall["filename"] = filename
 
+        pending_count = sum(1 for j in queue if j.get("status") in ("queued", "downloading", "paused"))
+        failed_count = sum(1 for j in queue if j.get("status") == "failed")
+
         if active:
             self._overall_title_lbl.configure(
                 text=active[0].get("label") or active[0].get("filename") or "Downloading\u2026",
                 text_color="#e8eaf0",
             )
-        elif completed == total:
+        elif pending_count > 0:
+            self._overall_title_lbl.configure(text=f"{pending_count} pending", text_color="#f59e0b")
+        elif failed_count == total and total > 0:
+            self._overall_title_lbl.configure(text=f"All {failed_count} downloads failed", text_color="#ef4444")
+        elif completed == total and total > 0:
             self._overall_title_lbl.configure(text="All downloads completed", text_color="#22c55e")
+        elif failed_count > 0:
+            self._overall_title_lbl.configure(text=f"{completed} completed, {failed_count} failed", text_color="#ef4444")
         else:
-            self._overall_title_lbl.configure(text=f"{total - completed} pending", text_color="#f59e0b")
+            self._overall_title_lbl.configure(text="Queue idle", text_color="#8b92a8")
 
     def _update_statistics(self, queue: list[dict[str, Any]]) -> None:
         active = sum(1 for j in queue if j.get("status") == "downloading")
@@ -1544,12 +1775,19 @@ class QueuePage(BasePage):
 
     def _cancel_job(self, job_id: str) -> None:
         try:
-            self.manager.cancel_download(job_id)
-            self.logger.info(f"[Queue] Cancelled job — id: {job_id}")
+            ok = self.manager.cancel_download(job_id)
+            if not ok:
+                self.manager.remove_download(job_id)
+            self.logger.info(f"[Queue] Cancelled/removed job — id: {job_id}")
             self._selected_ids.discard(job_id)
             self._trigger_refresh()
         except Exception as exc:
-            self.logger.error(f"[Queue] Cancel failed — job: {job_id}, error: {exc}")
+            try:
+                self.manager.remove_download(job_id)
+                self._selected_ids.discard(job_id)
+                self._trigger_refresh()
+            except Exception:
+                self.logger.error(f"[Queue] Cancel failed — job: {job_id}, error: {exc}")
 
     def _retry_job(self, job_id: str) -> None:
         try:

@@ -3,6 +3,7 @@
 The portable edition is a self-contained ZIP that runs from any folder:
   - MediaForge.exe (companion PyInstaller build)
   - backend/          (Flask backend — required)
+  - MediaForgeService.exe (user-level Windows background task controller)
   - ffmpeg/           (ffmpeg.exe, ffprobe.exe)
   - extension/        (browser extension — load at chrome://extensions)
   - VERSION
@@ -32,8 +33,10 @@ RECURSIVE_INCLUDES = {
 FILE_INCLUDES = {
     "dist/MediaForge.exe": "MediaForge.exe",
     "dist/MediaForgeBackend.exe": "MediaForgeBackend.exe",
+    "dist/MediaForgeService.exe": "MediaForgeService.exe",
     "VERSION": "VERSION",
     "MediaForge Backend.bat": "MediaForge Backend.bat",
+    "MediaForge Service.bat": "MediaForge Service.bat",
 }
 
 

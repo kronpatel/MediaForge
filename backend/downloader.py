@@ -12,6 +12,7 @@ from datetime import datetime
 from datetime import timezone
 from enum import Enum
 from typing import Any
+from urllib.parse import urlparse
 from typing import Callable
 
 import yt_dlp
@@ -46,8 +47,35 @@ def get_backend_data_dir() -> str:
     return path
 
 BASE_DIR = get_backend_data_dir()
-_BACKEND_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
-FFMPEG_PATH = os.path.abspath(os.path.join(_BACKEND_SRC_DIR, "..", "ffmpeg"))
+
+
+def get_ffmpeg_path() -> str:
+    """Resolve the external FFmpeg directory for source and frozen modes.
+
+    In a PyInstaller one-file executable ``__file__`` points into the temporary
+    extraction directory, not beside ``MediaForgeBackend.exe``.  Resolving from
+    ``sys.executable`` in frozen mode keeps audio post-processing working in
+    both portable and installed layouts.
+    """
+    if getattr(sys, "frozen", False):
+        runtime_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates = (
+            os.path.join(runtime_dir, "ffmpeg"),
+            os.path.join(os.path.dirname(runtime_dir), "ffmpeg"),
+        )
+        # Production installs and portable archives place the binaries beside
+        # the EXE.  A source checkout's development build places the EXE in
+        # ``dist`` while keeping ``ffmpeg`` at the project root.
+        for candidate in candidates:
+            if os.path.isfile(os.path.join(candidate, "ffmpeg.exe")):
+                return os.path.abspath(candidate)
+        return os.path.abspath(candidates[0])
+    else:
+        runtime_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.abspath(os.path.join(runtime_dir, "ffmpeg"))
+
+
+FFMPEG_PATH = get_ffmpeg_path()
 
 DOWNLOAD_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
@@ -277,7 +305,17 @@ def write_settings(changes: dict[str, Any]) -> dict[str, Any]:
             settings["ffmpeg_path"] = str(changes.get("ffmpeg_path") or "").strip()
 
         if "backend_url" in changes:
-            settings["backend_url"] = str(changes.get("backend_url") or "").strip()
+            backend_url = str(changes.get("backend_url") or "").strip()
+            parsed = urlparse(backend_url)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.hostname.lower().strip("[]") not in {"127.0.0.1", "localhost", "::1"}
+            ):
+                raise ValueError(
+                    "Backend URL must use localhost or 127.0.0.1 for local-only security."
+                )
+            settings["backend_url"] = backend_url
 
         with open(SETTINGS_FILE, "w", encoding="utf-8") as settings_file:
             json.dump(settings, settings_file, indent=2, ensure_ascii=False)
@@ -705,7 +743,10 @@ def base_options(job_id: str | None = None, playlist: bool = False, download_dir
 
     options: dict[str, Any] = {
         "ffmpeg_location": FFMPEG_PATH,
-        "ignoreerrors": False,
+        # A playlist may contain private, removed, or region-blocked entries.
+        # Skip those entries and finish the available items; single-video
+        # downloads remain strict and fail on an extraction error.
+        "ignoreerrors": playlist,
         "noplaylist": not playlist,
         "outtmpl": build_output_template(playlist=playlist, download_dir=target_dir),
         "retries": 3,
@@ -731,18 +772,36 @@ def base_options(job_id: str | None = None, playlist: bool = False, download_dir
 
 
 def mp3_options(job_id: str | None = None, playlist: bool = False, download_dir: str | None = None) -> dict[str, Any]:
+    return audio_options(
+        "mp3",
+        job_id=job_id,
+        playlist=playlist,
+        download_dir=download_dir,
+    )
+
+
+def audio_options(
+    codec: str,
+    job_id: str | None = None,
+    playlist: bool = False,
+    download_dir: str | None = None,
+) -> dict[str, Any]:
+    """Build audio extraction options for the requested output codec.
+
+    FLAC preserves the decoded source without an additional lossy encode.  The
+    result can only be as faithful as the provider's source stream; converting
+    a lossy source to a lossless container cannot restore discarded data.
+    """
     options = base_options(job_id=job_id, playlist=playlist, download_dir=download_dir)
     options.update({
-        # Some YouTube client responses expose only a progressive A/V format
-        # rather than a separate audio-only stream.  Keep the audio-only
-        # preference, but fall back to the best available combined format so
-        # MP3 extraction still works when that is all YouTube provides.
+        # Prefer an audio-only source and fall back to the best available
+        # combined format when the provider does not expose one.
         "format": "bestaudio/best",
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "320",
+                "preferredcodec": codec,
+                "preferredquality": "320" if codec == "mp3" else "0",
             }
         ],
     })
@@ -798,6 +857,7 @@ def check_8k_available(url: str, options: dict[str, Any]) -> bool:
 def mode_options(mode: str, job_id: str | None = None, download_dir: str | None = None) -> tuple[str, dict[str, Any]]:
     modes: dict[str, tuple[str, dict[str, Any]]] = {
         "mp3": ("MP3", mp3_options(job_id=job_id, playlist=False, download_dir=download_dir)),
+        "flac": ("FLAC Lossless", audio_options("flac", job_id=job_id, playlist=False, download_dir=download_dir)),
         "1080p": ("MP4 1080p", video_options(job_id=job_id, max_height=1080, playlist=False, download_dir=download_dir)),
         "4k": ("MP4 4K", video_options(job_id=job_id, max_height=2160, playlist=False, download_dir=download_dir)),
         "8k": (
@@ -805,7 +865,7 @@ def mode_options(mode: str, job_id: str | None = None, download_dir: str | None 
             video_options(job_id=job_id, max_height=4320, playlist=False, download_dir=download_dir),
         ),
         "playlist_mp3": ("Playlist MP3", mp3_options(job_id=job_id, playlist=True, download_dir=download_dir)),
-        "playlist_video": ("Playlist Video", video_options(job_id=job_id, max_height=None, playlist=True, download_dir=download_dir)),
+        "playlist_flac": ("Playlist FLAC Lossless", audio_options("flac", job_id=job_id, playlist=True, download_dir=download_dir)),
     }
 
     if mode not in modes:

@@ -96,16 +96,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
                 title: message.title || "MediaForge",
                 message: message.message || "Download complete"
             }, () => {
-                if (chrome.runtime.lastError) {
-                    console.error("Notification error:", chrome.runtime.lastError.message);
-                }
+                // Reading lastError acknowledges Chrome's callback error without
+                // turning an optional notification into an extension error.
+                void chrome.runtime.lastError;
             });
-        } catch (error) {
-            console.error("Failed to create notification:", error);
+        } catch {
+            // Notifications are optional; a blocked or unavailable notification
+            // provider must not affect downloads or the service worker.
         }
     }
 
     if (message?.type === "KERZOX_OPEN_OPTIONS") {
-        chrome.runtime.openOptionsPage();
+        try {
+            chrome.runtime.openOptionsPage().catch(() => {});
+        } catch {
+            // The options page may be unavailable while the extension reloads.
+        }
     }
 });

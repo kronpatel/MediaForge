@@ -112,6 +112,7 @@ def _make_settings_page() -> SettingsPage:
     page._auto_start_companion_var = MagicMock()
     page._auto_start_backend_var = MagicMock()
     page._notifications_var = MagicMock()
+    page._clipboard_autodetect_var = MagicMock()
     page._poll_var = MagicMock()
     page._auto_check_var = MagicMock()
     page._check_startup_var = MagicMock()
@@ -145,6 +146,7 @@ def _set_widget_returns(page: SettingsPage, **overrides) -> None:
         auto_start_companion=False,
         auto_start_backend=True,
         notification_toggle=True,
+        clipboard_autodetect=True,
         backend_poll_interval=3,
         auto_check_updates=True,
         check_updates_startup=True,
@@ -165,6 +167,8 @@ def _set_widget_returns(page: SettingsPage, **overrides) -> None:
     page._auto_start_companion_var.get.return_value = defaults["auto_start_companion"]
     page._auto_start_backend_var.get.return_value = defaults["auto_start_backend"]
     page._notifications_var.get.return_value = defaults["notification_toggle"]
+    if hasattr(page, "_clipboard_autodetect_var") and page._clipboard_autodetect_var:
+        page._clipboard_autodetect_var.get.return_value = defaults["clipboard_autodetect"]
     page._poll_var.get.return_value = str(defaults["backend_poll_interval"])
     page._auto_check_var.get.return_value = defaults["auto_check_updates"]
     page._check_startup_var.get.return_value = defaults["check_updates_startup"]
@@ -422,6 +426,25 @@ class TestSaveClickReturnValue(unittest.TestCase):
                     with patch("settings_panel.os.path.isdir", return_value=True):
                         self.page._save_click()
         mock_load.assert_called_once()
+
+    def test_clipboard_autodetect_persists_on_save(self):
+        """BUG-08: Unchecking clipboard_autodetect writes False to local settings."""
+        saved_local = {}
+
+        def mock_write(data):
+            saved_local.update(data)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _set_widget_returns(self.page, download_folder=tmpdir, clipboard_autodetect=False)
+            with patch("settings_panel.os.path.isdir", return_value=True), \
+                 patch.dict(self.page._save_click.__globals__, {"write_local_settings": mock_write}), \
+                 patch.object(self.page, "_load_all_settings"), \
+                 patch.object(self.page, "_show_validation_error"):
+                res = self.page._save_click()
+                self.assertTrue(res)
+
+        self.assertIn("clipboard_autodetect", saved_local)
+        self.assertFalse(saved_local["clipboard_autodetect"])
 
 
 class TestDirtyFlag(unittest.TestCase):

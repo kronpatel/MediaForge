@@ -1419,5 +1419,37 @@ class TestSourceConstants(unittest.TestCase):
         self.assertEqual(_EMPTY_ACTIVE_SUBTITLE, "Downloads will appear here once started")
 
 
+class TestDirectDownloadEnqueue(unittest.TestCase):
+    def test_enqueue_defaults_to_mode_combo_selection(self):
+        from backend_manager import BackendStatus
+        page = _make_page()
+        page._mode_combo = MagicMock()
+        page._mode_combo.get.return_value = "MP3 Audio"
+        page.manager.status = BackendStatus.RUNNING
+        page.manager.queue_download.return_value = ({"id": "j1"}, None)
+
+        with unittest.mock.patch("queue_panel.threading.Thread") as mock_thread:
+            page._enqueue_urls(["https://youtu.be/test1234"], mode=None)
+            self.assertTrue(mock_thread.called)
+            target = mock_thread.call_args[1]["target"]
+            target()
+            page.manager.queue_download.assert_called_with("https://youtu.be/test1234", mode="mp3")
+
+    def test_enqueue_uses_explicit_mode_when_provided(self):
+        from backend_manager import BackendStatus
+        page = _make_page()
+        page._mode_combo = MagicMock()
+        page._mode_combo.get.return_value = "MP3 Audio"
+        page.manager.status = BackendStatus.RUNNING
+        page.manager.queue_download.return_value = ({"id": "j1"}, None)
+
+        with unittest.mock.patch("queue_panel.threading.Thread") as mock_thread:
+            page._enqueue_urls(["https://youtu.be/test1234"], mode="4k")
+            self.assertTrue(mock_thread.called)
+            target = mock_thread.call_args[1]["target"]
+            target()
+            page.manager.queue_download.assert_called_with("https://youtu.be/test1234", mode="4k")
+
+
 if __name__ == "__main__":
     unittest.main()
