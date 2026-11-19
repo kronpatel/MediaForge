@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dashboard and tray auto-update status integration.
 
 ### Fixed
+- Companion now discovers frozen `MediaForgeBackend.exe` in PID fallback when `psutil.net_connections()` is restricted (BUG-13).
 - MP4 quality selection now prefers adaptive MP4 video plus M4A audio.
 - 1080p, 4K, and 8K downloads no longer force YouTube's low-quality Android client.
 - FFmpeg MP4 merging verified with real 1080p output.
