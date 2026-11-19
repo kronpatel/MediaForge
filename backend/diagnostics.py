@@ -12,6 +12,7 @@ import shutil
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -46,14 +47,15 @@ if not logger.handlers:
 # ── Performance Metrics ──────────────────────────────────────────────────
 
 _perf_lock = threading.Lock()
+METRICS_MAXLEN = 200
 
 
 @dataclass
 class PerformanceMetrics:
-    download_speeds: list[float] = field(default_factory=list)
-    queue_waits: list[float] = field(default_factory=list)
-    recovery_times: list[float] = field(default_factory=list)
-    save_durations: list[float] = field(default_factory=list)
+    download_speeds: deque[float] = field(default_factory=lambda: deque(maxlen=METRICS_MAXLEN))
+    queue_waits: deque[float] = field(default_factory=lambda: deque(maxlen=METRICS_MAXLEN))
+    recovery_times: deque[float] = field(default_factory=lambda: deque(maxlen=METRICS_MAXLEN))
+    save_durations: deque[float] = field(default_factory=lambda: deque(maxlen=METRICS_MAXLEN))
 
     def record_download_speed(self, speed_mbps: float) -> None:
         with _perf_lock:

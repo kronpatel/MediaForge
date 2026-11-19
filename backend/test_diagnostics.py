@@ -8,6 +8,8 @@ import threading
 import time
 import unittest
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from diagnostics import (
     health_check,
     diagnostics_report,
@@ -20,6 +22,7 @@ from diagnostics import (
     recovery_dashboard_data,
     PerformanceMetrics,
     get_performance_metrics,
+    METRICS_MAXLEN,
 )
 
 from recovery import RecoveryMetrics, get_recovery_metrics
@@ -396,7 +399,43 @@ class TestPerformanceMetrics(unittest.TestCase):
             t.join()
 
         self.assertEqual(len(errors), 0)
-        self.assertEqual(self.metrics.snapshot()["download_speed_samples"], 400)
+        self.assertEqual(self.metrics.snapshot()["download_speed_samples"], METRICS_MAXLEN)
+
+    def test_bounded_metrics_maxlen(self):
+        """BUG-21: Metrics lists are bounded to METRICS_MAXLEN (200) and drop oldest entries."""
+        metrics = PerformanceMetrics()
+        total_to_add = METRICS_MAXLEN + 50  # 250 entries
+
+        for i in range(total_to_add):
+            metrics.record_download_speed(float(i))
+            metrics.record_queue_wait(float(i))
+            metrics.record_recovery_time(float(i))
+            metrics.record_save_duration(float(i) / 1000.0)
+
+        # 1. Assert len is capped at METRICS_MAXLEN
+        self.assertEqual(len(metrics.download_speeds), METRICS_MAXLEN)
+        self.assertEqual(len(metrics.queue_waits), METRICS_MAXLEN)
+        self.assertEqual(len(metrics.recovery_times), METRICS_MAXLEN)
+        self.assertEqual(len(metrics.save_durations), METRICS_MAXLEN)
+
+        # 2. Assert most recent entry is still present
+        self.assertEqual(metrics.download_speeds[-1], float(total_to_add - 1))
+        self.assertEqual(metrics.queue_waits[-1], float(total_to_add - 1))
+        self.assertEqual(metrics.recovery_times[-1], float(total_to_add - 1))
+        self.assertEqual(metrics.save_durations[-1], float(total_to_add - 1) / 1000.0)
+
+        # 3. Assert oldest entries (< 50) were dropped
+        self.assertEqual(metrics.download_speeds[0], 50.0)
+        self.assertEqual(metrics.queue_waits[0], 50.0)
+        self.assertEqual(metrics.recovery_times[0], 50.0)
+
+        # 4. Assert public methods still work and return sensible values
+        snap = metrics.snapshot()
+        self.assertEqual(snap["download_speed_samples"], METRICS_MAXLEN)
+        self.assertNotEqual(metrics.average_download_speed(), "0 MB/s")
+        self.assertNotEqual(metrics.average_queue_wait(), "0s")
+        self.assertNotEqual(metrics.average_recovery_time(), "0s")
+        self.assertNotEqual(metrics.average_save_duration(), "0s")
 
 
 class TestLogPrefixes(unittest.TestCase):
