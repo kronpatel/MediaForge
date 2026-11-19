@@ -594,17 +594,21 @@ class BackendManager:
         except (psutil.AccessDenied, PermissionError, RuntimeError):
             self._logger.warning("Cannot enumerate network connections — insufficient privileges.")
         
-        # 2. Fallback: scan running Python processes for backend/app.py
+        # 2. Fallback: scan running processes for MediaForgeBackend.exe or python backend/app.py
         try:
             for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 try:
-                    name = proc.info['name']
-                    if name and 'python' in name.lower():
-                        cmdline = proc.info['cmdline']
-                        if cmdline:
-                            cmdline_str = " ".join(cmdline).lower()
-                            if "app.py" in cmdline_str:
-                                return proc.info['pid']
+                    name = proc.info.get('name')
+                    if not name:
+                        continue
+                    name_lower = name.lower()
+                    if name_lower == "mediaforgebackend.exe":
+                        return proc.info['pid']
+                    if 'python' in name_lower:
+                        cmdline = proc.info.get('cmdline') or []
+                        cmdline_str = " ".join(cmdline).lower()
+                        if "app.py" in cmdline_str:
+                            return proc.info['pid']
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
         except Exception as exc:

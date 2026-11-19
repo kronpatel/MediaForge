@@ -220,5 +220,62 @@ class TestGetQueueStatusContract(unittest.TestCase):
         self.assertEqual(len(jobs), 6)
 
 
+class TestBug13ProcessDiscoveryFallback(unittest.TestCase):
+    """BUG-13: Process discovery fallback finds MediaForgeBackend.exe and python app.py."""
+
+    def setUp(self):
+        self.mgr = BackendManager(DummyLogger())
+
+    def _make_proc(self, pid: int, name: str, cmdline: list[str]):
+        mock = MagicMock()
+        mock.info = {"pid": pid, "name": name, "cmdline": cmdline}
+        return mock
+
+    def test_discover_backend_pid_finds_frozen_exe(self):
+        """Fallback scan finds MediaForgeBackend.exe when net_connections is restricted."""
+        import psutil
+        fake_proc = self._make_proc(4455, "MediaForgeBackend.exe", ["MediaForgeBackend.exe"])
+        with patch("psutil.net_connections", side_effect=psutil.AccessDenied("denied")), \
+             patch("psutil.process_iter", return_value=[fake_proc]):
+            pid = self.mgr._discover_backend_pid()
+        self.assertEqual(pid, 4455)
+
+    def test_discover_backend_pid_finds_python_app_py(self):
+        """Fallback scan finds python backend/app.py in source mode."""
+        import psutil
+        fake_proc = self._make_proc(6677, "python.exe", ["python", "backend/app.py"])
+        with patch("psutil.net_connections", side_effect=psutil.AccessDenied("denied")), \
+             patch("psutil.process_iter", return_value=[fake_proc]):
+            pid = self.mgr._discover_backend_pid()
+        self.assertEqual(pid, 6677)
+
+    def test_discover_backend_pid_ignores_unrelated_exe(self):
+        """Fallback scan ignores unrelated processes like notepad.exe or idle.py."""
+        import psutil
+        p1 = self._make_proc(1001, "notepad.exe", ["notepad.exe"])
+        p2 = self._make_proc(1002, "python.exe", ["python", "other_script.py"])
+        with patch("psutil.net_connections", side_effect=psutil.AccessDenied("denied")), \
+             patch("psutil.process_iter", return_value=[p1, p2]):
+            pid = self.mgr._discover_backend_pid()
+        self.assertIsNone(pid)
+
+    def test_discover_backend_pid_falls_back_on_permission_error(self):
+        """Fallback scan runs when net_connections raises PermissionError."""
+        import psutil
+        fake_proc = self._make_proc(7788, "MediaForgeBackend.exe", ["MediaForgeBackend.exe"])
+        with patch("psutil.net_connections", side_effect=PermissionError("denied")), \
+             patch("psutil.process_iter", return_value=[fake_proc]):
+            pid = self.mgr._discover_backend_pid()
+        self.assertEqual(pid, 7788)
+
+    def test_discover_backend_pid_returns_none_when_process_iter_fails(self):
+        """If process_iter raises, _discover_backend_pid returns None without crashing."""
+        import psutil
+        with patch("psutil.net_connections", side_effect=psutil.AccessDenied("denied")), \
+                patch("psutil.process_iter", side_effect=RuntimeError("boom")):
+            pid = self.mgr._discover_backend_pid()
+        self.assertIsNone(pid)
+
+
 if __name__ == "__main__":
     unittest.main()
