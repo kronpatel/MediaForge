@@ -634,6 +634,45 @@ class QueueRow(ctk.CTkFrame):
         self._prev_progress = None
 
 
+def compute_overall_progress_counts(
+    queue: list[dict[str, Any]],
+    history: list[dict[str, Any]] | None = None,
+) -> tuple[int, int, str]:
+    """Compute (completed_count, total_count, title_text) from queue and history.
+
+    BUG-23: Accurately counts completed jobs from history when queue items finish
+    and are archived by the backend.
+    """
+    hist = history or []
+    queue_completed = sum(1 for j in queue if j.get("status") == "completed")
+    history_completed = sum(1 for h in hist if h.get("status") == "completed")
+    completed = queue_completed + history_completed
+
+    active = [j for j in queue if j.get("status") == "downloading"]
+    pending_count = sum(
+        1 for j in queue
+        if j.get("status") in ("queued", "downloading", "paused", "starting", "retrying")
+    )
+    failed_count = sum(1 for j in queue if j.get("status") == "failed")
+
+    total = len(queue) if queue_completed > 0 else len(queue) + history_completed
+
+    if active:
+        title_text = active[0].get("label") or active[0].get("filename") or "Downloading…"
+    elif pending_count > 0:
+        title_text = f"{pending_count} pending"
+    elif total > 0 and completed == total:
+        title_text = "All downloads completed"
+    elif total > 0 and failed_count == total:
+        title_text = f"All {failed_count} downloads failed"
+    elif failed_count > 0:
+        title_text = f"{completed} completed, {failed_count} failed"
+    else:
+        title_text = "Queue idle"
+
+    return completed, total, title_text
+
+
 class QueuePage(BasePage):
     """
     Page displaying the scrollable list of active and pending download jobs.
@@ -1554,13 +1593,18 @@ class QueuePage(BasePage):
         self._overall_visible = False
         self._cached_overall: dict[str, Any] = {}
 
-    def _update_overall_progress(self, queue: list[dict[str, Any]]) -> None:
-        total = len(queue)
-        completed = sum(1 for j in queue if j.get("status") == "completed")
+    def _update_overall_progress(
+        self,
+        queue: list[dict[str, Any]],
+        history: list[dict[str, Any]] | None = None,
+    ) -> None:
+        history_list = history if history is not None else getattr(self, "_history_data", [])
+        completed, total, title_text = compute_overall_progress_counts(queue, history_list)
+
         active = [j for j in queue if j.get("status") == "downloading"]
         progress_values = [max(0.0, min(100.0, float(j.get("progress") or 0.0))) for j in queue
                           if j.get("status") in ("downloading", "queued")]
-        overall_pct = sum(progress_values) / len(progress_values) if progress_values else 0.0
+        overall_pct = sum(progress_values) / len(progress_values) if progress_values else (100.0 if completed == total and total > 0 else 0.0)
 
         has_jobs = total > 0
         if has_jobs and not self._overall_visible:
@@ -1608,24 +1652,18 @@ class QueuePage(BasePage):
             self._overall_filename_lbl.configure(text=filename)
             self._cached_overall["filename"] = filename
 
-        pending_count = sum(1 for j in queue if j.get("status") in ("queued", "downloading", "paused"))
-        failed_count = sum(1 for j in queue if j.get("status") == "failed")
-
         if active:
-            self._overall_title_lbl.configure(
-                text=active[0].get("label") or active[0].get("filename") or "Downloading\u2026",
-                text_color="#e8eaf0",
-            )
-        elif pending_count > 0:
-            self._overall_title_lbl.configure(text=f"{pending_count} pending", text_color="#f59e0b")
-        elif failed_count == total and total > 0:
-            self._overall_title_lbl.configure(text=f"All {failed_count} downloads failed", text_color="#ef4444")
-        elif completed == total and total > 0:
-            self._overall_title_lbl.configure(text="All downloads completed", text_color="#22c55e")
-        elif failed_count > 0:
-            self._overall_title_lbl.configure(text=f"{completed} completed, {failed_count} failed", text_color="#ef4444")
+            title_color = "#e8eaf0"
+        elif "pending" in title_text:
+            title_color = "#f59e0b"
+        elif "failed" in title_text:
+            title_color = "#ef4444"
+        elif "completed" in title_text.lower():
+            title_color = "#22c55e"
         else:
-            self._overall_title_lbl.configure(text="Queue idle", text_color="#8b92a8")
+            title_color = "#8b92a8"
+
+        self._overall_title_lbl.configure(text=title_text, text_color=title_color)
 
     def _update_statistics(self, queue: list[dict[str, Any]]) -> None:
         active = sum(1 for j in queue if j.get("status") == "downloading")
@@ -1710,6 +1748,7 @@ class QueuePage(BasePage):
         settings = data.get("settings", {})
         self._download_folder = settings.get("download_folder", "")
         self._queue_data = queue
+        self._history_data = data.get("history", [])
 
         q_hash = self._compute_queue_hash(queue)
         if q_hash == self._cached_hash:
