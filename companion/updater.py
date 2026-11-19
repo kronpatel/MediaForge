@@ -67,6 +67,25 @@ CACHE_FILE = os.path.join(get_companion_cache_dir(), "update_cache.json")
 UPDATES_DIR = get_companion_updates_dir()
 TEMP_DOWNLOAD_FILE = os.path.join(UPDATES_DIR, "update.tmp")
 FINAL_DOWNLOAD_FILE = os.path.join(UPDATES_DIR, "MediaForge_Portable.zip")
+BACKEND_DOWNLOAD_FILE = os.path.join(UPDATES_DIR, "MediaForgeBackend.exe.download")
+
+REPLACE_RETRY_ATTEMPTS = 5
+REPLACE_RETRY_DELAY = 0.2
+
+
+def _safe_replace(src: str, dst: str) -> None:
+    """Atomically replace dst with src, retrying on Windows PermissionError to handle PE handle release latency."""
+    last_exc = None
+    for _ in range(REPLACE_RETRY_ATTEMPTS):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            time.sleep(REPLACE_RETRY_DELAY)
+    if last_exc:
+        raise last_exc
+
 
 # Ensure necessary directories exist
 os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
@@ -100,6 +119,17 @@ class UpdateManager:
         self._published = "Never"
         self._asset_url = ""
         self._asset_size = 0
+        # Backend updates are deliberately tracked separately from the full
+        # Portable ZIP update.  This lets a packaged Companion refresh only
+        # MediaForgeBackend.exe without touching user settings or extension
+        # files.
+        self._backend_asset_url = ""
+        self._backend_asset_size = 0
+        self._backend_asset_digest = ""
+        self._backend_version = ""
+        self._backend_update_lock = threading.Lock()
+        self._backend_updating = False
+        self._backend_manager: Any = None
         self._last_checked = 0.0
         self._rate_limit_reset_until = 0.0
         self._html_url = ""
@@ -167,6 +197,27 @@ class UpdateManager:
     def get_latest_version(self) -> str:
         with self._lock:
             return self._latest_version
+
+    def attach_backend_manager(self, backend_manager: Any) -> None:
+        """Attach the lifecycle manager used for safe backend replacement."""
+        with self._lock:
+            self._backend_manager = backend_manager
+
+    def has_backend_update(self) -> bool:
+        """Return whether the GitHub release contains a newer backend EXE."""
+        with self._lock:
+            backend_version = self._backend_version
+            asset_url = self._backend_asset_url
+            manager = self._backend_manager
+        if not asset_url or not backend_version:
+            return False
+        current = COMPANION_VERSION
+        if manager is not None:
+            try:
+                current = manager.fetch_version() or current
+            except Exception:
+                pass
+        return self.is_newer_version(str(current), backend_version)
 
     def get_last_checked(self) -> float:
         with self._lock:
@@ -258,6 +309,7 @@ class UpdateManager:
                 if not force and has_cache and cache_age < 3600.0:
                     self.logger.info("[Updater] Using cached update metadata (less than 1 hour old).")
                     self._notify_current_state()
+                    self._schedule_backend_update()
                     return
 
                 # Fetch fresh from GitHub Releases API
@@ -277,8 +329,21 @@ class UpdateManager:
                 # Filter and validate installer assets (Task 1 & Task 4 & Task 5)
                 assets = release.get("assets", [])
                 compatible_assets = []
+                backend_asset = None
                 for idx, asset in enumerate(assets):
                     name = asset.get("name", "")
+
+                    # Backend EXEs are published alongside the portable ZIP.
+                    # Only accept uploaded, non-empty Windows binaries.
+                    if (
+                        isinstance(name, str)
+                        and name.lower().startswith("mediaforgebackend")
+                        and name.lower().endswith(".exe")
+                        and asset.get("state") == "uploaded"
+                        and int(asset.get("size") or 0) > 0
+                        and asset.get("browser_download_url")
+                    ):
+                        backend_asset = asset
                     
                     # Reject non-matching patterns (archives, source code, etc.)
                     if not (name.endswith(".zip") and "MediaForge_Portable" in name):
@@ -331,6 +396,19 @@ class UpdateManager:
                     self._published = published_at
                     self._asset_url = asset_url
                     self._asset_size = asset_size
+                    if backend_asset:
+                        digest = str(backend_asset.get("digest") or "")
+                        if digest.lower().startswith("sha256:"):
+                            digest = digest.split(":", 1)[1]
+                        self._backend_asset_url = backend_asset.get("browser_download_url", "")
+                        self._backend_asset_size = int(backend_asset.get("size") or 0)
+                        self._backend_asset_digest = digest.lower()
+                        self._backend_version = tag_name
+                    else:
+                        self._backend_asset_url = ""
+                        self._backend_asset_size = 0
+                        self._backend_asset_digest = ""
+                        self._backend_version = ""
                     self._last_checked = now
                     self._html_url = html_url
                     self._save_cache()
@@ -339,6 +417,7 @@ class UpdateManager:
                     self._checking = False
 
                 self._notify_current_state()
+                self._schedule_backend_update()
 
             except Exception as exc:
                 self.logger.warning(f"[Updater] Error checking for updates: {exc}")
@@ -504,6 +583,137 @@ class UpdateManager:
                     self._downloading = False
 
         threading.Thread(target=_downloader, name="UpdateDownloadWorker", daemon=True).start()
+
+    def _schedule_backend_update(self) -> None:
+        """Start a safe backend-only update when the release has one.
+
+        The operation is intentionally independent from the Portable ZIP
+        installer.  It runs only in a frozen build, only for a managed backend,
+        and only when the backend queue is empty.  No browser process or
+        browser profile is inspected or modified here.
+        """
+        from settings_panel import read_local_settings
+
+        if not read_local_settings(self.logger).get("auto_check_updates", True):
+            return
+        with self._backend_update_lock:
+            if self._backend_updating or not self.has_backend_update():
+                return
+            self._backend_updating = True
+
+        threading.Thread(
+            target=self._download_and_install_backend,
+            name="BackendUpdateWorker",
+            daemon=True,
+        ).start()
+
+    def _download_and_install_backend(self) -> None:
+        """Download, verify, atomically replace and restart the backend EXE."""
+        try:
+            if not getattr(sys, "frozen", False):
+                self.logger.info("[Updater] Backend binary update skipped in source mode.")
+                return
+
+            with self._lock:
+                manager = self._backend_manager
+                url = self._backend_asset_url
+                expected_size = self._backend_asset_size
+                expected_digest = self._backend_asset_digest
+                target_version = self._backend_version
+            if manager is None or not url:
+                return
+
+            backend_path = manager.get_backend_executable_path()
+            if not backend_path or not os.path.isfile(backend_path):
+                self.logger.warning("[Updater] Backend update skipped: binary is missing.")
+                return
+            if not manager.is_idle_for_update():
+                self.logger.info("[Updater] Backend update deferred: download queue is not idle.")
+                return
+
+            self._notify("Backend Downloading", 0.0)
+            session = self._get_session()
+            if not session:
+                raise RuntimeError("HTTP session closed.")
+
+            temp_path = BACKEND_DOWNLOAD_FILE + ".tmp"
+            for path in (temp_path, BACKEND_DOWNLOAD_FILE):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+
+            response = session.get(url, stream=True, timeout=30.0)
+            response.raise_for_status()
+            total = int(response.headers.get("content-length") or expected_size or 0)
+            downloaded = 0
+            with open(temp_path, "wb") as fh:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        fh.write(chunk)
+                        downloaded += len(chunk)
+                        self._notify(
+                            "Backend Downloading",
+                            min(100.0, downloaded * 100.0 / total) if total else 0.0,
+                        )
+
+            actual_size = os.path.getsize(temp_path)
+            if expected_size and actual_size != expected_size:
+                raise ValueError(
+                    f"Backend size mismatch: expected {expected_size}, got {actual_size}."
+                )
+            hasher = hashlib.sha256()
+            with open(temp_path, "rb") as fh:
+                while chunk := fh.read(1024 * 1024):
+                    hasher.update(chunk)
+            actual_digest = hasher.hexdigest().lower()
+            if expected_digest and actual_digest != expected_digest.lower():
+                raise ValueError("Backend SHA-256 verification failed.")
+
+            _safe_replace(temp_path, BACKEND_DOWNLOAD_FILE)
+            # Re-check just before stopping the service: a download may have
+            # started while the binary was being fetched.
+            if not manager.is_idle_for_update():
+                raise RuntimeError("Backend queue became active; update deferred.")
+
+            self._notify("Backend Updating", 100.0)
+            manager.stop()
+            backup_path = backend_path + ".backup"
+            try:
+                if os.path.exists(backup_path):
+                    os.remove(backup_path)
+                _safe_replace(backend_path, backup_path)
+                _safe_replace(BACKEND_DOWNLOAD_FILE, backend_path)
+                manager.start(allow_adopt=False)
+                if getattr(manager.status, "name", "") != "RUNNING":
+                    raise RuntimeError("Updated backend did not become healthy.")
+                os.remove(backup_path)
+            except Exception:
+                # Restore the known-good backend before reporting failure.
+                try:
+                    if os.path.exists(backend_path):
+                        os.remove(backend_path)
+                    if os.path.exists(backup_path):
+                        _safe_replace(backup_path, backend_path)
+                    manager.start(allow_adopt=False)
+                except Exception as rollback_error:
+                    self.logger.error(f"[Updater] Backend rollback failed: {rollback_error}")
+                raise
+
+            self.logger.info(f"[Updater] Backend updated successfully to {target_version}.")
+            self._notify("Backend Updated", 100.0)
+        except Exception as exc:
+            self.logger.warning(f"[Updater] Backend update failed or deferred: {exc}")
+            self._notify("Backend Failed", 0.0, str(exc))
+            try:
+                if os.path.exists(BACKEND_DOWNLOAD_FILE + ".tmp"):
+                    os.remove(BACKEND_DOWNLOAD_FILE + ".tmp")
+            except OSError:
+                pass
+        finally:
+            with self._backend_update_lock:
+                self._backend_updating = False
 
     def cancel_download(self) -> None:
         """Safely cancel the active download process, deleting the temp file and reverting progress."""
@@ -782,6 +992,10 @@ class UpdateManager:
             self._published = "Never"
             self._asset_url = ""
             self._asset_size = 0
+            self._backend_asset_url = ""
+            self._backend_asset_size = 0
+            self._backend_asset_digest = ""
+            self._backend_version = ""
             self._last_checked = 0.0
             self._rate_limit_reset_until = 0.0
             self._pending_install = False
@@ -809,6 +1023,10 @@ class UpdateManager:
             self._published = data.get("published", "Never")
             self._asset_url = data.get("asset_url", "")
             self._asset_size = int(data.get("asset_size") or 0)
+            self._backend_asset_url = data.get("backend_asset_url", "")
+            self._backend_asset_size = int(data.get("backend_asset_size") or 0)
+            self._backend_asset_digest = data.get("backend_asset_digest", "")
+            self._backend_version = data.get("backend_version", "")
             self._last_checked = float(data.get("last_checked") or 0.0)
             self._html_url = data.get("html_url", "")
             self._last_notified_version = data.get("last_notified_version", "")
@@ -883,6 +1101,10 @@ class UpdateManager:
             self._published = "Never"
             self._asset_url = ""
             self._asset_size = 0
+            self._backend_asset_url = ""
+            self._backend_asset_size = 0
+            self._backend_asset_digest = ""
+            self._backend_version = ""
             self._last_checked = 0.0
             self._rate_limit_reset_until = 0.0
             self._pending_install = False
@@ -903,6 +1125,10 @@ class UpdateManager:
                 "published": self._published,
                 "asset_url": self._asset_url,
                 "asset_size": self._asset_size,
+                "backend_asset_url": getattr(self, "_backend_asset_url", ""),
+                "backend_asset_size": getattr(self, "_backend_asset_size", 0),
+                "backend_asset_digest": getattr(self, "_backend_asset_digest", ""),
+                "backend_version": getattr(self, "_backend_version", ""),
                 "last_checked": self._last_checked,
                 "html_url": getattr(self, "_html_url", ""),
                 "last_notified_version": getattr(self, "_last_notified_version", ""),

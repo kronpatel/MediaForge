@@ -205,7 +205,7 @@ Cancel a running, queued, paused, or retrying job. Marks the job as `"cancelled"
 |---|---|---|
 | `id` | string | UUID hex |
 | `url` | string | Source URL |
-| `mode` | string | `mp3`, `1080p`, `4k`, `8k`, `playlist_mp3`, `playlist_video` |
+| `mode` | string | `mp3`, `flac`, `1080p`, `4k`, `8k`, `playlist_mp3`, `playlist_flac` |
 | `label` | string | Human-readable label |
 | `status` | string | `queued`, `downloading`, `running`, `paused`, `completed`, `failed`, `retrying`, `cancelled` |
 | `progress` | float | 0.0–100.0 |

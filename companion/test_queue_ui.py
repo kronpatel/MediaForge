@@ -252,6 +252,54 @@ class TestOverallProgress(unittest.TestCase):
         self.page.refresh(data)
         self.page._update_overall_progress.assert_not_called()
 
+    def test_overall_progress_all_completed_when_queue_empty_and_history_has_completed(self):
+        """BUG-23: When queue is empty and history has N completed items, completed is N and title is 'All downloads completed'."""
+        from queue_panel import compute_overall_progress_counts
+        history = [
+            {"id": "h1", "status": "completed"},
+            {"id": "h2", "status": "completed"},
+            {"id": "h3", "status": "completed"},
+        ]
+        completed, total, title = compute_overall_progress_counts([], history)
+        self.assertEqual(completed, 3)
+        self.assertEqual(total, 3)
+        self.assertEqual(title, "All downloads completed")
+
+    def test_overall_progress_partial_completion_shows_correct_fraction(self):
+        """BUG-23: When queue has 1 downloading job and history has 2 completed jobs, progress is 2 / 3 files."""
+        from queue_panel import compute_overall_progress_counts
+        queue = [{"id": "q1", "status": "downloading", "progress": 50.0}]
+        history = [
+            {"id": "h1", "status": "completed"},
+            {"id": "h2", "status": "completed"},
+        ]
+        completed, total, title = compute_overall_progress_counts(queue, history)
+        self.assertEqual(completed, 2)
+        self.assertEqual(total, 3)
+        self.assertEqual(title, "Downloading…")
+
+    def test_update_overall_progress_widget_all_completed(self):
+        """BUG-23: _update_overall_progress sets title to 'All downloads completed' when all are finished."""
+        page = _make_page()
+        page._overall_title_lbl = MagicMock()
+        page._overall_count_lbl = MagicMock()
+        page._overall_progress_bar = MagicMock()
+        page._overall_speed_lbl = MagicMock()
+        page._overall_eta_lbl = MagicMock()
+        page._overall_filename_lbl = MagicMock()
+        page._overall_frame = MagicMock()
+        page._overall_visible = False
+
+        history = [
+            {"id": "h1", "status": "completed"},
+            {"id": "h2", "status": "completed"},
+        ]
+        QueuePage._update_overall_progress(page, [], history)
+        page._overall_title_lbl.configure.assert_called_with(
+            text="All downloads completed", text_color="#22c55e"
+        )
+        page._overall_count_lbl.configure.assert_called_with(text="2 / 2 files")
+
 
 class TestIncrementalRows(unittest.TestCase):
     def setUp(self):
@@ -1417,6 +1465,38 @@ class TestSourceConstants(unittest.TestCase):
 
     def test_empty_active_subtitle_constant(self):
         self.assertEqual(_EMPTY_ACTIVE_SUBTITLE, "Downloads will appear here once started")
+
+
+class TestDirectDownloadEnqueue(unittest.TestCase):
+    def test_enqueue_defaults_to_mode_combo_selection(self):
+        from backend_manager import BackendStatus
+        page = _make_page()
+        page._mode_combo = MagicMock()
+        page._mode_combo.get.return_value = "MP3 Audio"
+        page.manager.status = BackendStatus.RUNNING
+        page.manager.queue_download.return_value = ({"id": "j1"}, None)
+
+        with unittest.mock.patch("queue_panel.threading.Thread") as mock_thread:
+            page._enqueue_urls(["https://youtu.be/test1234"], mode=None)
+            self.assertTrue(mock_thread.called)
+            target = mock_thread.call_args[1]["target"]
+            target()
+            page.manager.queue_download.assert_called_with("https://youtu.be/test1234", mode="mp3")
+
+    def test_enqueue_uses_explicit_mode_when_provided(self):
+        from backend_manager import BackendStatus
+        page = _make_page()
+        page._mode_combo = MagicMock()
+        page._mode_combo.get.return_value = "MP3 Audio"
+        page.manager.status = BackendStatus.RUNNING
+        page.manager.queue_download.return_value = ({"id": "j1"}, None)
+
+        with unittest.mock.patch("queue_panel.threading.Thread") as mock_thread:
+            page._enqueue_urls(["https://youtu.be/test1234"], mode="4k")
+            self.assertTrue(mock_thread.called)
+            target = mock_thread.call_args[1]["target"]
+            target()
+            page.manager.queue_download.assert_called_with("https://youtu.be/test1234", mode="4k")
 
 
 if __name__ == "__main__":

@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import os
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
+import tkinter as tk
 import customtkinter as ctk
 
 from backend_manager import BackendManager, BackendStatus
@@ -38,6 +39,9 @@ from notifications import (
 from updater import UpdateManager
 from installer import InstallerManager
 from extension_manager import register_badge_callback, unregister_badge_callback
+from drop_target import register_drop_target
+from url_paste import extract_urls
+from clipboard_monitor import ClipboardMonitor
 
 if TYPE_CHECKING:
     pass
@@ -245,11 +249,16 @@ class CompanionWindow(ctk.CTk):
         self._build_ui()
         self._register_queue_shortcuts()
 
+        # Direct URL paste / drag-and-drop
+        self._drop_target_revoke: Callable[[], None] = lambda: None
+        self._register_global_paste()
+
         # Pre-create managers (no blocking I/O here)
         self.scheduler: SchedulerManager | None = None
         self.updater: UpdateManager | None = None
         self.installer: InstallerManager | None = None
         self._dashboard_controller: DashboardController | None = None
+        self._clipboard_monitor: ClipboardMonitor | None = None
 
         # Build page instances (widgets only, no backend calls)
         self._pages: dict[str, BasePage] = {
@@ -283,6 +292,7 @@ class CompanionWindow(ctk.CTk):
 
         # Defer all heavy init until after the window is rendered
         self.after(150, self.start_background_services)
+        self.after(200, self._register_drop_target)
 
     def start_background_services(self) -> None:
         """Launch all background services as daemon threads. Runs on Tkinter thread
@@ -316,6 +326,16 @@ class CompanionWindow(ctk.CTk):
         self._dashboard_controller.register_page(self.scheduler)
         self._dashboard_controller.start()
 
+        # ── Clipboard Auto-Detection ─────────────────────────────────────
+        try:
+            self._clipboard_monitor = ClipboardMonitor(
+                on_url_detected=self._on_clipboard_url_detected,
+                is_enabled_fn=self._is_clipboard_autodetect_enabled,
+            )
+            self._clipboard_monitor.start()
+        except Exception as e:
+            self.logger.warning(f"[Clipboard] Failed to start clipboard monitor: {e}")
+
         # Stage remaining startups with 50ms gaps to reduce CPU spikes
         self.after(50, self._stage_scheduler_startup)
 
@@ -332,6 +352,11 @@ class CompanionWindow(ctk.CTk):
     def _stage_updater_startup(self) -> None:
         def _worker():
             self.updater = UpdateManager(logger=self.logger)
+            # The updater may replace only MediaForgeBackend.exe when a
+            # compatible backend asset is published.  It receives the
+            # lifecycle manager so it can stop/restart only our backend
+            # process; browser processes and profiles are never touched.
+            self.updater.attach_backend_manager(self._manager)
             self.updater.register_callback(self._on_updater_event)
             self.updater.start()
             self.logger.mark_timing("Updater Started")
@@ -674,6 +699,91 @@ class CompanionWindow(ctk.CTk):
         return "break"
 
     # ------------------------------------------------------------------
+    # Direct URL paste / drag-and-drop
+    # ------------------------------------------------------------------
+
+    def _register_global_paste(self) -> None:
+        """Bind Ctrl+V on the root window to queue clipboard URLs."""
+        self.bind("<Control-v>", self._on_global_paste)
+
+    def _on_global_paste(self, event) -> str | None:
+        """Paste clipboard URLs into the download queue when no text field
+        has focus (otherwise the widget handles the paste itself)."""
+        focused = self.focus_get()
+        if focused is not None and isinstance(focused, (tk.Entry, tk.Text)):
+            # Let the text widget handle the paste itself.
+            return None
+        try:
+            text = self.clipboard_get()
+        except tk.TclError:
+            return None
+        if not text:
+            return None
+        urls = extract_urls(text)
+        if not urls:
+            return None
+        queue_page = self._pages.get("Queue")
+        if queue_page is None or not hasattr(queue_page, "_enqueue_urls"):
+            return None
+        queue_page._enqueue_urls(urls)
+        return "break"
+
+    def _is_clipboard_autodetect_enabled(self) -> bool:
+        try:
+            from settings_panel import read_local_settings
+            settings = read_local_settings(self.logger)
+            return bool(settings.get("clipboard_autodetect", True))
+        except Exception:
+            return True
+
+    def _on_clipboard_url_detected(self, urls: list[str]) -> None:
+        """Dispatched from background monitor thread; marshals to Tkinter UI thread."""
+        if not urls:
+            return
+        self.after(0, lambda: self._handle_clipboard_urls(urls))
+
+    def _handle_clipboard_urls(self, urls: list[str]) -> None:
+        """Runs on Tkinter UI thread when new media URL is copied."""
+        first_url = urls[0]
+        queue_page = self._pages.get("Queue")
+        if queue_page and hasattr(queue_page, "set_detected_url"):
+            queue_page.set_detected_url(first_url)
+
+        try:
+            notif_manager = get_notification_manager()
+            notif_manager.publish(
+                category=CATEGORY_INFO,
+                title="MediaForge — Media URL Detected",
+                message=f"Detected link: {first_url[:50]}...\nReady in Queue to download.",
+                source=SOURCE_UI,
+            )
+        except Exception as e:
+            self.logger.debug(f"[Clipboard] Notification error: {e}")
+
+    def _register_drop_target(self) -> None:
+        """Register the main window as an OLE drop target for dragged URLs."""
+        queue_page = self._pages.get("Queue")
+        if queue_page is None:
+            return
+
+        def on_urls(urls: list[str]) -> None:
+            self.after(0, lambda: queue_page._enqueue_urls(list(urls)))
+
+        self._drop_target_revoke = register_drop_target(self.winfo_id(), on_urls)
+        self.bind("<Destroy>", self._on_window_destroy, add="+")
+
+    def _on_window_destroy(self, event) -> None:
+        if event.widget is not self:
+            return
+        revoke = self._drop_target_revoke
+        if revoke:
+            try:
+                revoke()
+            except Exception:
+                pass
+            self._drop_target_revoke = None
+
+    # ------------------------------------------------------------------
     # Unified status callback
     # ------------------------------------------------------------------
 
@@ -1006,6 +1116,8 @@ class CompanionWindow(ctk.CTk):
         # Stop updater thread cleanly (Phase 4.1)
         if hasattr(self, "updater") and self.updater:
             self.updater.shutdown()
+        if hasattr(self, "_clipboard_monitor") and self._clipboard_monitor:
+            self._clipboard_monitor.stop()
         # Threaded stop to prevent freezing on window destroy
         def _cleanup():
             if stop_backend:
@@ -1029,6 +1141,8 @@ class CompanionWindow(ctk.CTk):
         self.logger.info("Initiating complete exit sequence...")
 
         # 1. Stop dashboard poll controller
+        if hasattr(self, "_clipboard_monitor") and self._clipboard_monitor:
+            self._clipboard_monitor.stop()
         if hasattr(self, "_dashboard_controller") and self._dashboard_controller:
             self._dashboard_controller.shutdown()
 

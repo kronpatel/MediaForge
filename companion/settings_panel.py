@@ -63,6 +63,7 @@ DEFAULT_BACKEND_URL = "http://127.0.0.1:5000"
 MSG_INVALID_DOWNLOAD_FOLDER = "The selected Download Folder does not exist.\n\nPlease choose an existing folder before saving."
 MSG_INVALID_FFMPEG = "FFmpeg Path must point to an existing file/directory, or be left empty for system defaults."
 MSG_INVALID_BACKEND_URL = "Backend URL must be a valid HTTP/HTTPS address (e.g. http://127.0.0.1:5000)."
+MSG_NON_LOCAL_BACKEND_URL = "For security, Backend URL must use localhost or 127.0.0.1."
 MSG_INVALID_POLL = "Backend Poll Interval must be an integer between 1 and 60 seconds."
 MSG_INVALID_UPDATE_POLL = "Update Poll Interval must be an integer between 1 and 168 hours."
 MSG_INVALID_SCHEDULER_POLL = "Scheduler Poll Interval must be an integer between 1 and 60 seconds."
@@ -76,6 +77,7 @@ def default_local_settings() -> dict[str, Any]:
         "notification_toggle": True,
         "backend_poll_interval": 3,
         "theme": "Dark",
+        "clipboard_autodetect": True,
         # Phase 4.1 Auto-updates options
         "auto_check_updates": True,
         "update_poll_interval": 24,
@@ -174,6 +176,7 @@ class SettingsPage(BasePage):
         self._on_navigate = on_navigate_fn
         self._original_settings: dict[str, Any] = {}
         self._last_failed_field: str | None = None
+        self._clipboard_autodetect_var: Any = None
         
         self._build_ui()
         self._load_all_settings()
@@ -264,6 +267,9 @@ class SettingsPage(BasePage):
 
         self._notifications_var = ctk.BooleanVar()
         self._create_form_row_checkbox(self._form, "Show Notifications", "Enable system tray warning and success bubbles", self._notifications_var)
+
+        self._clipboard_autodetect_var = ctk.BooleanVar()
+        self._create_form_row_checkbox(self._form, "Clipboard Auto-Detect", "Automatically detect copied media URLs and offer to download", self._clipboard_autodetect_var)
 
         # ── Category: Appearance ──────────────────────────────────────────
         self._create_section_label(self._form, "Appearance")
@@ -556,6 +562,7 @@ class SettingsPage(BasePage):
             "auto_start_companion": local_settings.get("auto_start_companion", False),
             "auto_start_backend": local_settings.get("auto_start_backend", True),
             "notification_toggle": local_settings.get("notification_toggle", True),
+            "clipboard_autodetect": local_settings.get("clipboard_autodetect", True),
             "backend_poll_interval": local_settings.get("backend_poll_interval", 3),
             "auto_check_updates": local_settings.get("auto_check_updates", True),
             "update_poll_interval": local_settings.get("update_poll_interval", 24),
@@ -579,6 +586,8 @@ class SettingsPage(BasePage):
         self._auto_start_companion_var.set(self._original_settings["auto_start_companion"])
         self._auto_start_backend_var.set(self._original_settings["auto_start_backend"])
         self._notifications_var.set(self._original_settings["notification_toggle"])
+        if getattr(self, "_clipboard_autodetect_var", None) is not None:
+            self._clipboard_autodetect_var.set(self._original_settings.get("clipboard_autodetect", True))
         self._auto_check_var.set(self._original_settings["auto_check_updates"])
         self._check_startup_var.set(self._original_settings["check_updates_startup"])
         self._update_poll_var.set(str(self._original_settings["update_poll_interval"]))
@@ -603,6 +612,7 @@ class SettingsPage(BasePage):
             "auto_start_companion": self._auto_start_companion_var.get(),
             "auto_start_backend": self._auto_start_backend_var.get(),
             "notification_toggle": self._notifications_var.get(),
+            "clipboard_autodetect": self._clipboard_autodetect_var.get() if getattr(self, "_clipboard_autodetect_var", None) is not None else True,
             "backend_poll_interval": int(self._poll_var.get().strip() or "3"),
             "auto_check_updates": self._auto_check_var.get(),
             "check_updates_startup": self._check_startup_var.get(),
@@ -660,9 +670,18 @@ class SettingsPage(BasePage):
         if url != original_url:
             try:
                 parsed = urllib.parse.urlparse(url)
-                if not parsed.scheme or not parsed.netloc:
+                if (
+                    parsed.scheme not in ("http", "https")
+                    or not parsed.netloc
+                    or (parsed.hostname or "").lower().strip("[]")
+                    not in {"127.0.0.1", "localhost", "::1"}
+                ):
                     raise ValueError
             except Exception:
+                if url and (urllib.parse.urlparse(url).hostname or "").lower().strip("[]") not in {
+                    "127.0.0.1", "localhost", "::1"
+                }:
+                    return False, MSG_NON_LOCAL_BACKEND_URL, "backend_url"
                 return False, MSG_INVALID_BACKEND_URL, "backend_url"
 
         # 4. Polling rate must be 1–60 seconds
@@ -736,6 +755,7 @@ class SettingsPage(BasePage):
             "auto_start_companion": vals["auto_start_companion"],
             "auto_start_backend": vals["auto_start_backend"],
             "notification_toggle": vals["notification_toggle"],
+            "clipboard_autodetect": vals["clipboard_autodetect"],
             "backend_poll_interval": vals["backend_poll_interval"],
             "auto_check_updates": vals["auto_check_updates"],
             "check_updates_startup": vals["check_updates_startup"],

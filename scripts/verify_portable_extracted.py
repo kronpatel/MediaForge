@@ -14,6 +14,8 @@ EXPECTED_FILES = [
     "MediaForge.exe",
     "VERSION",
     "MediaForge Backend.bat",
+    "MediaForge Service.bat",
+    "MediaForgeService.exe",
     "backend/app.py",
     "backend/downloader.py",
     "ffmpeg/ffmpeg.exe",

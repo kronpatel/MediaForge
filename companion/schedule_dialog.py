@@ -16,11 +16,12 @@ _CLR_ACCENT_HOV = "#3a76e8"
 # Maps for Mode display names to keys
 MODE_MAP = {
     "Audio (MP3)": "mp3",
+    "Audio (FLAC Lossless)": "flac",
     "Video (1080p)": "1080p",
     "Video (4K)": "4k",
     "Video (8K)": "8k",
     "Playlist (MP3)": "playlist_mp3",
-    "Playlist (Video)": "playlist_video"
+    "Playlist (FLAC Lossless)": "playlist_flac",
 }
 
 REV_MODE_MAP = {v: k for k, v in MODE_MAP.items()}

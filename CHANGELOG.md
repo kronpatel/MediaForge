@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Installer result persistence and startup recovery after interrupted updates.
 - Installed-mode marker protection for AppData storage paths.
 - Dashboard and tray auto-update status integration.
+- Automatic backend EXE updates with queue-idle checks, SHA-256 verification,
+  atomic replacement, restart validation, and rollback protection.
+- Localhost-only backend binding, origin filtering, request limits, and safe
+  API error codes/messages.
+- Optional per-user Windows background task for automatic backend startup.
+- Focused audio output on MP3 320 kbps and FLAC lossless modes, including
+  working playlist variants.
 
 ### Fixed
 - Companion now discovers frozen `MediaForgeBackend.exe` in PID fallback when `psutil.net_connections()` is restricted (BUG-13).

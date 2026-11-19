@@ -658,6 +658,22 @@ class DashboardPage(BasePage):
         elif status == "Installer Not Found":
             status_text = "⚠ Installer Not Found"
             color = "#ef4444"
+        elif status == "Backend Downloading":
+            status_text = f"Backend update ({int(progress)}%)"
+            color = "#f59e0b"
+            subtitle_text = "Updating the download engine safely..."
+        elif status == "Backend Updating":
+            status_text = "Updating download engine..."
+            color = "#f59e0b"
+            subtitle_text = "Current downloads are protected."
+        elif status == "Backend Updated":
+            status_text = "Backend updated"
+            color = "#22c55e"
+            subtitle_text = "MediaForge download engine is up to date."
+        elif status == "Backend Failed":
+            status_text = "Backend update deferred"
+            color = "#f59e0b"
+            subtitle_text = "The current backend remains active."
         else:
             if has_up:
                 status_text = "⬇ Update Available"
@@ -1158,14 +1174,17 @@ class UpdateDialog:
         # Update button states based on status
         is_downloading = status == "Downloading"
         is_checking = status == "Checking"
+        is_backend_updating = status.startswith("Backend ")
         has_pending = self._updater.get_status() in ("Pending Install", "Completed")
 
-        self._check_btn.configure(state="disabled" if (is_checking or is_downloading) else "normal")
+        self._check_btn.configure(
+            state="disabled" if (is_checking or is_downloading or is_backend_updating) else "normal"
+        )
         self._download_btn.configure(
-            state="disabled" if (is_downloading or is_checking or not self._updater.has_update()) else "normal",
+            state="disabled" if (is_downloading or is_checking or is_backend_updating or not self._updater.has_update()) else "normal",
             text="Downloading\u2026" if is_downloading else "Download Update",
         )
-        self._install_btn.configure(state="normal" if has_pending else "disabled")
+        self._install_btn.configure(state="normal" if has_pending and not is_backend_updating else "disabled")
 
         # Status message
         if is_downloading:
@@ -1176,6 +1195,14 @@ class UpdateDialog:
             self._status_lbl.configure(text="Download complete. Ready to install.", text_color="#22c55e")
         elif status == "Completed":
             self._status_lbl.configure(text="Update installed successfully!", text_color="#22c55e")
+        elif status == "Backend Downloading":
+            self._status_lbl.configure(text=f"Backend update\u2026 {int(progress)}%", text_color="#f59e0b")
+        elif status == "Backend Updating":
+            self._status_lbl.configure(text="Updating download engine\u2026", text_color="#f59e0b")
+        elif status == "Backend Updated":
+            self._status_lbl.configure(text="Backend updated successfully.", text_color="#22c55e")
+        elif status == "Backend Failed":
+            self._status_lbl.configure(text="Backend update deferred; current backend remains active.", text_color="#f59e0b")
         elif status == "Failed":
             self._status_lbl.configure(text=f"Failed: {error_msg or 'Unknown error'}", text_color="#ef4444")
         elif status == "Cancelled":

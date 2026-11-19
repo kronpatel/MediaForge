@@ -13,6 +13,7 @@ REQUIRED_RESOURCES = [
     ("extension/manifest.json", "Extension manifest"),
     ("VERSION", "Project version file"),
     ("MediaForge Backend.bat", "Backend launcher script"),
+    ("MediaForge Service.bat", "Windows background service launcher"),
 ]
 
 

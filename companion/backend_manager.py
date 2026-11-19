@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from enum import Enum, auto
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import psutil  # noqa: F401 – retained for potential future process inspection
@@ -58,6 +58,11 @@ _ROOT_DIR = os.path.dirname(_COMPANION_DIR)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    """MediaForge's HTTP backend is intentionally local-machine only."""
+    return (host or "").lower().strip("[]") in {"127.0.0.1", "localhost", "::1"}
 
 # Centralized timing configuration (no magic numbers)
 STARTUP_TIMEOUT = 8.0          # seconds to wait for backend HTTP 200 on start
@@ -182,6 +187,51 @@ class BackendManager:
     @property
     def base_url(self) -> str:
         return f"http://{self._host}:{self._port}"
+
+    def get_backend_executable_path(self) -> str | None:
+        """Return the frozen backend executable path, if this is a packaged app.
+
+        The source-mode backend is launched from ``backend/app.py`` and must
+        not be replaced by the binary updater.  Keeping this decision here
+        prevents update code from accidentally touching a user's source tree.
+        """
+        if not getattr(sys, "frozen", False):
+            return None
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        return os.path.join(exe_dir, "MediaForgeBackend.exe")
+
+    def is_idle_for_update(self) -> bool:
+        """Return True only when the managed backend has no queued work.
+
+        A failed request is treated as busy/unsafe.  Automatic replacement
+        must never restart the backend while a download may be active.
+        """
+        with self._lock:
+            if self._status != BackendStatus.RUNNING or not self._is_managed:
+                return False
+
+        resp = self._send_request("GET", "/queue", timeout=HTTP_TIMEOUT)
+        if resp is None or resp.status_code != 200:
+            return False
+        try:
+            data = resp.json()
+            if not data.get("success"):
+                return False
+            queue_data = data.get("queue")
+            if isinstance(queue_data, dict):
+                jobs = []
+                if queue_data.get("active"):
+                    jobs.append(queue_data["active"])
+                jobs.extend(queue_data.get("queued", []))
+                jobs.extend(queue_data.get("paused", []))
+                jobs.extend(queue_data.get("starting", []))
+                jobs.extend(queue_data.get("retrying", []))
+                return not jobs
+            if isinstance(queue_data, list):
+                return not queue_data
+        except (AttributeError, TypeError, ValueError):
+            pass
+        return False
 
     @property
     def status(self) -> BackendStatus:
@@ -421,10 +471,15 @@ class BackendManager:
                 raw_url: str = data.get("backend_url", "")
                 if raw_url:
                     parsed = urlparse(raw_url)
-                    if parsed.hostname:
+                    if parsed.hostname and _is_loopback_host(parsed.hostname):
                         host = parsed.hostname
-                    if parsed.port:
-                        port = parsed.port
+                        if parsed.port:
+                            port = parsed.port
+                    elif parsed.hostname:
+                        self._logger.warning(
+                            f"Rejected non-local backend host {parsed.hostname}; "
+                            "using 127.0.0.1 instead."
+                        )
             except Exception:  # noqa: BLE001
                 pass  # silently fall back to defaults
 
@@ -863,6 +918,42 @@ class BackendManager:
             except Exception:
                 pass
         return False
+
+    def queue_download(
+        self,
+        url: str,
+        mode: str = "1080p",
+        retries: int = 2,
+        output_folder: str | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Queue a new download via the backend ``POST /download`` endpoint.
+
+        Returns ``(job_dict, None)`` on success, or ``(None, error_message)``
+        when the backend is unreachable or rejects the request.  The HTTP call
+        runs on whatever thread invokes it — callers doing UI work should
+        dispatch to a worker thread and marshal results back with ``after(0)``.
+        """
+        resp = self._send_request(
+            "POST",
+            "/download",
+            json={"url": url, "mode": mode, "retries": retries, "output_folder": output_folder},
+            timeout=HTTP_TIMEOUT,
+        )
+        if resp is None:
+            return None, "Could not reach the backend. Make sure it is running."
+
+        try:
+            data = resp.json()
+        except ValueError:
+            return None, "Invalid response from the backend."
+
+        if resp.status_code in (200, 202) and data.get("success"):
+            job = data.get("job")
+            if isinstance(job, dict):
+                return job, None
+            return None, "Backend accepted the download but returned no job."
+
+        return None, data.get("message", "Download was rejected by the backend.")
 
     # ------------------------------------------------------------------
     # Process lifecycle helper methods

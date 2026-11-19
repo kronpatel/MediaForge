@@ -39,9 +39,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "dist\MediaForge.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\MediaForgeBackend.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\MediaForgeService.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "VERSION"; DestDir: "{app}"; Flags: ignoreversion
 Source: "installed_mode.marker"; DestDir: "{app}"; Flags: ignoreversion
 Source: "MediaForge Backend.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "MediaForge Service.bat"; DestDir: "{app}"; Flags: ignoreversion
 ; Ship only runtime backend modules.  Do not install tests, caches, or Python
 ; bytecode from the source checkout into the production installation.
 Source: "backend\app.py"; DestDir: "{app}\backend"; Flags: ignoreversion

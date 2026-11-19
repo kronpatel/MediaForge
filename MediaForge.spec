@@ -215,3 +215,49 @@ backend_exe = EXE(
     entitlements_file=None,
     icon=os.path.join(RESOURCES, "icon.ico"),
 )
+
+# ---------------------------------------------------------------------------
+# MediaForgeService — user-level Windows background task controller.
+# It registers MediaForgeBackend.exe with Task Scheduler under the logged-in
+# user, preserving access to that user's settings and download folders.
+# ---------------------------------------------------------------------------
+service_a = Analysis(
+    [os.path.join(COMPANION, "background_service.py")],
+    pathex=[ROOT, COMPANION],
+    binaries=[],
+    datas=[],
+    hiddenimports=["argparse", "os", "subprocess", "sys", "dataclasses"],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=["tkinter", "customtkinter", "pystray", "PIL"],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+service_pyz = PYZ(service_a.pure, service_a.zipped_data, cipher=block_cipher)
+
+service_exe = EXE(
+    service_pyz,
+    service_a.scripts,
+    service_a.binaries,
+    service_a.zipfiles,
+    service_a.datas,
+    [],
+    name="MediaForgeService",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=os.path.join(RESOURCES, "icon.ico"),
+)

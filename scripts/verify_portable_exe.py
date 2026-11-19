@@ -35,8 +35,10 @@ RECURSIVE_INCLUDES = {
 FILE_INCLUDES = {
     "dist/MediaForge.exe": "MediaForge.exe",
     "dist/MediaForgeBackend.exe": "MediaForgeBackend.exe",
+    "dist/MediaForgeService.exe": "MediaForgeService.exe",
     "VERSION": "VERSION",
     "MediaForge Backend.bat": "MediaForge Backend.bat",
+    "MediaForge Service.bat": "MediaForge Service.bat",
 }
 
 EXCLUDE_DIRS = {"__pycache__", ".pytest_cache", "reports"}

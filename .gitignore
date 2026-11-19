@@ -46,6 +46,8 @@ backend/queue_state.json
 opencode.json
 
 # Development audit & phase reports
+Project-Doc/
+bugs.md
 backend/reports/
 FINAL_*.md
 GIT_RELEASE_PREPARATION.md
@@ -74,5 +76,4 @@ install_lowest.log
 .claude/
 
 NUL
-Project-Doc/
 updates/
