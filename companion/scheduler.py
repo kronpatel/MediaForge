@@ -351,18 +351,18 @@ class SchedulerManager:
             
         for sched_uuid, b_job_id in active_map.items():
             # Find in active queue or history
-            in_queue = next((j for j in queue if j["id"] == b_job_id), None)
-            in_history = next((h for h in history if h["id"] == b_job_id), None)
-            
+            in_queue = next((j for j in queue if j.get("id") == b_job_id), None)
+            in_history = next((h for h in history if h.get("id") == b_job_id), None)
+
             if in_queue:
                 # Still running or pending download
-                status = in_queue["status"]
-                progress = in_queue["progress"]
+                status = in_queue.get("status")
+                progress = in_queue.get("progress", 0.0)
                 self._notify("Schedule Progress", {"uuid": sched_uuid, "status": status, "progress": progress})
-                
+
             elif in_history:
                 # Finished downloading!
-                status = in_history["status"]
+                status = in_history.get("status")
                 
                 # Cleanup active mapping
                 with self._lock:

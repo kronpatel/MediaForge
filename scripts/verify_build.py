@@ -7,19 +7,24 @@ import zipfile
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+REQUIRED_ARTIFACTS = [
+    "dist/MediaForge.exe",
+    "dist/MediaForgeBackend.exe",
+    "dist/MediaForgeService.exe",
+]
 
-def check_exe(rel_path):
-    full_path = os.path.join(PROJECT_ROOT, rel_path)
+
+def check_exe(rel_path, base_dir=PROJECT_ROOT):
+    full_path = os.path.join(base_dir, rel_path)
     if not os.path.exists(full_path):
         return f"MISSING: {rel_path}"
     if os.path.getsize(full_path) == 0:
         return f"EMPTY: {rel_path}"
-    actual_path = os.path.realpath(full_path)
     return None
 
 
-def check_portable_zip(rel_path):
-    full_path = os.path.join(PROJECT_ROOT, rel_path)
+def check_portable_zip(rel_path, base_dir=PROJECT_ROOT):
+    full_path = os.path.join(base_dir, rel_path)
     if not os.path.exists(full_path):
         return f"MISSING: {rel_path}"
     if os.path.getsize(full_path) == 0:
@@ -28,10 +33,26 @@ def check_portable_zip(rel_path):
         with zipfile.ZipFile(full_path, "r") as zf:
             names = zf.namelist()
             if not names:
-                return "EMPTY_ZIP: {rel_path} (no files inside)"
+                return f"EMPTY_ZIP: {rel_path} (no files inside)"
     except zipfile.BadZipFile:
         return f"CORRUPT: {rel_path} (not a valid ZIP)"
     return None
+
+
+def verify_artifacts(base_dir=PROJECT_ROOT) -> list[str]:
+    """Verify all required build EXEs exist and are non-empty."""
+    errors = []
+    for exe_path in REQUIRED_ARTIFACTS:
+        err = check_exe(exe_path, base_dir=base_dir)
+        if err:
+            errors.append(err)
+            print(f"  FAIL  {exe_path}")
+        else:
+            exe_full = os.path.join(base_dir, exe_path)
+            size = os.path.getsize(exe_full)
+            size_mb = size / (1024 * 1024)
+            print(f"  OK    {exe_path} ({size_mb:.1f} MB)")
+    return errors
 
 
 def main():
@@ -39,23 +60,9 @@ def main():
     parser.add_argument("--release", action="store_true", help="Also verify release artifacts")
     args = parser.parse_args()
 
-    errors = []
-
     print("[verify_build] Verifying build artifacts...")
 
-    # Check EXE
-    exe_path = "dist/MediaForge.exe"
-    err = check_exe(exe_path)
-    if err:
-        errors.append(err)
-        print(f"  FAIL  {exe_path}")
-
-    size = 0
-    exe_full = os.path.join(PROJECT_ROOT, exe_path)
-    if os.path.exists(exe_full):
-        size = os.path.getsize(exe_full)
-        size_mb = size / (1024 * 1024)
-        print(f"  OK    {exe_path} ({size_mb:.1f} MB)")
+    errors = verify_artifacts()
 
     if args.release:
         print()

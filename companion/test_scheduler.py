@@ -1136,5 +1136,53 @@ class TestPerRequestOutputFolder(unittest.TestCase):
                          "Global download_folder must not be mutated per job")
 
 
+class TestSafeIdIndexingInRefresh(unittest.TestCase):
+    """BUG-22: refresh() safely uses .get('id') and handles missing 'id' without KeyError."""
+
+    def setUp(self):
+        self.mgr = _make_scheduler()
+
+    def tearDown(self):
+        self.mgr.shutdown()
+
+    def test_refresh_handles_missing_id_keys_without_keyerror(self):
+        """Malformed queue and history items lacking 'id' must not raise KeyError."""
+        self.mgr._active_jobs["sched-1"] = "job-valid"
+
+        malformed_data = {
+            "offline": False,
+            "queue": [
+                {"label": "Malformed item lacking id key"},
+                {"id": "job-valid", "status": "downloading", "progress": 55.0},
+            ],
+            "history": [
+                {"title": "History item without id"},
+                {"id": "job-other", "status": "completed"},
+            ],
+        }
+
+        try:
+            self.mgr.refresh(malformed_data)
+        except KeyError as exc:
+            self.fail(f"refresh() raised unexpected KeyError: {exc}")
+
+    def test_refresh_matches_valid_job_when_present(self):
+        """Valid jobs are correctly tracked and progress is notified."""
+        self.mgr._active_jobs["sched-1"] = "job-valid"
+        notifications = []
+        self.mgr._notify = MagicMock(side_effect=lambda name, payload: notifications.append((name, payload)))
+
+        data = {
+            "offline": False,
+            "queue": [
+                {"id": "job-valid", "status": "downloading", "progress": 75.0},
+            ],
+            "history": [],
+        }
+
+        self.mgr.refresh(data)
+        self.assertTrue(any(n[0] == "Schedule Progress" and n[1]["uuid"] == "sched-1" for n in notifications))
+
+
 if __name__ == "__main__":
     unittest.main()
